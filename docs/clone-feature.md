@@ -321,6 +321,70 @@ pub fn display_clone_results(results: Vec<CloneResult>, detailed: bool) {
 4. **`src/git.rs`** - Add CloneResult types and clone/update functions
 5. **`src/output.rs`** - Add clone results display function
 
+## Authentication Requirements
+
+The clone feature requires GitHub Personal Access Token (PAT) authentication to access the GitHub API.
+
+### Token File Setup
+
+1. **Create token directory:**
+   ```bash
+   mkdir -p ~/.config/github/tokens
+   ```
+
+2. **Generate GitHub PAT:**
+   - Go to GitHub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)
+   - Click "Generate new token (classic)"
+   - Give it a descriptive name (e.g., "gx-clone-token")
+   - Select required scopes:
+     - **`public_repo`** - for public repositories only
+     - **`repo`** - for both public and private repositories
+   - Click "Generate token" and **copy the token**
+
+3. **Save token to file:**
+   ```bash
+   echo "your_token_here" > ~/.config/github/tokens/{user_or_org}
+   ```
+
+   Replace `{user_or_org}` with the GitHub username or organization name you want to clone from.
+
+### Token File Examples
+
+```bash
+# For scottidler user/org
+echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/scottidler
+
+# For gx-testing org
+echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/gx-testing
+
+# For company org
+echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/my-company
+```
+
+### Using Symlinks for Shared Tokens
+
+If you want to use the same token for multiple organizations:
+
+```bash
+# Create symlink to reuse existing token
+ln -s scottidler ~/.config/github/tokens/gx-testing
+```
+
+### Token Permissions
+
+The token needs the following GitHub API access:
+- **Read access to repositories** (public_repo or repo scope)
+- **Read access to organization metadata** (included in repo scopes)
+
+### Authentication Error Handling
+
+If authentication fails, you'll see an error like:
+```
+Error: Failed to read token from ~/.config/github/tokens/gx-testing
+```
+
+This means you need to create the token file for that specific user/organization.
+
 ## Key Behaviors
 
 - **Working Directory**: Operates in current directory unless `--cwd` specified
@@ -340,8 +404,16 @@ Use the `gx-testing` GitHub organization for comprehensive testing of the clone 
 ### Setup Requirements
 
 1. **Authentication**: Create token file at `~/.config/github/tokens/gx-testing`
+   ```bash
+   # Option 1: Create new token file
+   echo "your_github_token" > ~/.config/github/tokens/gx-testing
+
+   # Option 2: Use symlink to existing token
+   ln -s scottidler ~/.config/github/tokens/gx-testing
+   ```
+
 2. **Test Workspace**: Use temporary directory for testing to avoid conflicts
-3. **Test Repositories**: The `gx-testing` org should contain:
+3. **Test Repositories**: The `gx-testing` org contains:
    - Multiple active repositories
    - At least one archived repository
    - Repositories with different default branches (main, master, develop)
