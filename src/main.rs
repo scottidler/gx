@@ -14,6 +14,9 @@ mod git;
 mod output;
 mod repo;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use cli::{Cli, Commands};
 use config::Config;
 use output::StatusOptions;
@@ -233,6 +236,7 @@ fn get_nproc() -> Option<usize> {
 
 fn main() -> Result<()> {
     // Setup logging first
+    // Test comment added by AI agent
     setup_logging()
         .context("Failed to setup logging")?;
 

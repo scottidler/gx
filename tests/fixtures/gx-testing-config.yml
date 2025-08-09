@@ -1,0 +1,14 @@
+# Test configuration for gx-testing organization
+default_user_org: gx-testing
+parallelism: 2
+repo_discovery:
+  max_depth: 3
+output:
+  use_emoji: true
+  use_colors: true
+  detailed: false
+branches:
+  default_base: main
+logging:
+  level: debug
+  file: gx-test.log

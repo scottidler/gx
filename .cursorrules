@@ -1,0 +1,13 @@
+# Project Rules for Cursor AI Agent
+
+## Code Quality
+- After making any changes to files, always run `whitespace -r` to clean up trailing whitespace
+- When creating or modifying files, ensure proper formatting and whitespace handling
+
+## File Operations
+- When writing new files or editing existing files, follow up with whitespace cleanup
+- Use the terminal command tool to run `whitespace -r` after file modifications
+
+## Automation
+- Remember to execute whitespace cleanup as part of the development workflow
+- This helps maintain consistent code formatting across the project
