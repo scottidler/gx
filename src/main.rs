@@ -11,6 +11,7 @@ use std::process::Command;
 mod cli;
 mod config;
 mod git;
+mod github;
 mod output;
 mod repo;
 
@@ -68,6 +69,13 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             patterns,
         } => {
             process_checkout_command(cli, config, *create_branch, from_branch.as_deref(), branch_name, *stash, patterns)
+        }
+        Commands::Clone {
+            user_or_org,
+            include_archived,
+            patterns,
+        } => {
+            process_clone_command(cli, config, user_or_org, *include_archived, patterns)
         }
     }
 }
@@ -208,6 +216,89 @@ fn process_checkout_command(
     Ok(())
 }
 
+fn process_clone_command(
+    cli: &Cli,
+    config: &Config,
+    user_or_org: &str,
+    include_archived: bool,
+    patterns: &[String],
+) -> Result<()> {
+    info!("Processing clone command for user/org '{}' with {} patterns", user_or_org, patterns.len());
+
+    // Determine parallelism
+    let parallelism = cli.parallel
+        .or_else(|| get_parallelism_from_config(config))
+        .unwrap_or_else(|| get_nproc().unwrap_or(4));
+
+    debug!("Using parallelism: {}", parallelism);
+
+    // Set rayon thread pool size
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(parallelism)
+        .build_global()
+        .context("Failed to initialize thread pool")?;
+
+    // 1. Get repositories from GitHub
+    let all_repos = github::get_user_repos(user_or_org, include_archived)
+        .context("Failed to get repositories from GitHub")?;
+
+    info!("Found {} repositories for {}", all_repos.len(), user_or_org);
+
+    if all_repos.is_empty() {
+        println!("🔍 No repositories found for {}", user_or_org);
+        return Ok(());
+    }
+
+    // 2. Filter repositories using existing repo filtering logic
+    // Convert repo slugs to fake Repo objects for filtering
+    let fake_repos: Vec<repo::Repo> = all_repos
+        .iter()
+        .map(|slug| {
+            let parts: Vec<&str> = slug.split('/').collect();
+            let name = if parts.len() == 2 { parts[1] } else { slug };
+            repo::Repo {
+                path: PathBuf::from(name), // Not used for filtering
+                name: name.to_string(),
+                slug: Some(slug.clone()),
+            }
+        })
+        .collect();
+
+    let filtered_repos = repo::filter_repos(fake_repos, patterns);
+    let filtered_slugs: Vec<String> = filtered_repos
+        .iter()
+        .filter_map(|r| r.slug.clone())
+        .collect();
+
+    info!("Filtered to {} repositories", filtered_slugs.len());
+
+    if filtered_slugs.is_empty() {
+        println!("🔍 No repositories found matching the patterns");
+        return Ok(());
+    }
+
+    // 3. Read GitHub token
+    let token = github::read_token(user_or_org)
+        .context("Failed to read GitHub token")?;
+
+    // 4. Process repositories in parallel
+    let results: Vec<git::CloneResult> = filtered_slugs
+        .par_iter()
+        .map(|repo_slug| git::clone_or_update_repo(repo_slug, user_or_org, &token))
+        .collect();
+
+    // 5. Display results
+    output::display_clone_results(results.clone(), false); // TODO: Add detailed flag
+
+    // 6. Exit with error count
+    let error_count = results.iter().filter(|r| r.error.is_some()).count();
+    if error_count > 0 {
+        std::process::exit(error_count.min(255) as i32);
+    }
+
+    Ok(())
+}
+
 /// Get parallelism from config, handling "nproc" string
 fn get_parallelism_from_config(_config: &Config) -> Option<usize> {
     // This would need to be implemented once we have the config structure
@@ -236,12 +327,18 @@ fn get_nproc() -> Option<usize> {
 
 fn main() -> Result<()> {
     // Setup logging first
-    // Test comment added by AI agent
     setup_logging()
         .context("Failed to setup logging")?;
 
     // Parse CLI arguments
     let cli = Cli::parse();
+
+    // ONLY change directory if user explicitly provided --cwd
+    if let Some(cwd) = &cli.cwd {
+        env::set_current_dir(cwd)
+            .context(format!("Failed to change to directory: {}", cwd.display()))?;
+        info!("Changed working directory to: {}", cwd.display());
+    }
 
     // Load configuration
     let config = Config::load(cli.config.as_ref())

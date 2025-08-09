@@ -1,4 +1,4 @@
-use crate::git::{RepoStatus, StatusChanges, RemoteStatus, CheckoutResult, CheckoutAction};
+use crate::git::{RepoStatus, StatusChanges, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
 use colored::*;
 
 #[derive(Debug)]
@@ -348,6 +348,106 @@ fn display_checkout_summary(success_count: usize, error_count: usize) {
 
     if success_count > 0 {
         parts.push(format!("{} completed", success_count));
+    }
+    if error_count > 0 {
+        parts.push(format!("{} errors", error_count));
+    }
+
+    println!("📊 {}", parts.join(", "));
+}
+
+/// Display clone results with summary
+pub fn display_clone_results(results: Vec<CloneResult>, detailed: bool) {
+    let mut cloned_count = 0;
+    let mut updated_count = 0;
+    let mut stashed_count = 0;
+    let mut directory_conflict_count = 0;
+    let mut different_remote_count = 0;
+    let mut error_count = 0;
+
+    for result in &results {
+        match &result.error {
+            Some(err) => {
+                display_clone_error(&result, err, detailed);
+                error_count += 1;
+            }
+            None => {
+                match result.action {
+                    CloneAction::Cloned => {
+                        display_clone_success(&result, "📥", "Cloned");
+                        cloned_count += 1;
+                    }
+                    CloneAction::Updated => {
+                        display_clone_success(&result, "🔄", "Updated");
+                        updated_count += 1;
+                    }
+                    CloneAction::Stashed => {
+                        display_clone_success(&result, "📦", "Updated (stashed changes)");
+                        stashed_count += 1;
+                    }
+                    CloneAction::DirectoryNotGitRepo => {
+                        display_clone_warning(&result, "🏠", "Directory exists but not a git repo");
+                        directory_conflict_count += 1;
+                    }
+                    CloneAction::DifferentRemote => {
+                        display_clone_warning(&result, "🔗", "Different remote URL detected");
+                        different_remote_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Display summary
+    display_clone_summary(
+        cloned_count,
+        updated_count,
+        stashed_count,
+        directory_conflict_count,
+        different_remote_count,
+        error_count,
+    );
+}
+
+fn display_clone_success(result: &CloneResult, emoji: &str, action: &str) {
+    println!("{} {} {}", emoji, result.repo_slug.cyan().bold(), action);
+}
+
+fn display_clone_warning(result: &CloneResult, emoji: &str, message: &str) {
+    println!("{} {} {}", emoji, result.repo_slug.yellow().bold(), message);
+}
+
+fn display_clone_error(result: &CloneResult, error: &str, detailed: bool) {
+    println!("⚠️  {} Failed", result.repo_slug.red().bold());
+    if detailed {
+        println!("    Error: {}", error.red());
+    }
+}
+
+fn display_clone_summary(
+    cloned_count: usize,
+    updated_count: usize,
+    stashed_count: usize,
+    directory_conflict_count: usize,
+    different_remote_count: usize,
+    error_count: usize,
+) {
+    let mut parts = Vec::new();
+
+    if cloned_count > 0 {
+        parts.push(format!("{} cloned", cloned_count));
+    }
+    if updated_count > 0 {
+        parts.push(format!("{} updated", updated_count));
+    }
+    if stashed_count > 0 {
+        parts.push(format!("{} updated (with stash)", stashed_count));
+    }
+    if directory_conflict_count > 0 {
+        parts.push(format!("{} directory conflicts", directory_conflict_count));
+    }
+    if different_remote_count > 0 {
+        parts.push(format!("{} different remotes", different_remote_count));
     }
     if error_count > 0 {
         parts.push(format!("{} errors", error_count));

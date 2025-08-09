@@ -50,6 +50,22 @@ pub enum CheckoutAction {
     HasUntracked,     // Has untracked files after checkout
 }
 
+#[derive(Debug, Clone)]
+pub struct CloneResult {
+    pub repo_slug: String,  // "user/repo"
+    pub action: CloneAction,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CloneAction {
+    Cloned,                    // 📥 Successfully cloned new repo
+    Updated,                   // 🔄 Updated existing repo (checkout + pull)
+    Stashed,                   // 📦 Stashed changes during update
+    DirectoryNotGitRepo,       // 🏠 Directory exists but not git
+    DifferentRemote,           // 🔗 Different remote URL
+}
+
 impl StatusChanges {
     pub fn is_empty(&self) -> bool {
         self.modified == 0
@@ -423,4 +439,278 @@ pub fn checkout_branch(
             error: Some(e.to_string()),
         },
     }
+}
+
+/// Clone or update a repository
+pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> CloneResult {
+    debug!("Processing repo: {}", repo_slug);
+
+    let parts: Vec<&str> = repo_slug.split('/').collect();
+    if parts.len() != 2 {
+        return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Cloned,
+            error: Some("Invalid repository slug format".to_string()),
+        };
+    }
+
+    let repo_name = parts[1];
+    let target_dir = std::path::PathBuf::from(user_or_org).join(repo_name);
+
+    if !target_dir.exists() {
+        // Clone new repository
+        return clone_repo(repo_slug, &target_dir, token);
+    }
+
+    if !target_dir.join(".git").exists() {
+        // Directory exists but not a git repo
+        debug!("Directory exists but is not a git repo: {}", target_dir.display());
+        return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::DirectoryNotGitRepo,
+            error: None,
+        };
+    }
+
+    // Check if existing repo has correct remote
+    match get_remote_origin(&target_dir) {
+        Ok(origin) if is_same_repo(&origin, repo_slug) => {
+            // Update existing repo: get default branch, checkout, pull
+            debug!("Updating existing repo: {}", repo_slug);
+            update_existing_repo(&target_dir, repo_slug, token)
+        }
+        Ok(origin) => {
+            // Different remote URL
+            debug!("Different remote URL detected. Expected: {}, Found: {}", repo_slug, origin);
+            CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::DifferentRemote,
+                error: None,
+            }
+        }
+        Err(e) => CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Updated,
+            error: Some(format!("Failed to check remote: {}", e)),
+        }
+    }
+}
+
+/// Clone a new repository
+fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> CloneResult {
+    debug!("Cloning new repo: {} to {}", repo_slug, target_dir.display());
+
+    // Create parent directory if needed
+    if let Some(parent) = target_dir.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: Some(format!("Failed to create parent directory: {}", e)),
+            };
+        }
+    }
+
+    // Clone the repository
+    let clone_url = format!("https://github.com/{}.git", repo_slug);
+    let output = Command::new("git")
+        .args(["clone", &clone_url, &target_dir.to_string_lossy()])
+        .output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            debug!("Successfully cloned: {}", repo_slug);
+            CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: None,
+            }
+        }
+        Ok(result) => {
+            let error_msg = String::from_utf8_lossy(&result.stderr);
+            CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: Some(error_msg.trim().to_string()),
+            }
+        }
+        Err(e) => CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Cloned,
+            error: Some(e.to_string()),
+        }
+    }
+}
+
+/// Update an existing repository
+fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &str) -> CloneResult {
+    debug!("Updating existing repo: {} at {}", repo_slug, repo_path.display());
+
+    // Get default branch from GitHub
+    let default_branch = match crate::github::get_default_branch(repo_slug, token) {
+        Ok(branch) => branch,
+        Err(e) => return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Updated,
+            error: Some(format!("Failed to get default branch: {}", e)),
+        }
+    };
+
+    debug!("Default branch for {}: {}", repo_slug, default_branch);
+
+    let mut stashed = false;
+
+    // Check for uncommitted changes (same logic as checkout_branch)
+    if let Ok(status) = get_status_changes_for_path(repo_path) {
+        if !status.is_empty() {
+            debug!("Found uncommitted changes, stashing...");
+            // Stash changes
+            let stash_result = Command::new("git")
+                .args([
+                    "-C",
+                    &repo_path.to_string_lossy(),
+                    "stash",
+                    "push",
+                    "-m",
+                    "gx auto-stash for clone update"
+                ])
+                .output();
+
+            if let Ok(output) = stash_result {
+                if output.status.success() {
+                    stashed = true;
+                    debug!("Successfully stashed changes");
+                }
+            }
+        }
+    }
+
+    // Fetch latest changes from remote
+    let fetch_result = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "fetch", "origin"])
+        .output();
+
+    if let Err(e) = fetch_result {
+        return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Updated,
+            error: Some(format!("Failed to fetch from remote: {}", e)),
+        };
+    }
+
+    // Checkout default branch
+    let checkout_result = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "checkout", &default_branch])
+        .output();
+
+    if let Err(e) = checkout_result {
+        return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Updated,
+            error: Some(format!("Failed to checkout default branch: {}", e)),
+        };
+    }
+
+    // Pull latest (same as checkout: --ff-only)
+    let pull_result = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "pull", "--ff-only"])
+        .output();
+
+    if let Err(e) = pull_result {
+        return CloneResult {
+            repo_slug: repo_slug.to_string(),
+            action: CloneAction::Updated,
+            error: Some(format!("Failed to pull latest changes: {}", e)),
+        };
+    }
+
+    let action = if stashed {
+        CloneAction::Stashed
+    } else {
+        CloneAction::Updated
+    };
+
+    debug!("Successfully updated repo: {}", repo_slug);
+    CloneResult {
+        repo_slug: repo_slug.to_string(),
+        action,
+        error: None,
+    }
+}
+
+/// Get remote origin URL for a repository
+fn get_remote_origin(repo_path: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "remote", "get-url", "origin"])
+        .output()
+        .context("Failed to get remote origin")?;
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("Failed to get remote origin: {}", error));
+    }
+
+    let url = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(url)
+}
+
+/// Check if remote URL matches the expected repository slug
+fn is_same_repo(remote_url: &str, expected_slug: &str) -> bool {
+    // Handle different URL formats
+    let normalized_remote = if let Some(ssh_part) = remote_url.strip_prefix("git@github.com:") {
+        ssh_part.trim_end_matches(".git").to_string()
+    } else if let Some(ssh_part) = remote_url.strip_prefix("ssh://git@github.com/") {
+        ssh_part.trim_end_matches(".git").to_string()
+    } else if let Some(https_part) = remote_url.strip_prefix("https://github.com/") {
+        https_part.trim_end_matches(".git").to_string()
+    } else {
+        remote_url.to_string()
+    };
+
+    normalized_remote == expected_slug
+}
+
+/// Get status changes for a repository path (helper function for clone)
+fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChanges> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain=v1"])
+        .output()
+        .context("Failed to run git status")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("git status failed: {}", stderr));
+    }
+
+    let status_output = String::from_utf8(output.stdout)
+        .context("Invalid UTF-8 in git status output")?;
+
+    let mut changes = StatusChanges::default();
+
+    for line in status_output.lines() {
+        if line.len() < 2 {
+            continue;
+        }
+
+        let status_chars: Vec<char> = line.chars().take(2).collect();
+        let index_status = status_chars[0];
+        let worktree_status = status_chars[1];
+
+        // Count different types of changes
+        match (index_status, worktree_status) {
+            ('A', _) => changes.added += 1,
+            ('M', _) | (_, 'M') => changes.modified += 1,
+            ('D', _) | (_, 'D') => changes.deleted += 1,
+            ('R', _) => changes.renamed += 1,
+            ('?', '?') => changes.untracked += 1,
+            _ => {}
+        }
+
+        // Count staged changes
+        if index_status != ' ' && index_status != '?' {
+            changes.staged += 1;
+        }
+    }
+
+    Ok(changes)
 }

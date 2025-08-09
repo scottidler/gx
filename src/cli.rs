@@ -13,6 +13,10 @@ static HELP_TEXT: LazyLock<String> = LazyLock::new(|| get_tool_validation_help()
     after_help = HELP_TEXT.as_str()
 )]
 pub struct Cli {
+    /// Working directory (only changes from current directory if specified)
+    #[arg(long, help = "Working directory for operations")]
+    pub cwd: Option<PathBuf>,
+
     /// Path to config file
     #[arg(short, long, help = "Path to config file")]
     pub config: Option<PathBuf>,
@@ -96,6 +100,34 @@ EXAMPLES:
         /// Branch name to checkout or create
         #[arg(value_name = "BRANCH")]
         branch_name: String,
+
+        /// Repository name patterns to filter
+        patterns: Vec<String>,
+    },
+
+    /// Clone repositories from GitHub user/org
+    #[command(after_help = "CLONE LEGEND:
+  📥  Cloned new repository               🔄  Updated existing repository
+  📍  Checked out default branch          ⚠️  Clone/update failed
+  🏠  Directory exists but not git repo   🔗  Different remote URL detected
+  📦  Stashed uncommitted changes         📊  Summary stats
+
+WORKING DIRECTORY:
+  By default, repositories are cloned to the current working directory under {user_or_org}/{repo_name}/
+  Use --cwd to specify a different base directory for cloning operations.
+
+EXAMPLES:
+  gx clone scottidler                     # Clone to ./scottidler/{repo_name}/
+  gx clone tatari-tv frontend api         # Clone filtered repos to ./tatari-tv/{repo_name}/
+  gx --cwd /workspace clone tatari-tv     # Clone to /workspace/tatari-tv/{repo_name}/")]
+    Clone {
+        /// GitHub user or organization name
+        #[arg(value_name = "USER_OR_ORG")]
+        user_or_org: String,
+
+        /// Include archived repositories
+        #[arg(long, help = "Include archived repositories")]
+        include_archived: bool,
 
         /// Repository name patterns to filter
         patterns: Vec<String>,
