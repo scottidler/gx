@@ -57,6 +57,15 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
         } => {
             process_status_command(cli, config, *detailed, !no_emoji, !no_color, patterns)
         }
+        Commands::Checkout {
+            create_branch,
+            from_branch,
+            branch_name,
+            stash,
+            patterns,
+        } => {
+            process_checkout_command(cli, config, *create_branch, from_branch.as_deref(), branch_name, *stash, patterns)
+        }
     }
 }
 
@@ -121,6 +130,71 @@ fn process_status_command(
     };
 
     output::display_status_results(results.clone(), &status_opts);
+
+    // 5. Exit with error count
+    let error_count = results.iter().filter(|r| r.error.is_some()).count();
+    if error_count > 0 {
+        std::process::exit(error_count.min(255) as i32);
+    }
+
+    Ok(())
+}
+
+fn process_checkout_command(
+    cli: &Cli,
+    config: &Config,
+    create_branch: bool,
+    from_branch: Option<&str>,
+    branch_name: &str,
+    stash: bool,
+    patterns: &[String],
+) -> Result<()> {
+    info!("Processing checkout command for branch '{}' with {} patterns", branch_name, patterns.len());
+
+    // Determine parallelism
+    let parallelism = cli.parallel
+        .or_else(|| get_parallelism_from_config(config))
+        .unwrap_or_else(|| get_nproc().unwrap_or(4));
+
+    debug!("Using parallelism: {}", parallelism);
+
+    // Set rayon thread pool size
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(parallelism)
+        .build_global()
+        .context("Failed to initialize thread pool")?;
+
+    // Determine max depth
+    let max_depth = cli.max_depth
+        .or_else(|| get_max_depth_from_config(config))
+        .unwrap_or(10);
+
+    debug!("Using max depth: {}", max_depth);
+
+    // 1. Discover repositories
+    let start_dir = env::current_dir().context("Failed to get current directory")?;
+    let repos = repo::discover_repos(&start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    info!("Discovered {} repositories", repos.len());
+
+    // 2. Filter repositories
+    let filtered_repos = repo::filter_repos(repos, patterns);
+    info!("Filtered to {} repositories", filtered_repos.len());
+
+    if filtered_repos.is_empty() {
+        println!("🔍 No repositories found matching the criteria");
+        return Ok(());
+    }
+
+    // 3. Process repositories in parallel
+    let results: Vec<git::CheckoutResult> = filtered_repos
+        .par_iter()
+        .map(|repo| git::checkout_branch(repo, branch_name, create_branch, from_branch, stash))
+        .collect();
+
+    // 4. Display results
+    output::display_checkout_results(results.clone());
 
     // 5. Exit with error count
     let error_count = results.iter().filter(|r| r.error.is_some()).count();

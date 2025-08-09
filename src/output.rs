@@ -1,4 +1,4 @@
-use crate::git::{RepoStatus, StatusChanges, RemoteStatus};
+use crate::git::{RepoStatus, StatusChanges, RemoteStatus, CheckoutResult, CheckoutAction};
 use colored::*;
 
 #[derive(Debug)]
@@ -288,4 +288,70 @@ fn display_summary(clean_count: usize, dirty_count: usize, error_count: usize, o
     } else {
         println!("{}", summary);
     }
+}
+
+
+
+/// Display checkout results with summary
+pub fn display_checkout_results(results: Vec<CheckoutResult>) {
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for result in &results {
+        match &result.error {
+            Some(err) => {
+                display_checkout_error(result, err);
+                error_count += 1;
+            }
+            None => {
+                display_checkout_success(result);
+                success_count += 1;
+            }
+        }
+    }
+
+    // Display summary
+    display_checkout_summary(success_count, error_count);
+}
+
+/// Display successful checkout result
+fn display_checkout_success(result: &CheckoutResult) {
+    let repo_display = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
+    let repo_name = repo_display.cyan();
+
+    let (emoji, action_text) = match result.action {
+        CheckoutAction::CheckedOutSynced => ("🔄", "checked out and synced"),
+        CheckoutAction::CreatedFromRemote => ("✨", "created from remote"),
+        CheckoutAction::Stashed => ("📦", "stashed and checked out"),
+        CheckoutAction::HasUntracked => ("⚠️", "checked out (has untracked files)"),
+    };
+
+    println!("{} {} {} {}", emoji, repo_name, action_text, result.branch_name.green());
+}
+
+/// Display checkout error
+fn display_checkout_error(result: &CheckoutResult, error: &str) {
+    let repo_display = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
+    let repo_name = repo_display.cyan();
+
+    println!("❌ {} failed to checkout {}: {}", repo_name, result.branch_name.red(), error);
+}
+
+/// Display checkout summary
+fn display_checkout_summary(success_count: usize, error_count: usize) {
+    if success_count == 0 && error_count == 0 {
+        println!("🔍 No repositories processed");
+        return;
+    }
+
+    let mut parts = Vec::new();
+
+    if success_count > 0 {
+        parts.push(format!("{} completed", success_count));
+    }
+    if error_count > 0 {
+        parts.push(format!("{} errors", error_count));
+    }
+
+    println!("📊 {}", parts.join(", "));
 }

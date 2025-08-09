@@ -34,6 +34,22 @@ pub enum RemoteStatus {
     Error(String), // ❌ Error checking remote status
 }
 
+#[derive(Debug, Clone)]
+pub struct CheckoutResult {
+    pub repo: Repo,
+    pub branch_name: String,
+    pub action: CheckoutAction,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CheckoutAction {
+    CheckedOutSynced,  // Checked out and synced with remote
+    CreatedFromRemote, // Created new branch from remote
+    Stashed,          // Stashed uncommitted changes
+    HasUntracked,     // Has untracked files after checkout
+}
+
 impl StatusChanges {
     pub fn is_empty(&self) -> bool {
         self.modified == 0
@@ -306,5 +322,105 @@ mod tests {
         assert_eq!(changes.modified, 1);
         assert_eq!(changes.untracked, 1);
         assert_eq!(changes.added, 1);
+    }
+}
+
+/// Checkout or create a branch in a repository, with stashing and sync
+pub fn checkout_branch(
+    repo: &Repo,
+    branch_name: &str,
+    create_branch: bool,
+    from_branch: Option<&str>,
+    stash: bool,
+) -> CheckoutResult {
+    debug!("Checking out branch '{}' in repo: {}", branch_name, repo.name);
+
+    let mut stashed = false;
+    let mut has_untracked = false;
+
+    // Check for uncommitted changes
+    if stash {
+        if let Ok(status) = get_status_changes(repo) {
+            if !status.is_empty() {
+                // Stash changes (excluding untracked files)
+                let stash_result = Command::new("git")
+                    .args(["-C", &repo.path.to_string_lossy(), "stash", "push", "-m", &format!("gx auto-stash for {}", branch_name)])
+                    .output();
+
+                if let Ok(output) = stash_result {
+                    if output.status.success() {
+                        stashed = true;
+                        debug!("Stashed changes in {}", repo.name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Perform checkout
+    let checkout_result = if create_branch {
+        // Create new branch
+        let mut cmd = Command::new("git");
+        cmd.args(["-C", &repo.path.to_string_lossy(), "checkout", "-b", branch_name]);
+
+        if let Some(from) = from_branch {
+            cmd.arg(from);
+        }
+
+        cmd.output()
+    } else {
+        // Checkout existing branch
+        Command::new("git")
+            .args(["-C", &repo.path.to_string_lossy(), "checkout", branch_name])
+            .output()
+    };
+
+    // Handle checkout result
+    match checkout_result {
+        Ok(output) if output.status.success() => {
+            // Try to pull/sync with remote if not creating a new branch
+            if !create_branch {
+                let _ = Command::new("git")
+                    .args(["-C", &repo.path.to_string_lossy(), "pull", "--ff-only"])
+                    .output();
+            }
+
+            // Check for untracked files after checkout
+            if let Ok(status) = get_status_changes(repo) {
+                has_untracked = status.untracked > 0;
+            }
+
+            let action = if create_branch {
+                CheckoutAction::CreatedFromRemote
+            } else if stashed {
+                CheckoutAction::Stashed
+            } else if has_untracked {
+                CheckoutAction::HasUntracked
+            } else {
+                CheckoutAction::CheckedOutSynced
+            };
+
+            CheckoutResult {
+                repo: repo.clone(),
+                branch_name: branch_name.to_string(),
+                action,
+                error: None,
+            }
+        }
+        Ok(output) => {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            CheckoutResult {
+                repo: repo.clone(),
+                branch_name: branch_name.to_string(),
+                action: CheckoutAction::CheckedOutSynced,
+                error: Some(error_msg.trim().to_string()),
+            }
+        }
+        Err(e) => CheckoutResult {
+            repo: repo.clone(),
+            branch_name: branch_name.to_string(),
+            action: CheckoutAction::CheckedOutSynced,
+            error: Some(e.to_string()),
+        },
     }
 }

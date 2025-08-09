@@ -67,6 +67,39 @@ EXAMPLES:
         /// Repository name patterns to filter
         patterns: Vec<String>,
     },
+
+    /// Checkout branches across multiple repositories
+    #[command(after_help = "CHECKOUT LEGEND:
+  🔄  Checked out and synced with remote    ✨  Created new branch from remote
+  📦  Stashed uncommitted changes           ❌  Checkout failed (error)
+  ⚠️   Has untracked files                  📊  Summary stats
+
+EXAMPLES:
+  gx checkout feature-branch        # Checkout existing branch and sync with remote
+  gx checkout -b new-feature        # Create and checkout new branch in all repos
+  gx checkout -b fix -f main        # Create branch from specific base branch
+  gx checkout main -s               # Checkout main and stash uncommitted changes
+  gx checkout main frontend api     # Checkout main in filtered repos")]
+    Checkout {
+        /// Create a new branch
+        #[arg(short = 'b', long = "branch", help = "Create and checkout a new branch")]
+        create_branch: bool,
+
+        /// Base branch to create from (defaults to current HEAD)
+        #[arg(short = 'f', long = "from", value_name = "BRANCH", help = "Base branch for new branch creation [Default: main|master]")]
+        from_branch: Option<String>,
+
+        /// Stash uncommitted changes before checkout
+        #[arg(short = 's', long = "stash", help = "Stash uncommitted changes before checkout")]
+        stash: bool,
+
+        /// Branch name to checkout or create
+        #[arg(value_name = "BRANCH")]
+        branch_name: String,
+
+        /// Repository name patterns to filter
+        patterns: Vec<String>,
+    },
 }
 
 /// Generate tool validation help text
