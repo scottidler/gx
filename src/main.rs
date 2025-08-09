@@ -50,13 +50,12 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
 
     match &cli.command {
         Commands::Status {
-            all,
             detailed,
             no_emoji,
             no_color,
             patterns,
         } => {
-            process_status_command(cli, config, *all, *detailed, !no_emoji, !no_color, patterns)
+            process_status_command(cli, config, *detailed, !no_emoji, !no_color, patterns)
         }
     }
 }
@@ -64,7 +63,6 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
 fn process_status_command(
     cli: &Cli,
     config: &Config,
-    show_all: bool,
     detailed: bool,
     use_emoji: bool,
     use_colors: bool,
@@ -116,7 +114,7 @@ fn process_status_command(
 
     // 4. Display results
     let status_opts = StatusOptions {
-        show_all,
+        show_all: true, // Always show all repositories
         detailed,
         use_emoji,
         use_colors,

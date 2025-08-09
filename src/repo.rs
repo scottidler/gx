@@ -81,6 +81,11 @@ fn parse_repo_slug_from_url(url: &str) -> Option<String> {
         return Some(ssh_part.trim_end_matches(".git").to_string());
     }
 
+    // Handle GitHub SSH URLs with ssh:// prefix: ssh://git@github.com/org/repo.git
+    if let Some(ssh_part) = url.strip_prefix("ssh://git@github.com/") {
+        return Some(ssh_part.trim_end_matches(".git").to_string());
+    }
+
     // Handle GitHub HTTPS URLs: https://github.com/org/repo.git
     if let Some(https_part) = url.strip_prefix("https://github.com/") {
         return Some(https_part.trim_end_matches(".git").to_string());

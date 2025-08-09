@@ -53,96 +53,59 @@ pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
     display_summary(clean_count, dirty_count, error_count, opts);
 }
 
-/// Display compact one-line status with emojis
+/// Display compact one-line status with slam-style alignment
 fn display_compact_status(status: &RepoStatus, opts: &StatusOptions) {
     let changes = &status.changes;
-    let mut parts = Vec::new();
 
-    // Repository name (with color if enabled)
-    let repo_name = if opts.use_colors {
-        status.repo.name.cyan().to_string()
+    // Branch name with fixed width for alignment (like slam)
+    let branch = status.branch.as_deref().unwrap_or("unknown");
+    let branch_display = if opts.use_colors {
+        format!("{:>6}", branch.green())
     } else {
-        status.repo.name.clone()
+        format!("{:>6}", branch)
     };
-    parts.push(repo_name);
 
-    // Status changes with emojis
-    if opts.use_emoji {
-        if changes.modified > 0 {
-            parts.push(format!("📝{}", changes.modified));
-        }
-        if changes.added > 0 {
-            parts.push(format!("➕{}", changes.added));
-        }
-        if changes.deleted > 0 {
-            parts.push(format!("❌{}", changes.deleted));
-        }
+    // Commit hash (7 characters or spaces if not available)
+    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
+
+    // Status emoji - determine the primary status indicator
+    let status_emoji = if !status.is_clean {
+        // Show file change status for dirty repos
         if changes.untracked > 0 {
-            parts.push(format!("❓{}", changes.untracked));
-        }
-        if changes.staged > 0 {
-            parts.push(format!("🎯{}", changes.staged));
-        }
-        if changes.renamed > 0 {
-            parts.push(format!("🔄{}", changes.renamed));
-        }
-    } else {
-        // Non-emoji fallback
-        if changes.modified > 0 {
-            parts.push(format!("M:{}", changes.modified));
-        }
-        if changes.added > 0 {
-            parts.push(format!("A:{}", changes.added));
-        }
-        if changes.deleted > 0 {
-            parts.push(format!("D:{}", changes.deleted));
-        }
-        if changes.untracked > 0 {
-            parts.push(format!("?:{}", changes.untracked));
-        }
-        if changes.staged > 0 {
-            parts.push(format!("S:{}", changes.staged));
-        }
-        if changes.renamed > 0 {
-            parts.push(format!("R:{}", changes.renamed));
-        }
-    }
-
-    // Remote status emoji
-    if opts.use_emoji {
-        let remote_emoji = match &status.remote_status {
-            RemoteStatus::UpToDate => "🟢",
-            RemoteStatus::Ahead(n) => &format!("⬆️{}", n),
-            RemoteStatus::Behind(n) => &format!("⬇️{}", n),
-            RemoteStatus::Diverged(ahead, behind) => &format!("🔀{}↑{}↓", ahead, behind),
-            RemoteStatus::NoRemote => "📍",
-            RemoteStatus::Error(_) => "⚠️",
-        };
-        parts.push(remote_emoji.to_string());
-    } else {
-        // Non-emoji fallback
-        let remote_text = match &status.remote_status {
-            RemoteStatus::UpToDate => "=",
-            RemoteStatus::Ahead(n) => &format!("↑{}", n),
-            RemoteStatus::Behind(n) => &format!("↓{}", n),
-            RemoteStatus::Diverged(ahead, behind) => &format!("↑{}↓{}", ahead, behind),
-            RemoteStatus::NoRemote => "~",
-            RemoteStatus::Error(_) => "!",
-        };
-        parts.push(remote_text.to_string());
-    }
-
-    // Branch info
-    if let Some(branch) = &status.branch {
-        let branch_info = if opts.use_colors {
-            format!("({})", branch.green())
+            if opts.use_emoji { "❓" } else { "?" }
+        } else if changes.modified > 0 {
+            if opts.use_emoji { "📝" } else { "M" }
+        } else if changes.added > 0 {
+            if opts.use_emoji { "➕" } else { "A" }
+        } else if changes.deleted > 0 {
+            if opts.use_emoji { "❌" } else { "D" }
+        } else if changes.staged > 0 {
+            if opts.use_emoji { "🎯" } else { "S" }
         } else {
-            format!("({})", branch)
-        };
-        parts.push(branch_info);
-    }
+            if opts.use_emoji { "📝" } else { "M" }
+        }
+    } else {
+        // Show remote status for clean repos
+        match &status.remote_status {
+            RemoteStatus::UpToDate => if opts.use_emoji { "🟢" } else { "=" },
+            RemoteStatus::Ahead(_) => if opts.use_emoji { "⬆️" } else { "↑" },
+            RemoteStatus::Behind(_) => if opts.use_emoji { "⬇️" } else { "↓" },
+            RemoteStatus::Diverged(_, _) => if opts.use_emoji { "🔀" } else { "±" },
+            RemoteStatus::NoRemote => if opts.use_emoji { "📍" } else { "~" },
+            RemoteStatus::Error(_) => if opts.use_emoji { "⚠️" } else { "!" },
+        }
+    };
 
-    println!("{}", parts.join(" "));
+    // Repository slug
+    let repo_display = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
+    let repo_name = if opts.use_colors {
+        repo_display.cyan().to_string()
+    } else {
+        repo_display.clone()
+    };
+
+    // Format: branch commit_hash emoji repo_slug
+    println!("{} {} {} {}", branch_display, commit_display, status_emoji, repo_name);
 }
 
 /// Display detailed file-by-file status (placeholder for now)
@@ -203,27 +166,39 @@ fn display_detailed_status(status: &RepoStatus, opts: &StatusOptions) {
     println!(); // Empty line between repos
 }
 
-/// Display clean repository status
+/// Display clean repository status using slam-style alignment
 fn display_clean_status(status: &RepoStatus, opts: &StatusOptions) {
-    let clean_indicator = if opts.use_emoji { "✅" } else { "CLEAN" };
-    let repo_name = if opts.use_colors {
-        status.repo.name.green().to_string()
+    // Branch name with fixed width for alignment
+    let branch = status.branch.as_deref().unwrap_or("unknown");
+    let branch_display = if opts.use_colors {
+        format!("{:>6}", branch.green())
     } else {
-        status.repo.name.clone()
+        format!("{:>6}", branch)
     };
 
-    let mut parts = vec![repo_name, clean_indicator.to_string()];
+    // Commit hash (7 characters or spaces if not available)
+    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
 
-    if let Some(branch) = &status.branch {
-        let branch_info = if opts.use_colors {
-            format!("({})", branch.green())
-        } else {
-            format!("({})", branch)
-        };
-        parts.push(branch_info);
-    }
+    // Status emoji for clean repos (show remote status)
+    let status_emoji = match &status.remote_status {
+        RemoteStatus::UpToDate => if opts.use_emoji { "🟢" } else { "=" },
+        RemoteStatus::Ahead(_) => if opts.use_emoji { "⬆️" } else { "↑" },
+        RemoteStatus::Behind(_) => if opts.use_emoji { "⬇️" } else { "↓" },
+        RemoteStatus::Diverged(_, _) => if opts.use_emoji { "🔀" } else { "±" },
+        RemoteStatus::NoRemote => if opts.use_emoji { "📍" } else { "~" },
+        RemoteStatus::Error(_) => if opts.use_emoji { "⚠️" } else { "!" },
+    };
 
-    println!("{}", parts.join(" "));
+    // Repository slug
+    let repo_display = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
+    let repo_name = if opts.use_colors {
+        repo_display.cyan().to_string()
+    } else {
+        repo_display.clone()
+    };
+
+    // Format: branch commit_hash emoji repo_slug
+    println!("{} {} {} {}", branch_display, commit_display, status_emoji, repo_name);
 }
 
 /// Display error status

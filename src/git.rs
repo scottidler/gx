@@ -7,6 +7,7 @@ use std::process::Command;
 pub struct RepoStatus {
     pub repo: Repo,
     pub branch: Option<String>,
+    pub commit_sha: Option<String>,
     pub is_clean: bool,
     pub changes: StatusChanges,
     pub remote_status: RemoteStatus,
@@ -49,6 +50,7 @@ pub fn get_repo_status(repo: &Repo) -> RepoStatus {
     debug!("Getting status for repo: {}", repo.name);
 
     let branch = get_current_branch(repo);
+    let commit_sha = get_current_commit_sha(repo);
     let remote_status = get_remote_status(repo, &branch);
 
     match get_status_changes(repo) {
@@ -57,6 +59,7 @@ pub fn get_repo_status(repo: &Repo) -> RepoStatus {
             RepoStatus {
                 repo: repo.clone(),
                 branch,
+                commit_sha,
                 is_clean,
                 changes,
                 remote_status,
@@ -67,12 +70,28 @@ pub fn get_repo_status(repo: &Repo) -> RepoStatus {
             RepoStatus {
                 repo: repo.clone(),
                 branch,
+                commit_sha,
                 is_clean: false,
                 changes: StatusChanges::default(),
                 remote_status,
                 error: Some(e.to_string()),
             }
         }
+    }
+}
+
+/// Get current commit SHA (7 characters)
+fn get_current_commit_sha(repo: &Repo) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo.path.to_string_lossy(), "rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let sha = String::from_utf8(output.stdout).ok()?;
+        Some(sha.trim().to_string())
+    } else {
+        None
     }
 }
 
