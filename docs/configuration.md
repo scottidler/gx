@@ -19,7 +19,7 @@ Default search order:
 ```yaml
 # gx.yml
 default_user_org: "tatari-tv"  # Can be GitHub user or organization
-parallelism: null  # Number of concurrent operations (default: nproc)
+parallelism: "nproc"  # Number of concurrent operations (default: nproc)
 
 # Tool requirements and paths
 tools:

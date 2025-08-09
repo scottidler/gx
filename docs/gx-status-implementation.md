@@ -155,7 +155,7 @@ fn display_compact_status(status: &RepoStatus) {
 ### Default Configuration (`gx.yml`)
 ```yaml
 default_user_org: "tatari-tv"
-parallelism: null  # Use nproc
+parallelism: "nproc"  # Use nproc
 repo_discovery:
   max_depth: 10
 output:
