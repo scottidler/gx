@@ -124,7 +124,7 @@ EXAMPLES:
   gx --cwd /workspace clone tatari-tv     # Clone to /workspace/tatari-tv/<repo-name>/")]
     Clone {
         /// GitHub user or organization name
-        #[arg(value_name = "USER_OR_ORG")]
+        #[arg(value_name = "USER|ORG")]
         user_or_org: String,
 
         /// Include archived repositories
