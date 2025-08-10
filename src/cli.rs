@@ -115,13 +115,13 @@ EXAMPLES:
   📦  Stashed uncommitted changes         📊  Summary stats
 
 WORKING DIRECTORY:
-  By default, repositories are cloned to the current working directory under {user_or_org}/{repo_name}/
+  By default, repositories are cloned to the current working directory under <user|org>/<repo-name>/
   Use --cwd to specify a different base directory for cloning operations.
 
 EXAMPLES:
-  gx clone scottidler                     # Clone to ./scottidler/{repo_name}/
-  gx clone tatari-tv frontend api         # Clone filtered repos to ./tatari-tv/{repo_name}/
-  gx --cwd /workspace clone tatari-tv     # Clone to /workspace/tatari-tv/{repo_name}/")]
+  gx clone scottidler                     # Clone to ./scottidler/<repo-name>/
+  gx clone tatari-tv frontend api         # Clone filtered repos to ./tatari-tv/<repo-name>/
+  gx --cwd /workspace clone tatari-tv     # Clone to /workspace/tatari-tv/<repo-name>/")]
     Clone {
         /// GitHub user or organization name
         #[arg(value_name = "USER_OR_ORG")]
