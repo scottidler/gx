@@ -90,19 +90,31 @@ fn test_checkout_with_stash() {
     let workspace = create_test_workspace();
     let frontend_path = workspace.path().join("frontend");
 
-        // Create uncommitted changes
+    // Create a feature branch first
+    run_git_command(&["checkout", "-b", "feature"], &frontend_path);
+    run_git_command(&["checkout", "main"], &frontend_path);
+
+    // Create uncommitted changes on main branch
     std::fs::write(frontend_path.join("modified.txt"), "modified content").unwrap();
     run_git_command(&["add", "modified.txt"], &frontend_path);
     std::fs::write(frontend_path.join("modified.txt"), "more changes").unwrap();
 
-    // Create a feature branch to switch to
-    run_git_command(&["checkout", "-b", "feature"], &frontend_path);
-    run_git_command(&["checkout", "main"], &frontend_path);
+    // Verify we have changes to stash
+    let status_output = run_git_command(&["status", "--porcelain"], &frontend_path);
+    let status_text = String::from_utf8(status_output.stdout).unwrap();
+    assert!(!status_text.trim().is_empty(), "Should have uncommitted changes to stash, but git status shows: '{}'", status_text);
 
     // Test checkout with stash flag
     let output = run_gx_command(&["checkout", "feature", "-s", "frontend"], workspace.path());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+
+    // Debug output if test fails
+    if !stdout.contains("📦") && !stdout.contains("stashed") {
+        panic!("Expected stash indicator in output.\nStdout: '{}'\nStderr: '{}'\nStatus before stash: '{}'",
+               stdout, stderr, status_text);
+    }
 
     // Should show stash operation
     assert!(stdout.contains("📦") || stdout.contains("stashed"));
@@ -114,7 +126,7 @@ fn test_checkout_with_stash() {
     // Verify stash was created
     let stash_output = run_git_command(&["stash", "list"], &frontend_path);
     let stash_list = String::from_utf8(stash_output.stdout).unwrap();
-    assert!(stash_list.contains("gx auto-stash"));
+    assert!(stash_list.contains("gx auto-stash"), "Stash list should contain 'gx auto-stash', but got: '{}'", stash_list);
 }
 
 #[test]
