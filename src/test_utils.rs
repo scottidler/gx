@@ -68,8 +68,26 @@ pub fn create_test_repo(base_path: &Path, repo_name: &str, with_remote: bool) ->
     repo_path
 }
 
-/// Create a test workspace with multiple repositories
+/// Create a minimal test workspace with fast setup
 pub fn create_test_workspace() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+    // Create minimal test repositories (fast)
+    create_minimal_test_repo(temp_dir.path(), "frontend");
+    create_minimal_test_repo(temp_dir.path(), "backend");
+    create_minimal_test_repo(temp_dir.path(), "api");
+    create_minimal_test_repo(temp_dir.path(), "docs");
+
+    // Create a dirty repository
+    let dirty_repo_path = create_minimal_test_repo(temp_dir.path(), "dirty-repo");
+    let dirty_file = dirty_repo_path.join("dirty.txt");
+    fs::write(&dirty_file, "This file is dirty").expect("Failed to write dirty file");
+
+    temp_dir
+}
+
+/// Create a test workspace with full git setup (for tests that need it)
+pub fn create_full_test_workspace() -> TempDir {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
 
     // Create multiple test repositories
@@ -84,6 +102,25 @@ pub fn create_test_workspace() -> TempDir {
     fs::write(&dirty_file, "This file is dirty").expect("Failed to write dirty file");
 
     temp_dir
+}
+
+/// Create a minimal test repository with one commit - FASTER than full setup
+pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
+    let repo_path = base_path.join(repo_name);
+    fs::create_dir_all(&repo_path).expect("Failed to create repo directory");
+
+    // Initialize git repo (minimal setup)
+    run_git_command(&["init", "--quiet"], &repo_path);
+    run_git_command(&["config", "user.email", "test@example.com"], &repo_path);
+    run_git_command(&["config", "user.name", "Test User"], &repo_path);
+
+    // Create one commit (minimal)
+    let readme_path = repo_path.join("README.md");
+    fs::write(&readme_path, format!("# {}", repo_name)).expect("Failed to write README");
+    run_git_command(&["add", "README.md"], &repo_path);
+    run_git_command(&["commit", "--quiet", "-m", "Initial commit"], &repo_path);
+
+    repo_path
 }
 
 /// Create a comprehensive test workspace with 5 diverse repositories for multi-repo testing

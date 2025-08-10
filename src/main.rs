@@ -24,16 +24,23 @@ use config::Config;
 use output::StatusOptions;
 
 fn setup_logging() -> Result<()> {
-    // Create log directory
-    let log_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("gx")
-        .join("logs");
+    // During tests, use a temp directory to avoid polluting production logs
+    let log_file = if cfg!(test) {
+        // Create a temp file for test logging
+        let temp_dir = std::env::temp_dir();
+        temp_dir.join(format!("gx-test-{}.log", std::process::id()))
+    } else {
+        // Production logging location
+        let log_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gx")
+            .join("logs");
 
-    fs::create_dir_all(&log_dir)
-        .context("Failed to create log directory")?;
+        fs::create_dir_all(&log_dir)
+            .context("Failed to create log directory")?;
 
-    let log_file = log_dir.join("gx.log");
+        log_dir.join("gx.log")
+    };
 
     // Setup env_logger with file output
     let target = Box::new(fs::OpenOptions::new()
