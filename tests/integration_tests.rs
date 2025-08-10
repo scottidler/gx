@@ -16,8 +16,8 @@ fn test_main_help_output() {
     // Should show global options
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--verbose"));
-    assert!(stdout.contains("--parallel"));
-    assert!(stdout.contains("--max-depth"));
+    assert!(stdout.contains("--jobs"));
+    assert!(stdout.contains("--depth"));
 
     // Should show tool validation
     assert!(stdout.contains("REQUIRED TOOLS:"));
@@ -68,7 +68,7 @@ fn test_global_parallel_option() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     create_test_repo(temp_dir.path(), "test-repo", false);
 
-    let output = run_gx_command(&["--parallel", "1", "status"], temp_dir.path());
+    let output = run_gx_command(&["--jobs", "1", "status"], temp_dir.path());
 
     // Should succeed with custom parallelism
     assert!(output.status.success());
@@ -88,7 +88,7 @@ fn test_global_max_depth_option() {
     create_test_repo(temp_dir.path(), "shallow-repo", false);
 
     // Test max-depth 2 should find shallow but not deep
-    let output = run_gx_command(&["--max-depth", "2", "status"], temp_dir.path());
+    let output = run_gx_command(&["--depth", "2", "status"], temp_dir.path());
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     // Should find shallow repo but not deep repo
@@ -96,7 +96,7 @@ fn test_global_max_depth_option() {
     assert!(!stdout.contains("deep-repo"));
 
     // Test max-depth 10 should find both
-    let output = run_gx_command(&["--max-depth", "10", "status"], temp_dir.path());
+    let output = run_gx_command(&["--depth", "10", "status"], temp_dir.path());
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     // Should find both repos
@@ -218,7 +218,7 @@ fn test_concurrent_operations() {
         create_test_repo(temp_dir.path(), &format!("repo{}", i), false);
     }
 
-    let output = run_gx_command(&["--parallel", "3", "status"], temp_dir.path());
+    let output = run_gx_command(&["--jobs", "3", "status"], temp_dir.path());
 
     assert!(output.status.success());
 

@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 
 mod cli;
@@ -198,19 +199,42 @@ fn process_checkout_command(
         return Ok(());
     }
 
-    // 3. Process repositories in parallel
-    let results: Vec<git::CheckoutResult> = filtered_repos
-        .par_iter()
-        .map(|repo| git::checkout_branch(repo, branch_name, create_branch, from_branch, stash))
-        .collect();
+    // 3. Process repositories in parallel with streaming output (like slam)
+    let error_count = AtomicUsize::new(0);
+    let success_count = AtomicUsize::new(0);
 
-    // 4. Display results
-    output::display_checkout_results(results.clone());
+    filtered_repos.par_iter().for_each(|repo| {
+        let result = git::checkout_branch(repo, branch_name, create_branch, from_branch, stash);
+
+        // Count results atomically
+        if result.error.is_some() {
+            error_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            success_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Display immediately (like slam)
+        output::display_checkout_result_immediate(&result);
+    });
+
+    // 4. Show summary
+    let final_error_count = error_count.load(Ordering::Relaxed);
+    let final_success_count = success_count.load(Ordering::Relaxed);
+
+    if final_success_count > 0 || final_error_count > 0 {
+        let mut parts = Vec::new();
+        if final_success_count > 0 {
+            parts.push(format!("{} completed", final_success_count));
+        }
+        if final_error_count > 0 {
+            parts.push(format!("{} errors", final_error_count));
+        }
+        println!("📊 {}", parts.join(", "));
+    }
 
     // 5. Exit with error count
-    let error_count = results.iter().filter(|r| r.error.is_some()).count();
-    if error_count > 0 {
-        std::process::exit(error_count.min(255) as i32);
+    if final_error_count > 0 {
+        std::process::exit(final_error_count.min(255) as i32);
     }
 
     Ok(())
@@ -281,19 +305,42 @@ fn process_clone_command(
     let token = github::read_token(user_or_org)
         .context("Failed to read GitHub token")?;
 
-    // 4. Process repositories in parallel
-    let results: Vec<git::CloneResult> = filtered_slugs
-        .par_iter()
-        .map(|repo_slug| git::clone_or_update_repo(repo_slug, user_or_org, &token))
-        .collect();
+    // 4. Process repositories in parallel with streaming output (like slam)
+    let error_count = AtomicUsize::new(0);
+    let success_count = AtomicUsize::new(0);
 
-    // 5. Display results
-    output::display_clone_results(results.clone(), false); // TODO: Add detailed flag
+    filtered_slugs.par_iter().for_each(|repo_slug| {
+        let result = git::clone_or_update_repo(repo_slug, user_or_org, &token);
+
+        // Count results atomically
+        if result.error.is_some() {
+            error_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            success_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Display immediately (like slam)
+        output::display_clone_result_immediate(&result);
+    });
+
+    // 5. Show summary
+    let final_error_count = error_count.load(Ordering::Relaxed);
+    let final_success_count = success_count.load(Ordering::Relaxed);
+
+    if final_success_count > 0 || final_error_count > 0 {
+        let mut parts = Vec::new();
+        if final_success_count > 0 {
+            parts.push(format!("{} completed", final_success_count));
+        }
+        if final_error_count > 0 {
+            parts.push(format!("{} errors", final_error_count));
+        }
+        println!("📊 {}", parts.join(", "));
+    }
 
     // 6. Exit with error count
-    let error_count = results.iter().filter(|r| r.error.is_some()).count();
-    if error_count > 0 {
-        std::process::exit(error_count.min(255) as i32);
+    if final_error_count > 0 {
+        std::process::exit(final_error_count.min(255) as i32);
     }
 
     Ok(())

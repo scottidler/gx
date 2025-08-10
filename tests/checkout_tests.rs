@@ -260,7 +260,7 @@ fn test_checkout_with_untracked_files() {
 fn test_checkout_parallel_option() {
     let workspace = create_test_workspace();
 
-    let output = run_gx_command(&["--parallel", "2", "checkout", "-b", "parallel-test"], workspace.path());
+    let output = run_gx_command(&["--jobs", "2", "checkout", "-b", "parallel-test"], workspace.path());
 
     // Should succeed with custom parallelism
     assert!(output.status.success());

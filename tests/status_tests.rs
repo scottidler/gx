@@ -166,7 +166,7 @@ fn test_status_parallel_option() {
 
     // Use the current directory to run gx with global flags
     let output = Command::new(get_gx_binary_path())
-        .args(["--parallel", "2", "status"])
+        .args(["--jobs", "2", "status"])
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -190,7 +190,7 @@ fn test_status_max_depth_option() {
 
     // Test max-depth 2 should find shallow but not deep
     let output = Command::new(get_gx_binary_path())
-        .args(["--max-depth", "2", "status"])
+        .args(["--depth", "2", "status"])
         .current_dir(temp_dir.path())
         .output()
         .unwrap();
