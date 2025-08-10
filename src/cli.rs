@@ -4,6 +4,8 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 static HELP_TEXT: LazyLock<String> = LazyLock::new(|| get_tool_validation_help());
+static JOBS_HELP: LazyLock<String> = LazyLock::new(|| format!("Number of parallel operations [default: {}]", num_cpus::get()));
+static DEPTH_HELP: LazyLock<String> = LazyLock::new(|| "Maximum directory depth to scan [default: 2]".to_string());
 
 #[derive(Parser)]
 #[command(
@@ -25,12 +27,12 @@ pub struct Cli {
     #[arg(short, long, help = "Enable verbose output")]
     pub verbose: bool,
 
-    /// Override parallelism (default: nproc)
-    #[arg(long, help = "Number of parallel operations")]
+    /// Override parallelism
+    #[arg(short = 'j', long = "jobs", value_name = "INT", help = JOBS_HELP.as_str())]
     pub parallel: Option<usize>,
 
     /// Override max repository discovery depth
-    #[arg(long, help = "Maximum directory depth to scan")]
+    #[arg(short = 'm', long = "depth", value_name = "INT", help = DEPTH_HELP.as_str())]
     pub max_depth: Option<usize>,
 
     #[command(subcommand)]

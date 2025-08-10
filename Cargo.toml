@@ -24,6 +24,7 @@ rayon = "1.8"
 walkdir = "2.4"
 url = "2.5"
 tempfile = "3.8"
+num_cpus = "1.16"
 # Using std::process::Command for git calls like slam
 
 [dev-dependencies]

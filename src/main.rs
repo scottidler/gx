@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
 
 mod cli;
 mod config;
@@ -106,7 +106,7 @@ fn process_status_command(
     // Determine max depth
     let max_depth = cli.max_depth
         .or_else(|| get_max_depth_from_config(config))
-        .unwrap_or(10);
+        .unwrap_or(2);
 
     debug!("Using max depth: {}", max_depth);
 
@@ -178,7 +178,7 @@ fn process_checkout_command(
     // Determine max depth
     let max_depth = cli.max_depth
         .or_else(|| get_max_depth_from_config(config))
-        .unwrap_or(10);
+        .unwrap_or(2);
 
     debug!("Using max depth: {}", max_depth);
 
@@ -313,16 +313,9 @@ fn get_max_depth_from_config(_config: &Config) -> Option<usize> {
     None
 }
 
-/// Get number of processors by running nproc command
+/// Get number of processors using num_cpus crate
 fn get_nproc() -> Option<usize> {
-    let output = Command::new("nproc").output().ok()?;
-
-    if output.status.success() {
-        let nproc_str = String::from_utf8(output.stdout).ok()?;
-        nproc_str.trim().parse().ok()
-    } else {
-        None
-    }
+    Some(num_cpus::get())
 }
 
 fn main() -> Result<()> {
