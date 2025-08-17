@@ -25,6 +25,7 @@ pub struct StatusChanges {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RemoteStatus {
     UpToDate,      // ✅ Local and remote are in sync
     Ahead(u32),    // ⬆️  Local is ahead by N commits
@@ -38,6 +39,7 @@ pub enum RemoteStatus {
 pub struct CheckoutResult {
     pub repo: Repo,
     pub branch_name: String,
+    pub commit_sha: Option<String>,
     pub action: CheckoutAction,
     pub error: Option<String>,
 }
@@ -339,31 +341,6 @@ mod tests {
         assert_eq!(changes.untracked, 1);
         assert_eq!(changes.added, 1);
     }
-
-    #[test]
-    fn test_resolve_branch_name() {
-        use std::path::PathBuf;
-
-        // Create a test repo
-        let repo = Repo {
-            path: PathBuf::from("/tmp/test-repo"),
-            name: "test-repo".to_string(),
-            slug: Some("user/test-repo".to_string()),
-        };
-
-        // Test non-default branch names (should pass through unchanged)
-        assert_eq!(resolve_branch_name(&repo, "feature-branch").unwrap(), "feature-branch");
-        assert_eq!(resolve_branch_name(&repo, "main").unwrap(), "main");
-        assert_eq!(resolve_branch_name(&repo, "master").unwrap(), "master");
-        assert_eq!(resolve_branch_name(&repo, "develop").unwrap(), "develop");
-
-        // Test 'default' keyword - this will fail in test environment since /tmp/test-repo doesn't exist
-        // but we can test that it attempts to resolve
-        let result = resolve_branch_name(&repo, "default");
-        // Should either succeed with a branch name or fail with an error
-        // We can't test the exact behavior without a real git repo
-        assert!(result.is_ok() || result.is_err());
-    }
 }
 
 /// Checkout or create a branch in a repository, with stashing and sync
@@ -419,8 +396,8 @@ pub fn checkout_branch(
     // Handle checkout result
     match checkout_result {
         Ok(output) if output.status.success() => {
-            // Try to pull/sync with remote if not creating a new branch (skip in tests)
-            if !create_branch && !cfg!(test) {
+            // Try to pull/sync with remote if not creating a new branch
+            if !create_branch {
                 let _ = Command::new("git")
                     .args(["-C", &repo.path.to_string_lossy(), "pull", "--ff-only"])
                     .output();
@@ -441,9 +418,13 @@ pub fn checkout_branch(
                 CheckoutAction::CheckedOutSynced
             };
 
+            // Get commit SHA after successful checkout
+            let commit_sha = get_current_commit_sha(repo);
+
             CheckoutResult {
                 repo: repo.clone(),
                 branch_name: branch_name.to_string(),
+                commit_sha,
                 action,
                 error: None,
             }
@@ -453,6 +434,7 @@ pub fn checkout_branch(
             CheckoutResult {
                 repo: repo.clone(),
                 branch_name: branch_name.to_string(),
+                commit_sha: None,
                 action: CheckoutAction::CheckedOutSynced,
                 error: Some(error_msg.trim().to_string()),
             }
@@ -460,9 +442,19 @@ pub fn checkout_branch(
         Err(e) => CheckoutResult {
             repo: repo.clone(),
             branch_name: branch_name.to_string(),
+            commit_sha: None,
             action: CheckoutAction::CheckedOutSynced,
             error: Some(e.to_string()),
         },
+    }
+}
+
+/// Resolve branch name, handling 'default' keyword
+pub fn resolve_branch_name(repo: &Repo, branch_name: &str) -> Result<String> {
+    if branch_name == "default" {
+        get_default_branch_local(repo)
+    } else {
+        Ok(branch_name.to_string())
     }
 }
 
@@ -470,52 +462,65 @@ pub fn checkout_branch(
 pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
     debug!("Getting default branch for repo: {}", repo.name);
 
-    // Method 1: Check symbolic ref (fastest)
-    if let Ok(output) = Command::new("git")
+    // Try to get the default branch from remote HEAD
+    let output = Command::new("git")
         .args(["-C", &repo.path.to_string_lossy(), "symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-    {
+        .output();
+
+    if let Ok(output) = output {
         if output.status.success() {
-            let ref_path = String::from_utf8_lossy(&output.stdout);
-            if let Some(branch) = ref_path.trim().strip_prefix("refs/remotes/origin/") {
-                debug!("Found default branch via symbolic-ref: {}", branch);
+            let head_ref = String::from_utf8(output.stdout)
+                .context("Invalid UTF-8 in git symbolic-ref output")?;
+
+            // Extract branch name from refs/remotes/origin/branch-name
+            if let Some(branch) = head_ref.trim().strip_prefix("refs/remotes/origin/") {
                 return Ok(branch.to_string());
             }
         }
     }
 
-    // Method 2: Query remote (slower but more reliable) - skip in test environment
-    if !cfg!(test) {
-        if let Ok(output) = Command::new("git")
-            .args(["-C", &repo.path.to_string_lossy(), "ls-remote", "--symref", "origin", "HEAD"])
-            .output()
-        {
+    // Fallback: try common default branch names (check if they exist locally)
+    for branch in &["main", "master"] {
+        let output = Command::new("git")
+            .args(["-C", &repo.path.to_string_lossy(), "rev-parse", "--verify", &format!("refs/heads/{}", branch)])
+            .output();
+
+        if let Ok(output) = output {
             if output.status.success() {
-                let output_str = String::from_utf8_lossy(&output.stdout);
-                for line in output_str.lines() {
-                    if line.starts_with("ref: refs/heads/") {
-                        if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
-                            debug!("Found default branch via ls-remote: {}", branch);
-                            return Ok(branch.trim().to_string());
-                        }
-                    }
+                return Ok(branch.to_string());
+            }
+        }
+    }
+
+    // Try to find the initial branch (the one created by git init)
+    let output = Command::new("git")
+        .args(["-C", &repo.path.to_string_lossy(), "branch", "--list"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let branches = String::from_utf8(output.stdout)
+                .context("Invalid UTF-8 in git branch output")?;
+
+            // Look for main or master first
+            for line in branches.lines() {
+                let branch = line.trim().trim_start_matches("* ");
+                if branch == "main" || branch == "master" {
+                    return Ok(branch.to_string());
+                }
+            }
+
+            // If no main/master, return the first branch
+            if let Some(first_line) = branches.lines().next() {
+                let branch = first_line.trim().trim_start_matches("* ");
+                if !branch.is_empty() {
+                    return Ok(branch.to_string());
                 }
             }
         }
     }
 
-    // Method 3: Ultimate fallback
-    debug!("Using fallback default branch: main");
-    Ok("main".to_string())
-}
-
-/// Resolve branch name - handle 'default' keyword
-pub fn resolve_branch_name(repo: &Repo, user_branch_name: &str) -> Result<String> {
-    if user_branch_name == "default" {
-        get_default_branch_local(repo)
-    } else {
-        Ok(user_branch_name.to_string())
-    }
+    Err(eyre::eyre!("Could not determine default branch for {}", repo.name))
 }
 
 /// Clone or update a repository

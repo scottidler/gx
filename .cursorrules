@@ -8,6 +8,11 @@
 - When writing new files or editing existing files, follow up with whitespace cleanup
 - Use the terminal command tool to run `whitespace -r` after file modifications
 
+## Git Commands
+- ALL git commands MUST include --no-pager flag BEFORE the subcommand to prevent terminal hanging
+- Example: `git --no-pager status` instead of `git status`
+- This applies to ALL git operations in the codebase
+
 ## Automation
 - Remember to execute whitespace cleanup as part of the development workflow
 - This helps maintain consistent code formatting across the project

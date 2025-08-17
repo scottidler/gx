@@ -1,4 +1,4 @@
-use crate::git::{RepoStatus, StatusChanges, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
+use crate::git::{RepoStatus, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
 use crate::config::OutputVerbosity;
 use colored::*;
 use std::io::{self, Write};
@@ -22,6 +22,216 @@ impl Default for StatusOptions {
     }
 }
 
+/// Unified display trait for consistent formatting across different result types
+pub trait UnifiedDisplay {
+    fn get_branch(&self) -> Option<&str>;
+    fn get_commit_sha(&self) -> Option<&str>;
+    fn get_repo(&self) -> &crate::repo::Repo;
+    fn get_emoji(&self, opts: &StatusOptions) -> String;
+    fn get_error(&self) -> Option<&str>;
+}
+
+/// Implementation of UnifiedDisplay for RepoStatus
+impl UnifiedDisplay for RepoStatus {
+    fn get_branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        self.commit_sha.as_deref()
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else if !self.is_clean {
+            // File change status logic
+            if self.changes.untracked > 0 {
+                if opts.use_emoji { "❓".to_string() } else { "?".to_string() }
+            } else if self.changes.modified > 0 {
+                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+            } else if self.changes.added > 0 {
+                if opts.use_emoji { "➕".to_string() } else { "A".to_string() }
+            } else if self.changes.deleted > 0 {
+                if opts.use_emoji { "❌".to_string() } else { "D".to_string() }
+            } else if self.changes.staged > 0 {
+                if opts.use_emoji { "🎯".to_string() } else { "S".to_string() }
+            } else {
+                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+            }
+        } else {
+            // Remote status logic for clean repos
+            match &self.remote_status {
+                RemoteStatus::UpToDate => if opts.use_emoji { "🟢".to_string() } else { "=".to_string() },
+                RemoteStatus::Ahead(n) => if opts.use_emoji { format!("⬆️{}", n) } else { format!("↑{}", n) },
+                RemoteStatus::Behind(n) => if opts.use_emoji { format!("⬇️{}", n) } else { format!("↓{}", n) },
+                RemoteStatus::Diverged(ahead, behind) => if opts.use_emoji { format!("🔀{}↑{}↓", ahead, behind) } else { format!("±{}↑{}↓", ahead, behind) },
+                RemoteStatus::NoRemote => if opts.use_emoji { "📍".to_string() } else { "~".to_string() },
+                RemoteStatus::Error(e) => if opts.use_emoji { format!("⚠️{}", e.chars().take(3).collect::<String>()) } else { format!("!{}", e.chars().take(3).collect::<String>()) },
+            }
+        }
+    }
+
+
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for CheckoutResult
+impl UnifiedDisplay for CheckoutResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.branch_name)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        self.commit_sha.as_deref()
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                CheckoutAction::CheckedOutSynced => if opts.use_emoji { "📥".to_string() } else { "OK".to_string() },
+                CheckoutAction::CreatedFromRemote => if opts.use_emoji { "✨".to_string() } else { "NEW".to_string() },
+                CheckoutAction::Stashed => if opts.use_emoji { "📦".to_string() } else { "STASH".to_string() },
+                CheckoutAction::HasUntracked => if opts.use_emoji { "⚠️".to_string() } else { "WARN".to_string() },
+            }
+        }
+    }
+
+
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for &RepoStatus
+impl UnifiedDisplay for &RepoStatus {
+    fn get_branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        self.commit_sha.as_deref()
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else if !self.is_clean {
+            // File change status logic
+            if self.changes.untracked > 0 {
+                if opts.use_emoji { "❓".to_string() } else { "?".to_string() }
+            } else if self.changes.modified > 0 {
+                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+            } else if self.changes.added > 0 {
+                if opts.use_emoji { "➕".to_string() } else { "A".to_string() }
+            } else if self.changes.deleted > 0 {
+                if opts.use_emoji { "❌".to_string() } else { "D".to_string() }
+            } else if self.changes.staged > 0 {
+                if opts.use_emoji { "🎯".to_string() } else { "S".to_string() }
+            } else {
+                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+            }
+        } else {
+            // Remote status logic for clean repos
+            match &self.remote_status {
+                RemoteStatus::UpToDate => if opts.use_emoji { "🟢".to_string() } else { "=".to_string() },
+                RemoteStatus::Ahead(n) => if opts.use_emoji { format!("⬆️{}", n) } else { format!("↑{}", n) },
+                RemoteStatus::Behind(n) => if opts.use_emoji { format!("⬇️{}", n) } else { format!("↓{}", n) },
+                RemoteStatus::Diverged(ahead, behind) => if opts.use_emoji { format!("🔀{}↑{}↓", ahead, behind) } else { format!("±{}↑{}↓", ahead, behind) },
+                RemoteStatus::NoRemote => if opts.use_emoji { "📍".to_string() } else { "~".to_string() },
+                RemoteStatus::Error(e) => if opts.use_emoji { format!("⚠️{}", e.chars().take(3).collect::<String>()) } else { format!("!{}", e.chars().take(3).collect::<String>()) },
+            }
+        }
+    }
+
+
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for &CheckoutResult
+impl UnifiedDisplay for &CheckoutResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.branch_name)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        self.commit_sha.as_deref()
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                CheckoutAction::CheckedOutSynced => if opts.use_emoji { "📥".to_string() } else { "OK".to_string() },
+                CheckoutAction::CreatedFromRemote => if opts.use_emoji { "✨".to_string() } else { "NEW".to_string() },
+                CheckoutAction::Stashed => if opts.use_emoji { "📦".to_string() } else { "STASH".to_string() },
+                CheckoutAction::HasUntracked => if opts.use_emoji { "⚠️".to_string() } else { "WARN".to_string() },
+            }
+        }
+    }
+
+
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Alignment widths for unified formatting
+#[derive(Debug)]
+pub struct AlignmentWidths {
+    pub branch_width: usize,
+    pub sha_width: usize,
+    pub emoji_width: usize,
+}
+
+impl AlignmentWidths {
+    /// Calculate alignment widths for a collection of UnifiedDisplay items
+    pub fn calculate<T: UnifiedDisplay>(items: &[T]) -> Self {
+        let branch_width = items.iter()
+            .filter_map(|item| item.get_branch())
+            .map(|branch| branch.len())
+            .max()
+            .unwrap_or(7) // "unknown".len() + padding
+            .max(7); // Minimum width for readability
+
+        let sha_width = 7; // Always 7 characters for SHA
+        let emoji_width = 2; // Most emojis are 2 chars wide
+
+        AlignmentWidths {
+            branch_width,
+            sha_width,
+            emoji_width,
+        }
+    }
+}
+
 /// Calculate relative path from current directory to repository
 fn get_relative_repo_path(repo_path: &Path) -> String {
     if let Ok(current_dir) = env::current_dir() {
@@ -36,28 +246,10 @@ fn get_relative_repo_path(repo_path: &Path) -> String {
         .to_string()
 }
 
-/// Calculate the maximum path length for alignment
-fn calculate_max_path_length(results: &[RepoStatus]) -> usize {
-    results.iter()
-        .map(|result| {
-            let relative_path = get_relative_repo_path(&result.repo.path);
-            let repo_slug = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
 
-            // Handle the case where we're in the repo directory itself
-            let display_path = if relative_path.is_empty() || relative_path == "." {
-                repo_slug.to_string()
-            } else {
-                relative_path
-            };
-
-            display_path.len()
-        })
-        .max()
-        .unwrap_or(0)
-}
 
 /// Format repository path with separate colors for path and repo slug
-fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, max_width: usize, use_colors: bool) -> String {
+fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, use_colors: bool) -> String {
     let relative_path = get_relative_repo_path(repo_path);
 
     // Handle the case where we're in the repo directory itself (relative path is empty or just ".")
@@ -79,289 +271,106 @@ fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, max_width: us
                 format!("{}{}", path_prefix.white(), slug_portion.cyan())
             };
 
-            // Calculate padding needed (max_width - actual visual length)
-            let visual_length = display_path.len(); // Visual length without ANSI codes
-            let padding = if max_width > visual_length {
-                " ".repeat(max_width - visual_length)
-            } else {
-                String::new()
-            };
-
-            format!("{}{}", padding, colored_path)
+            // Left-justify the path (no padding needed for left alignment)
+            colored_path
         } else {
             // Fallback: if repo slug not found in path, color the whole thing
-            let colored_path = display_path.cyan().to_string();
-            let visual_length = display_path.len();
-            let padding = if max_width > visual_length {
-                " ".repeat(max_width - visual_length)
-            } else {
-                String::new()
-            };
-            format!("{}{}", padding, colored_path)
+            display_path.cyan().to_string()
         }
     } else {
-        format!("{:>width$}", display_path, width = max_width)
+        display_path
     }
 }
 
-/// Display status results with summary
+/// Display a single item using unified formatting
+pub fn display_unified_format<T: UnifiedDisplay>(
+    item: &T,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) {
+    // Branch (right-justified)
+    let branch = item.get_branch().unwrap_or("unknown");
+    let branch_display = if opts.use_colors {
+        format!("{:>width$}", branch.green(), width = widths.branch_width)
+    } else {
+        format!("{:>width$}", branch, width = widths.branch_width)
+    };
+
+    // Commit SHA (fixed width)
+    let commit_display = item.get_commit_sha().unwrap_or("-------");
+    let sha_display = format!("{:width$}", commit_display, width = widths.sha_width);
+
+    // Emoji/Status indicator
+    let emoji = item.get_emoji(opts);
+    let emoji_display = format!("{:width$}", emoji, width = widths.emoji_width);
+
+    // Repository path/slug
+    let repo = item.get_repo();
+    let repo_slug = repo.slug.as_ref().unwrap_or(&repo.name);
+    let repo_display = format_repo_path_with_colors(
+        &repo.path,
+        repo_slug,
+        opts.use_colors
+    );
+
+    // Final format: <branch> <sha> <emoji> <repo>
+    println!("{} {} {} {}", branch_display, sha_display, emoji_display, repo_display);
+
+    // Handle error display
+    if let Some(error) = item.get_error() {
+        let error_msg = if opts.use_colors {
+            format!("  Error: {}", error.red())
+        } else {
+            format!("  Error: {}", error)
+        };
+        println!("{}", error_msg);
+    }
+}
+
+/// Display multiple items using unified formatting
+pub fn display_unified_results<T: UnifiedDisplay>(
+    items: &[T],
+    opts: &StatusOptions,
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    // Calculate alignment widths
+    let widths = AlignmentWidths::calculate(items);
+
+    // Display each item
+    for item in items {
+        display_unified_format(item, opts, &widths);
+    }
+}
+
+/// Display status results with summary using unified formatting
 pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
     let mut clean_count = 0;
     let mut dirty_count = 0;
     let mut error_count = 0;
 
-    // Calculate max path length for alignment (first pass)
-    let max_path_length = calculate_max_path_length(&results);
+    // Filter results based on verbosity (existing logic)
+    let filtered_results: Vec<&RepoStatus> = results.iter()
+        .filter(|result| {
+            match (&result.error, result.is_clean, opts.verbosity) {
+                (Some(_), _, _) => { error_count += 1; true }, // Always show errors
+                (None, true, OutputVerbosity::Compact) => { clean_count += 1; false }, // Skip clean in compact
+                (None, true, _) => { clean_count += 1; true }, // Show clean in other modes
+                (None, false, _) => { dirty_count += 1; true }, // Always show dirty
+            }
+        })
+        .collect();
 
-    for result in &results {
-        match &result.error {
-            Some(err) => {
-                // Always show errors (failures)
-                error_count += 1;
-                match opts.verbosity {
-                    OutputVerbosity::Compact | OutputVerbosity::Summary => {
-                        display_error_status(result, err, opts, max_path_length);
-                    }
-                    OutputVerbosity::Detailed | OutputVerbosity::Full => {
-                        display_error_status(result, err, opts, max_path_length);
-                    }
-                }
-            }
-            None if result.is_clean => {
-                clean_count += 1;
-                // Clean repos (successes)
-                match opts.verbosity {
-                    OutputVerbosity::Compact => {}, // Skip successful repos for compact
-                    OutputVerbosity::Summary | OutputVerbosity::Detailed => {
-                        display_clean_status(result, opts, max_path_length);
-                    }
-                    OutputVerbosity::Full => {
-                        display_clean_status(result, opts, max_path_length);
-                    }
-                }
-            }
-            None => {
-                dirty_count += 1;
-                // Dirty repos (have changes but no errors)
-                match opts.verbosity {
-                    OutputVerbosity::Compact => {}, // Skip if no errors
-                    OutputVerbosity::Summary => {
-                        display_compact_status(result, opts, max_path_length);
-                    }
-                    OutputVerbosity::Detailed => {
-                        display_compact_status(result, opts, max_path_length);
-                    }
-                    OutputVerbosity::Full => {
-                        display_detailed_status(result, opts, max_path_length);
-                    }
-                }
-            }
-        }
-    }
+    // Use unified display for filtered results
+    display_unified_results(&filtered_results, opts);
 
-    // Display summary
+    // Display summary (existing logic)
     display_summary(clean_count, dirty_count, error_count, opts);
 }
 
-/// Display compact one-line status with new format: path/<reposlug> <emoji> <7char-sha> <branch-name>
-fn display_compact_status(status: &RepoStatus, opts: &StatusOptions, max_path_length: usize) {
-    let changes = &status.changes;
 
-    // Repository path with slug (right-justified)
-    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
-    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
-
-    // Status emoji - determine the primary status indicator
-    let status_emoji = if !status.is_clean {
-        // Show file change status for dirty repos
-        if changes.untracked > 0 {
-            if opts.use_emoji { "❓" } else { "?" }
-        } else if changes.modified > 0 {
-            if opts.use_emoji { "📝" } else { "M" }
-        } else if changes.added > 0 {
-            if opts.use_emoji { "➕" } else { "A" }
-        } else if changes.deleted > 0 {
-            if opts.use_emoji { "❌" } else { "D" }
-        } else if changes.staged > 0 {
-            if opts.use_emoji { "🎯" } else { "S" }
-        } else {
-            if opts.use_emoji { "📝" } else { "M" }
-        }
-    } else {
-        // Show remote status for clean repos
-        match &status.remote_status {
-            RemoteStatus::UpToDate => if opts.use_emoji { "🟢" } else { "=" },
-            RemoteStatus::Ahead(_) => if opts.use_emoji { "⬆️" } else { "↑" },
-            RemoteStatus::Behind(_) => if opts.use_emoji { "⬇️" } else { "↓" },
-            RemoteStatus::Diverged(_, _) => if opts.use_emoji { "🔀" } else { "±" },
-            RemoteStatus::NoRemote => if opts.use_emoji { "📍" } else { "~" },
-            RemoteStatus::Error(_) => if opts.use_emoji { "⚠️" } else { "!" },
-        }
-    };
-
-    // Commit hash (7 characters or spaces if not available)
-    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
-
-    // Branch name (left-justified next to commit hash)
-    let branch = status.branch.as_deref().unwrap_or("unknown");
-    let branch_display = if opts.use_colors {
-        branch.green().to_string()
-    } else {
-        branch.to_string()
-    };
-
-    // Format: path/<reposlug> <emoji> <7char-sha> <branch-name>
-    println!("{} {} {} {}", repo_path_display, status_emoji, commit_display, branch_display);
-}
-
-/// Display detailed file-by-file status (placeholder for now)
-fn display_detailed_status(status: &RepoStatus, opts: &StatusOptions, _max_path_length: usize) {
-    let repo_header = if opts.use_colors {
-        format!("📁 {}", status.repo.name.cyan().bold())
-    } else {
-        format!("Repository: {}", status.repo.name)
-    };
-
-    println!("{}", repo_header);
-
-    if let Some(branch) = &status.branch {
-        let branch_info = if opts.use_colors {
-            format!("  Branch: {}", branch.green())
-        } else {
-            format!("  Branch: {}", branch)
-        };
-        println!("{}", branch_info);
-    }
-
-    // Remote status in detailed view
-    let remote_info = match &status.remote_status {
-        RemoteStatus::UpToDate => "  Remote: 🟢 Up to date".to_string(),
-        RemoteStatus::Ahead(n) => format!("  Remote: ⬆️  Ahead by {} commit{}", n, if *n == 1 { "" } else { "s" }),
-        RemoteStatus::Behind(n) => format!("  Remote: ⬇️  Behind by {} commit{}", n, if *n == 1 { "" } else { "s" }),
-        RemoteStatus::Diverged(ahead, behind) => format!("  Remote: 🔀 Ahead by {}, behind by {}", ahead, behind),
-        RemoteStatus::NoRemote => "  Remote: 📍 No tracking branch".to_string(),
-        RemoteStatus::Error(e) => format!("  Remote: ⚠️  Error: {}", e),
-    };
-
-    if opts.use_colors {
-        let colored_remote = match &status.remote_status {
-            RemoteStatus::UpToDate => remote_info.green().to_string(),
-            RemoteStatus::Ahead(_) => remote_info.blue().to_string(),
-            RemoteStatus::Behind(_) => remote_info.yellow().to_string(),
-            RemoteStatus::Diverged(_, _) => remote_info.magenta().to_string(),
-            RemoteStatus::NoRemote => remote_info.dimmed().to_string(),
-            RemoteStatus::Error(_) => remote_info.red().to_string(),
-        };
-        println!("{}", colored_remote);
-    } else {
-        // Non-emoji fallback for detailed view
-        let plain_remote = match &status.remote_status {
-            RemoteStatus::UpToDate => "  Remote: Up to date".to_string(),
-            RemoteStatus::Ahead(n) => format!("  Remote: Ahead by {} commit{}", n, if *n == 1 { "" } else { "s" }),
-            RemoteStatus::Behind(n) => format!("  Remote: Behind by {} commit{}", n, if *n == 1 { "" } else { "s" }),
-            RemoteStatus::Diverged(ahead, behind) => format!("  Remote: Ahead by {}, behind by {}", ahead, behind),
-            RemoteStatus::NoRemote => "  Remote: No tracking branch".to_string(),
-            RemoteStatus::Error(e) => format!("  Remote: Error: {}", e),
-        };
-        println!("{}", plain_remote);
-    }
-
-    // For detailed view, we'd need to run git status without --porcelain
-    // For now, show the summary
-    display_changes_summary(&status.changes, opts, "  ");
-    println!(); // Empty line between repos
-}
-
-/// Display clean repository status using new format
-fn display_clean_status(status: &RepoStatus, opts: &StatusOptions, max_path_length: usize) {
-    // Repository path with slug (right-justified)
-    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
-    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
-
-    // Status emoji for clean repos (show remote status)
-    let status_emoji = match &status.remote_status {
-        RemoteStatus::UpToDate => if opts.use_emoji { "🟢" } else { "=" },
-        RemoteStatus::Ahead(_) => if opts.use_emoji { "⬆️" } else { "↑" },
-        RemoteStatus::Behind(_) => if opts.use_emoji { "⬇️" } else { "↓" },
-        RemoteStatus::Diverged(_, _) => if opts.use_emoji { "🔀" } else { "±" },
-        RemoteStatus::NoRemote => if opts.use_emoji { "📍" } else { "~" },
-        RemoteStatus::Error(_) => if opts.use_emoji { "⚠️" } else { "!" },
-    };
-
-    // Commit hash (7 characters or spaces if not available)
-    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
-
-    // Branch name (left-justified next to commit hash)
-    let branch = status.branch.as_deref().unwrap_or("unknown");
-    let branch_display = if opts.use_colors {
-        branch.green().to_string()
-    } else {
-        branch.to_string()
-    };
-
-    // Format: path/<reposlug> <emoji> <7char-sha> <branch-name>
-    println!("{} {} {} {}", repo_path_display, status_emoji, commit_display, branch_display);
-}
-
-/// Display error status
-fn display_error_status(status: &RepoStatus, error: &str, opts: &StatusOptions, max_path_length: usize) {
-    let error_indicator = if opts.use_emoji { "❌" } else { "ERROR" };
-
-    // Repository path with slug (right-justified)
-    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
-    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
-
-    let error_msg = if opts.use_colors {
-        error.red().to_string()
-    } else {
-        error.to_string()
-    };
-
-    println!("{} {} {}", repo_path_display, error_indicator, error_msg);
-}
-
-/// Display changes summary with optional prefix
-fn display_changes_summary(changes: &StatusChanges, opts: &StatusOptions, prefix: &str) {
-    if opts.use_emoji {
-        if changes.modified > 0 {
-            println!("{}📝 {} modified", prefix, changes.modified);
-        }
-        if changes.added > 0 {
-            println!("{}➕ {} added", prefix, changes.added);
-        }
-        if changes.deleted > 0 {
-            println!("{}❌ {} deleted", prefix, changes.deleted);
-        }
-        if changes.untracked > 0 {
-            println!("{}❓ {} untracked", prefix, changes.untracked);
-        }
-        if changes.staged > 0 {
-            println!("{}🎯 {} staged", prefix, changes.staged);
-        }
-        if changes.renamed > 0 {
-            println!("{}🔄 {} renamed", prefix, changes.renamed);
-        }
-    } else {
-        if changes.modified > 0 {
-            println!("{}Modified: {}", prefix, changes.modified);
-        }
-        if changes.added > 0 {
-            println!("{}Added: {}", prefix, changes.added);
-        }
-        if changes.deleted > 0 {
-            println!("{}Deleted: {}", prefix, changes.deleted);
-        }
-        if changes.untracked > 0 {
-            println!("{}Untracked: {}", prefix, changes.untracked);
-        }
-        if changes.staged > 0 {
-            println!("{}Staged: {}", prefix, changes.staged);
-        }
-        if changes.renamed > 0 {
-            println!("{}Renamed: {}", prefix, changes.renamed);
-        }
-    }
-}
 
 /// Display final summary
 fn display_summary(clean_count: usize, dirty_count: usize, error_count: usize, opts: &StatusOptions) {
@@ -419,25 +428,9 @@ pub fn display_clone_result_immediate(result: &CloneResult) {
 
 /// Display a single checkout result immediately (for streaming output like slam)
 pub fn display_checkout_result_immediate(result: &CheckoutResult) {
-    match &result.error {
-        Some(err) => {
-            let repo_display = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
-            println!("❌ {} failed to checkout {}: {}",
-                repo_display.red().bold(),
-                result.branch_name.red(),
-                err
-            );
-        }
-        None => {
-            let repo_display = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
-            let (emoji, _action_text) = match result.action {
-                CheckoutAction::CheckedOutSynced => ("📥", "checked out and synced"),
-                CheckoutAction::CreatedFromRemote => ("✨", "created from remote"),
-                CheckoutAction::Stashed => ("📦", "stashed and checked out"),
-                CheckoutAction::HasUntracked => ("⚠️", "checked out (has untracked files)"),
-            };
-            println!("{} {} {}", emoji, repo_display.cyan().bold(), result.branch_name.green());
-        }
-    }
+    let opts = StatusOptions::default(); // Use default options for immediate display
+    let widths = AlignmentWidths::calculate(std::slice::from_ref(result));
+
+    display_unified_format(result, &opts, &widths);
     io::stdout().flush().expect("Failed to flush stdout");
 }

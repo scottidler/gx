@@ -229,6 +229,7 @@ fn process_checkout_command(
                 let result = git::CheckoutResult {
                     repo: repo.clone(),
                     branch_name: branch_name.to_string(),
+                    commit_sha: None,
                     action: git::CheckoutAction::CheckedOutSynced,
                     error: Some(format!("Failed to resolve branch name: {}", e)),
                 };
@@ -247,6 +248,7 @@ fn process_checkout_command(
                     let result = git::CheckoutResult {
                         repo: repo.clone(),
                         branch_name: branch_name.to_string(),
+                        commit_sha: None,
                         action: git::CheckoutAction::CheckedOutSynced,
                         error: Some(format!("Failed to resolve from branch '{}': {}", from, e)),
                     };
