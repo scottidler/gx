@@ -383,13 +383,15 @@ pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
     display_unified_results(&filtered_results, opts);
 
     // Display summary (existing logic)
-    display_summary(clean_count, dirty_count, error_count, opts);
+    display_unified_summary(clean_count, dirty_count, error_count, opts);
 }
 
 
 
-/// Display final summary
-fn display_summary(clean_count: usize, dirty_count: usize, error_count: usize, opts: &StatusOptions) {
+
+
+/// Display unified summary matching status format (clean/dirty/errors)
+pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_count: usize, opts: &StatusOptions) {
     if clean_count == 0 && dirty_count == 0 && error_count == 0 {
         let msg = if opts.use_emoji {
             "🔍 No repositories found"
