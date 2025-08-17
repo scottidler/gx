@@ -18,36 +18,21 @@ Default search order:
 
 ```yaml
 # gx.yml
-default_user_org: "tatari-tv"  # Can be GitHub user or organization
-parallelism: "nproc"  # Number of concurrent operations (default: nproc)
-
-# Tool requirements and paths
-tools:
-  git:
-    min_version: "2.30.0"
-  gh:
-    min_version: "2.0.0"
-
-# Output preferences
-output:
-  emoji: true          # Use emojis in output
-  compact: true        # Compact status format by default
-  show_clean: false    # Don't show clean repos by default
-  colors: true         # Colorized output
+default-user-org: "tatari-tv"  # Can be GitHub user or organization
+jobs: "nproc"  # Number of concurrent operations (default: nproc)
 
 # Repository discovery
-repo_discovery:
-  max_depth: 10        # Max directory depth to scan
-  ignore_patterns:     # Patterns to ignore during discovery
+repo-discovery:
+  max-depth: 10        # Max directory depth to scan
+  ignore-patterns:     # Patterns to ignore during discovery
     - "node_modules"
     - ".git"
     - "target"
     - "build"
 
-# Branch operations
-branches:
-  default_base: "main"  # Default base branch for new branches
-  fallback_base: "master"  # Fallback if main doesn't exist
+# Output preferences (optional)
+output:
+  verbosity: summary   # Output verbosity: compact, summary, detailed, or full (default: summary)
 
 # Logging
 logging:
@@ -74,17 +59,16 @@ All config options can be set via environment variables using `GX_` prefix:
 
 ```bash
 export GX_USER_ORG="tatari-tv"
-export GX_PARALLELISM=16  # Override default (nproc)
-export GX_OUTPUT_EMOJI=false
+export GX_JOBS=16  # Override default (nproc)
+export GX_OUTPUT_VERBOSITY=detailed
 export GX_REPO_DEPTH=5
 export GX_LOGGING_LEVEL=debug
 ```
 
 Nested config uses underscore separation:
-- `output.emoji` → `GX_OUTPUT_EMOJI`
-
-- `default_user_org` → `GX_USER_ORG`
-- `repo_discovery.max_depth` → `GX_REPO_DEPTH`
+- `output.verbosity` → `GX_OUTPUT_VERBOSITY`
+- `default-user-org` → `GX_USER_ORG`
+- `repo-discovery.max-depth` → `GX_REPO_DEPTH`
 
 ## CLI Override Examples
 
@@ -93,8 +77,8 @@ Nested config uses underscore separation:
 gx --user-org scottidler clone    # Clone from user scottidler
 gx --user-org tatari-tv clone     # Clone from org tatari-tv
 
-# Override parallelism
-gx --parallel 16 status
+# Override jobs
+gx --jobs 16 status
 
 # Override output format
 gx --no-emoji --detailed status
@@ -107,6 +91,6 @@ gx --config ./custom-gx.yml clone tatari-tv
 
 - Validate tool versions on startup
 - Check file paths exist and are executable
-- Validate numeric ranges (parallelism > 0, max_depth > 0)
+- Validate numeric ranges (jobs > 0, max_depth > 0)
 - Warn about unknown configuration keys
 - Provide helpful error messages for invalid values

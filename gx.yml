@@ -1,4 +1,21 @@
 # gx.yml - Sample configuration file
-name: "John Doe"
-age: 30
-debug: false
+default-user-org: "scottidler"
+jobs: "nproc"
+
+# Repository discovery settings
+repo-discovery:
+  max-depth: 3  # Maximum directory depth to scan (default: 3)
+  ignore-patterns:
+    - "node_modules"
+    - ".git"
+    - "target"
+    - "build"
+
+# Output preferences
+output:
+  verbosity: summary  # compact, summary, detailed, or full (default: summary)
+
+# Logging
+logging:
+  level: "info"
+  file: "~/.local/share/gx/logs/gx.log"

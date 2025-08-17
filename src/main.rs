@@ -20,7 +20,7 @@ mod repo;
 pub mod test_utils;
 
 use cli::{Cli, Commands};
-use config::Config;
+use config::{Config, OutputVerbosity};
 use output::StatusOptions;
 
 fn setup_logging() -> Result<()> {
@@ -98,16 +98,16 @@ fn process_status_command(
 ) -> Result<()> {
     info!("Processing status command with {} patterns", patterns.len());
 
-    // Determine parallelism
-    let parallelism = cli.parallel
-        .or_else(|| get_parallelism_from_config(config))
+    // Determine jobs
+    let jobs = cli.parallel
+        .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using parallelism: {}", parallelism);
+    debug!("Using jobs: {}", jobs);
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
-        .num_threads(parallelism)
+        .num_threads(jobs)
         .build_global()
         .context("Failed to initialize thread pool")?;
 
@@ -141,9 +141,19 @@ fn process_status_command(
         .collect();
 
     // 4. Display results
+    let verbosity = if detailed {
+        // CLI --detailed flag overrides config
+        OutputVerbosity::Detailed
+    } else {
+        // Use config verbosity or default
+        config.output
+            .as_ref()
+            .and_then(|o| o.verbosity)
+            .unwrap_or_default()
+    };
+
     let status_opts = StatusOptions {
-        show_all: true, // Always show all repositories
-        detailed,
+        verbosity,
         use_emoji,
         use_colors,
     };
@@ -170,23 +180,23 @@ fn process_checkout_command(
 ) -> Result<()> {
     info!("Processing checkout command for branch '{}' with {} patterns", branch_name, patterns.len());
 
-    // Determine parallelism
-    let parallelism = cli.parallel
-        .or_else(|| get_parallelism_from_config(config))
+    // Determine jobs
+    let jobs = cli.parallel
+        .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using parallelism: {}", parallelism);
+    debug!("Using jobs: {}", jobs);
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
-        .num_threads(parallelism)
+        .num_threads(jobs)
         .build_global()
         .context("Failed to initialize thread pool")?;
 
     // Determine max depth
     let max_depth = cli.max_depth
         .or_else(|| get_max_depth_from_config(config))
-        .unwrap_or(2);
+        .unwrap_or(3);
 
     debug!("Using max depth: {}", max_depth);
 
@@ -256,16 +266,16 @@ fn process_clone_command(
 ) -> Result<()> {
     info!("Processing clone command for user/org '{}' with {} patterns", user_or_org, patterns.len());
 
-    // Determine parallelism
-    let parallelism = cli.parallel
-        .or_else(|| get_parallelism_from_config(config))
+    // Determine jobs
+    let jobs = cli.parallel
+        .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using parallelism: {}", parallelism);
+    debug!("Using jobs: {}", jobs);
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
-        .num_threads(parallelism)
+        .num_threads(jobs)
         .build_global()
         .context("Failed to initialize thread pool")?;
 
@@ -353,18 +363,17 @@ fn process_clone_command(
     Ok(())
 }
 
-/// Get parallelism from config, handling "nproc" string
-fn get_parallelism_from_config(_config: &Config) -> Option<usize> {
-    // This would need to be implemented once we have the config structure
-    // For now, return None to use nproc
-    None
+/// Get jobs from config, handling "nproc" string
+fn get_jobs_from_config(config: &Config) -> Option<usize> {
+    match config.jobs.as_deref()? {
+        "nproc" => get_nproc(),
+        jobs_str => jobs_str.parse().ok(),
+    }
 }
 
 /// Get max depth from config
-fn get_max_depth_from_config(_config: &Config) -> Option<usize> {
-    // This would need to be implemented once we have the config structure
-    // For now, return None to use default
-    None
+fn get_max_depth_from_config(config: &Config) -> Option<usize> {
+    config.repo_discovery.as_ref()?.max_depth
 }
 
 /// Get number of processors using num_cpus crate

@@ -6,17 +6,91 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
-    pub name: String,
-    pub age: u32,
-    pub debug: bool,
+    #[serde(rename = "default-user-org")]
+    pub default_user_org: Option<String>,
+    pub jobs: Option<String>, // Can be "nproc" or a number
+    pub output: Option<OutputConfig>,
+    #[serde(rename = "repo-discovery")]
+    pub repo_discovery: Option<RepoDiscoveryConfig>,
+    pub logging: Option<LoggingConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputVerbosity {
+    Compact,  // only summary output for the repos that had any errors; skip successful ones in the output
+    Summary,  // only the summary of every repo, success or failure
+    Detailed, // show the detailed output only for failures, successes still remain as summary
+    Full,     // show the detailed output for all repos irrespective of errors or not
+}
+
+impl Default for OutputVerbosity {
+    fn default() -> Self {
+        OutputVerbosity::Summary
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    pub verbosity: Option<OutputVerbosity>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RepoDiscoveryConfig {
+    #[serde(rename = "max-depth")]
+    pub max_depth: Option<usize>,
+    #[serde(rename = "ignore-patterns")]
+    pub ignore_patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub level: Option<String>,
+    pub file: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            name: "John Doe".to_string(),
-            age: 30,
-            debug: false,
+            default_user_org: None,
+            jobs: None,
+            output: None,
+            repo_discovery: Some(RepoDiscoveryConfig::default()),
+            logging: None,
+        }
+    }
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            verbosity: Some(OutputVerbosity::Summary),
+        }
+    }
+}
+
+impl Default for RepoDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: Some(3), // Default changed from 2 to 3
+            ignore_patterns: Some(vec![
+                "node_modules".to_string(),
+                ".git".to_string(),
+                "target".to_string(),
+                "build".to_string(),
+            ]),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: Some("info".to_string()),
+            file: Some("~/.local/share/gx/logs/gx.log".to_string()),
         }
     }
 }

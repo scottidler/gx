@@ -5,7 +5,24 @@ use std::sync::LazyLock;
 
 static HELP_TEXT: LazyLock<String> = LazyLock::new(|| get_tool_validation_help());
 static JOBS_HELP: LazyLock<String> = LazyLock::new(|| format!("Number of parallel operations [default: {}]", num_cpus::get()));
-static DEPTH_HELP: LazyLock<String> = LazyLock::new(|| "Maximum directory depth to scan [default: 2]".to_string());
+static DEPTH_HELP: LazyLock<String> = LazyLock::new(|| {
+    let effective_default = get_effective_max_depth_default();
+    format!("Maximum directory depth to scan [default: {}]", effective_default)
+});
+
+/// Get the effective default max depth by loading config if available
+fn get_effective_max_depth_default() -> usize {
+    // Try to load config to get the actual default that would be used
+    match crate::config::Config::load(None) {
+        Ok(config) => {
+            config.repo_discovery
+                .as_ref()
+                .and_then(|rd| rd.max_depth)
+                .unwrap_or(3) // Program default if not in config
+        }
+        Err(_) => 3, // Program default if config fails to load
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -27,7 +44,7 @@ pub struct Cli {
     #[arg(short, long, help = "Enable verbose output")]
     pub verbose: bool,
 
-    /// Override parallelism
+    /// Override jobs
     #[arg(short = 'j', long = "jobs", value_name = "INT", help = JOBS_HELP.as_str())]
     pub parallel: Option<usize>,
 

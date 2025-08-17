@@ -1,11 +1,13 @@
 use crate::git::{RepoStatus, StatusChanges, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
+use crate::config::OutputVerbosity;
 use colored::*;
 use std::io::{self, Write};
+use std::path::Path;
+use std::env;
 
 #[derive(Debug)]
 pub struct StatusOptions {
-    pub show_all: bool,
-    pub detailed: bool,
+    pub verbosity: OutputVerbosity,
     pub use_emoji: bool,
     pub use_colors: bool,
 }
@@ -13,11 +15,92 @@ pub struct StatusOptions {
 impl Default for StatusOptions {
     fn default() -> Self {
         Self {
-            show_all: false,
-            detailed: false,
+            verbosity: OutputVerbosity::Summary,
             use_emoji: true,
             use_colors: true,
         }
+    }
+}
+
+/// Calculate relative path from current directory to repository
+fn get_relative_repo_path(repo_path: &Path) -> String {
+    if let Ok(current_dir) = env::current_dir() {
+        if let Ok(relative) = repo_path.strip_prefix(&current_dir) {
+            return relative.to_string_lossy().to_string();
+        }
+    }
+    // Fallback to just the repo name if relative path calculation fails
+    repo_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Calculate the maximum path length for alignment
+fn calculate_max_path_length(results: &[RepoStatus]) -> usize {
+    results.iter()
+        .map(|result| {
+            let relative_path = get_relative_repo_path(&result.repo.path);
+            let repo_slug = result.repo.slug.as_ref().unwrap_or(&result.repo.name);
+
+            // Handle the case where we're in the repo directory itself
+            let display_path = if relative_path.is_empty() || relative_path == "." {
+                repo_slug.to_string()
+            } else {
+                relative_path
+            };
+
+            display_path.len()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Format repository path with separate colors for path and repo slug
+fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, max_width: usize, use_colors: bool) -> String {
+    let relative_path = get_relative_repo_path(repo_path);
+
+    // Handle the case where we're in the repo directory itself (relative path is empty or just ".")
+    let display_path = if relative_path.is_empty() || relative_path == "." {
+        repo_slug.to_string()
+    } else {
+        relative_path
+    };
+
+    if use_colors {
+        // Find where the repo slug appears in the display path
+        if let Some(slug_start) = display_path.rfind(repo_slug) {
+            let path_prefix = &display_path[..slug_start];
+            let slug_portion = &display_path[slug_start..];
+
+            let colored_path = if path_prefix.is_empty() {
+                slug_portion.cyan().to_string()
+            } else {
+                format!("{}{}", path_prefix.white(), slug_portion.cyan())
+            };
+
+            // Calculate padding needed (max_width - actual visual length)
+            let visual_length = display_path.len(); // Visual length without ANSI codes
+            let padding = if max_width > visual_length {
+                " ".repeat(max_width - visual_length)
+            } else {
+                String::new()
+            };
+
+            format!("{}{}", padding, colored_path)
+        } else {
+            // Fallback: if repo slug not found in path, color the whole thing
+            let colored_path = display_path.cyan().to_string();
+            let visual_length = display_path.len();
+            let padding = if max_width > visual_length {
+                " ".repeat(max_width - visual_length)
+            } else {
+                String::new()
+            };
+            format!("{}{}", padding, colored_path)
+        }
+    } else {
+        format!("{:>width$}", display_path, width = max_width)
     }
 }
 
@@ -27,24 +110,50 @@ pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
     let mut dirty_count = 0;
     let mut error_count = 0;
 
+    // Calculate max path length for alignment (first pass)
+    let max_path_length = calculate_max_path_length(&results);
+
     for result in &results {
         match &result.error {
             Some(err) => {
-                display_error_status(result, err, opts);
+                // Always show errors (failures)
                 error_count += 1;
+                match opts.verbosity {
+                    OutputVerbosity::Compact | OutputVerbosity::Summary => {
+                        display_error_status(result, err, opts, max_path_length);
+                    }
+                    OutputVerbosity::Detailed | OutputVerbosity::Full => {
+                        display_error_status(result, err, opts, max_path_length);
+                    }
+                }
             }
             None if result.is_clean => {
                 clean_count += 1;
-                if opts.show_all {
-                    display_clean_status(result, opts);
+                // Clean repos (successes)
+                match opts.verbosity {
+                    OutputVerbosity::Compact => {}, // Skip successful repos for compact
+                    OutputVerbosity::Summary | OutputVerbosity::Detailed => {
+                        display_clean_status(result, opts, max_path_length);
+                    }
+                    OutputVerbosity::Full => {
+                        display_clean_status(result, opts, max_path_length);
+                    }
                 }
             }
             None => {
                 dirty_count += 1;
-                if opts.detailed {
-                    display_detailed_status(result, opts);
-                } else {
-                    display_compact_status(result, opts);
+                // Dirty repos (have changes but no errors)
+                match opts.verbosity {
+                    OutputVerbosity::Compact => {}, // Skip if no errors
+                    OutputVerbosity::Summary => {
+                        display_compact_status(result, opts, max_path_length);
+                    }
+                    OutputVerbosity::Detailed => {
+                        display_compact_status(result, opts, max_path_length);
+                    }
+                    OutputVerbosity::Full => {
+                        display_detailed_status(result, opts, max_path_length);
+                    }
                 }
             }
         }
@@ -54,20 +163,13 @@ pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
     display_summary(clean_count, dirty_count, error_count, opts);
 }
 
-/// Display compact one-line status with slam-style alignment
-fn display_compact_status(status: &RepoStatus, opts: &StatusOptions) {
+/// Display compact one-line status with new format: path/<reposlug> <emoji> <7char-sha> <branch-name>
+fn display_compact_status(status: &RepoStatus, opts: &StatusOptions, max_path_length: usize) {
     let changes = &status.changes;
 
-    // Branch name with fixed width for alignment (like slam)
-    let branch = status.branch.as_deref().unwrap_or("unknown");
-    let branch_display = if opts.use_colors {
-        format!("{:>6}", branch.green())
-    } else {
-        format!("{:>6}", branch)
-    };
-
-    // Commit hash (7 characters or spaces if not available)
-    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
+    // Repository path with slug (right-justified)
+    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
+    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
 
     // Status emoji - determine the primary status indicator
     let status_emoji = if !status.is_clean {
@@ -97,20 +199,23 @@ fn display_compact_status(status: &RepoStatus, opts: &StatusOptions) {
         }
     };
 
-    // Repository slug
-    let repo_display = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
-    let repo_name = if opts.use_colors {
-        repo_display.cyan().to_string()
+    // Commit hash (7 characters or spaces if not available)
+    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
+
+    // Branch name (left-justified next to commit hash)
+    let branch = status.branch.as_deref().unwrap_or("unknown");
+    let branch_display = if opts.use_colors {
+        branch.green().to_string()
     } else {
-        repo_display.clone()
+        branch.to_string()
     };
 
-    // Format: branch commit_hash emoji repo_slug
-    println!("{} {} {} {}", branch_display, commit_display, status_emoji, repo_name);
+    // Format: path/<reposlug> <emoji> <7char-sha> <branch-name>
+    println!("{} {} {} {}", repo_path_display, status_emoji, commit_display, branch_display);
 }
 
 /// Display detailed file-by-file status (placeholder for now)
-fn display_detailed_status(status: &RepoStatus, opts: &StatusOptions) {
+fn display_detailed_status(status: &RepoStatus, opts: &StatusOptions, _max_path_length: usize) {
     let repo_header = if opts.use_colors {
         format!("📁 {}", status.repo.name.cyan().bold())
     } else {
@@ -167,18 +272,11 @@ fn display_detailed_status(status: &RepoStatus, opts: &StatusOptions) {
     println!(); // Empty line between repos
 }
 
-/// Display clean repository status using slam-style alignment
-fn display_clean_status(status: &RepoStatus, opts: &StatusOptions) {
-    // Branch name with fixed width for alignment
-    let branch = status.branch.as_deref().unwrap_or("unknown");
-    let branch_display = if opts.use_colors {
-        format!("{:>6}", branch.green())
-    } else {
-        format!("{:>6}", branch)
-    };
-
-    // Commit hash (7 characters or spaces if not available)
-    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
+/// Display clean repository status using new format
+fn display_clean_status(status: &RepoStatus, opts: &StatusOptions, max_path_length: usize) {
+    // Repository path with slug (right-justified)
+    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
+    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
 
     // Status emoji for clean repos (show remote status)
     let status_emoji = match &status.remote_status {
@@ -190,26 +288,28 @@ fn display_clean_status(status: &RepoStatus, opts: &StatusOptions) {
         RemoteStatus::Error(_) => if opts.use_emoji { "⚠️" } else { "!" },
     };
 
-    // Repository slug
-    let repo_display = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
-    let repo_name = if opts.use_colors {
-        repo_display.cyan().to_string()
+    // Commit hash (7 characters or spaces if not available)
+    let commit_display = status.commit_sha.as_deref().unwrap_or("       ");
+
+    // Branch name (left-justified next to commit hash)
+    let branch = status.branch.as_deref().unwrap_or("unknown");
+    let branch_display = if opts.use_colors {
+        branch.green().to_string()
     } else {
-        repo_display.clone()
+        branch.to_string()
     };
 
-    // Format: branch commit_hash emoji repo_slug
-    println!("{} {} {} {}", branch_display, commit_display, status_emoji, repo_name);
+    // Format: path/<reposlug> <emoji> <7char-sha> <branch-name>
+    println!("{} {} {} {}", repo_path_display, status_emoji, commit_display, branch_display);
 }
 
 /// Display error status
-fn display_error_status(status: &RepoStatus, error: &str, opts: &StatusOptions) {
+fn display_error_status(status: &RepoStatus, error: &str, opts: &StatusOptions, max_path_length: usize) {
     let error_indicator = if opts.use_emoji { "❌" } else { "ERROR" };
-    let repo_name = if opts.use_colors {
-        status.repo.name.red().to_string()
-    } else {
-        status.repo.name.clone()
-    };
+
+    // Repository path with slug (right-justified)
+    let repo_slug = status.repo.slug.as_ref().unwrap_or(&status.repo.name);
+    let repo_path_display = format_repo_path_with_colors(&status.repo.path, repo_slug, max_path_length, opts.use_colors);
 
     let error_msg = if opts.use_colors {
         error.red().to_string()
@@ -217,7 +317,7 @@ fn display_error_status(status: &RepoStatus, error: &str, opts: &StatusOptions) 
         error.to_string()
     };
 
-    println!("{} {} {}", repo_name, error_indicator, error_msg);
+    println!("{} {} {}", repo_path_display, error_indicator, error_msg);
 }
 
 /// Display changes summary with optional prefix

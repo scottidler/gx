@@ -37,7 +37,7 @@ fn test_status_shows_commit_hash() {
 
     let status_line = status_line.unwrap();
 
-    // Should have format: "  branch commit_hash emoji repo_name"
+    // Should have format: "path/reposlug emoji commit_hash branch_name"
     let parts: Vec<&str> = status_line.split_whitespace().collect();
 
     if parts.len() < 4 {
@@ -45,8 +45,8 @@ fn test_status_shows_commit_hash() {
                parts.len(), parts, status_line, stdout);
     }
 
-    // Second part should be 7-character commit hash
-    let commit_hash = parts[1];
+    // Third part should be 7-character commit hash
+    let commit_hash = parts[2];
     assert_eq!(commit_hash.len(), 7, "Commit hash should be 7 characters, got: '{}'", commit_hash);
     assert!(commit_hash.chars().all(|c| c.is_ascii_hexdigit()), "Commit hash should be hex digits, got: '{}'", commit_hash);
 }
