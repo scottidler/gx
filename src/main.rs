@@ -234,7 +234,9 @@ fn process_checkout_command(
                     error: Some(format!("Failed to resolve branch name: {}", e)),
                 };
                 error_count.fetch_add(1, Ordering::Relaxed);
-                output::display_checkout_result_immediate(&result);
+                if let Err(e) = output::display_checkout_result_immediate(&result) {
+                    log::error!("Failed to display checkout result: {}", e);
+                }
                 return;
             }
         };
@@ -253,7 +255,9 @@ fn process_checkout_command(
                         error: Some(format!("Failed to resolve from branch '{}': {}", from, e)),
                     };
                     error_count.fetch_add(1, Ordering::Relaxed);
-                    output::display_checkout_result_immediate(&result);
+                    if let Err(e) = output::display_checkout_result_immediate(&result) {
+                    log::error!("Failed to display checkout result: {}", e);
+                }
                     return;
                 }
             }
@@ -271,7 +275,9 @@ fn process_checkout_command(
         }
 
         // Display immediately (like slam)
-        output::display_checkout_result_immediate(&result);
+        if let Err(e) = output::display_checkout_result_immediate(&result) {
+            log::error!("Failed to display checkout result: {}", e);
+        }
     });
 
     // 4. Show summary
@@ -377,7 +383,9 @@ fn process_clone_command(
         }
 
         // Display immediately (like slam)
-        output::display_clone_result_immediate(&result);
+        if let Err(e) = output::display_clone_result_immediate(&result) {
+            log::error!("Failed to display clone result: {}", e);
+        }
     });
 
     // 5. Show summary

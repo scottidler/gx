@@ -1,9 +1,11 @@
 use crate::git::{RepoStatus, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
 use crate::config::OutputVerbosity;
 use colored::*;
+use eyre::{Context, Result};
 use std::io::{self, Write};
 use std::path::Path;
 use std::env;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug)]
 pub struct StatusOptions {
@@ -222,7 +224,17 @@ impl AlignmentWidths {
             .max(7); // Minimum width for readability
 
         let sha_width = 7; // Always 7 characters for SHA
-        let emoji_width = 2; // Most emojis are 2 chars wide
+
+        // Calculate actual emoji width by measuring all emoji combinations
+        let emoji_width = items.iter()
+            .map(|item| {
+                let opts = StatusOptions::default();
+                let emoji = item.get_emoji(&opts);
+                emoji.width()
+            })
+            .max()
+            .unwrap_or(2) // Fallback to 2 if no items
+            .max(2); // Minimum width for readability
 
         AlignmentWidths {
             branch_width,
@@ -291,18 +303,22 @@ pub fn display_unified_format<T: UnifiedDisplay>(
     // Branch (right-justified)
     let branch = item.get_branch().unwrap_or("unknown");
     let branch_display = if opts.use_colors {
-        format!("{:>width$}", branch.green(), width = widths.branch_width)
+        format!("{:>width$}", branch.magenta(), width = widths.branch_width)
     } else {
         format!("{:>width$}", branch, width = widths.branch_width)
     };
 
     // Commit SHA (fixed width)
     let commit_display = item.get_commit_sha().unwrap_or("-------");
-    let sha_display = format!("{:width$}", commit_display, width = widths.sha_width);
+    let sha_display = if opts.use_colors {
+        format!("{:width$}", commit_display.bright_black(), width = widths.sha_width)
+    } else {
+        format!("{:width$}", commit_display, width = widths.sha_width)
+    };
 
-    // Emoji/Status indicator
+    // Emoji/Status indicator (left-aligned)
     let emoji = item.get_emoji(opts);
-    let emoji_display = format!("{:width$}", emoji, width = widths.emoji_width);
+    let emoji_display = format!("{:<width$}", emoji, width = widths.emoji_width);
 
     // Repository path/slug
     let repo = item.get_repo();
@@ -407,7 +423,7 @@ fn display_summary(clean_count: usize, dirty_count: usize, error_count: usize, o
 
 
 /// Display a single clone result immediately (for streaming output like slam)
-pub fn display_clone_result_immediate(result: &CloneResult) {
+pub fn display_clone_result_immediate(result: &CloneResult) -> Result<()> {
     match &result.error {
         Some(err) => {
             println!("⚠️  {} Failed: {}", result.repo_slug.red().bold(), err.red());
@@ -423,14 +439,16 @@ pub fn display_clone_result_immediate(result: &CloneResult) {
             println!("{} {}", emoji, result.repo_slug.cyan().bold());
         }
     }
-    io::stdout().flush().expect("Failed to flush stdout");
+    io::stdout().flush().context("Failed to flush stdout")?;
+    Ok(())
 }
 
 /// Display a single checkout result immediately (for streaming output like slam)
-pub fn display_checkout_result_immediate(result: &CheckoutResult) {
+pub fn display_checkout_result_immediate(result: &CheckoutResult) -> Result<()> {
     let opts = StatusOptions::default(); // Use default options for immediate display
     let widths = AlignmentWidths::calculate(std::slice::from_ref(result));
 
     display_unified_format(result, &opts, &widths);
-    io::stdout().flush().expect("Failed to flush stdout");
+    io::stdout().flush().context("Failed to flush stdout")?;
+    Ok(())
 }

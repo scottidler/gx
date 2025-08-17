@@ -99,8 +99,8 @@ fn test_alignment_widths_calculation() {
     assert_eq!(widths.branch_width, "feature-branch-with-long-name".len());
     // SHA width should always be 7
     assert_eq!(widths.sha_width, 7);
-    // Emoji width should be 2
-    assert_eq!(widths.emoji_width, 2);
+    // Emoji width should be at least 2 (calculated dynamically based on actual emoji widths)
+    assert!(widths.emoji_width >= 2);
 }
 
 #[test]
@@ -223,4 +223,68 @@ fn test_no_emoji_mode() {
     // Should use text instead of emojis
     assert_eq!(status.get_emoji(&opts), "=".to_string());  // Up to date
     assert_eq!(checkout.get_emoji(&opts), "OK".to_string()); // Checked out synced
+}
+
+#[test]
+fn test_emoji_width_calculation_with_complex_combinations() {
+    let repo = Repo {
+        path: PathBuf::from("/tmp/test-repo"),
+        name: "test-repo".to_string(),
+        slug: Some("user/test-repo".to_string()),
+    };
+
+    // Create statuses with different emoji combinations that have varying widths
+    let simple_emoji_status = RepoStatus {
+        repo: repo.clone(),
+        branch: Some("main".to_string()),
+        commit_sha: Some("abc1234".to_string()),
+        is_clean: true,
+        changes: gx::git::StatusChanges::default(),
+        remote_status: gx::git::RemoteStatus::UpToDate, // 🟢 (2 chars)
+        error: None,
+    };
+
+    let ahead_status = RepoStatus {
+        repo: repo.clone(),
+        branch: Some("feature".to_string()),
+        commit_sha: Some("def5678".to_string()),
+        is_clean: true,
+        changes: gx::git::StatusChanges::default(),
+        remote_status: gx::git::RemoteStatus::Ahead(15), // ⬆️15 (4 chars)
+        error: None,
+    };
+
+    let diverged_status = RepoStatus {
+        repo: repo.clone(),
+        branch: Some("develop".to_string()),
+        commit_sha: Some("ghi9012".to_string()),
+        is_clean: true,
+        changes: gx::git::StatusChanges::default(),
+        remote_status: gx::git::RemoteStatus::Diverged(5, 3), // 🔀5↑3↓ (6 chars)
+        error: None,
+    };
+
+    let error_status = RepoStatus {
+        repo: repo.clone(),
+        branch: Some("bugfix".to_string()),
+        commit_sha: Some("jkl3456".to_string()),
+        is_clean: true,
+        changes: gx::git::StatusChanges::default(),
+        remote_status: gx::git::RemoteStatus::Error("timeout".to_string()), // ⚠️tim (5 chars)
+        error: None,
+    };
+
+    let items = vec![&simple_emoji_status, &ahead_status, &diverged_status, &error_status];
+    let widths = AlignmentWidths::calculate(&items);
+
+    // The emoji width should be calculated based on the widest emoji combination
+    // 🔀5↑3↓ should be the widest at 6 characters
+    assert!(widths.emoji_width >= 6, "Emoji width should be at least 6 for complex combinations, got {}", widths.emoji_width);
+
+    // Verify individual emoji widths
+    let opts = StatusOptions::default();
+    assert_eq!(simple_emoji_status.get_emoji(&opts), "🟢");
+    assert_eq!(ahead_status.get_emoji(&opts), "⬆️15");
+    assert_eq!(diverged_status.get_emoji(&opts), "🔀5↑3↓");
+    assert_eq!(error_status.get_emoji(&opts), "⚠️tim");
 }
