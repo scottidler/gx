@@ -796,3 +796,220 @@ fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChan
 
     Ok(changes)
 }
+
+// Enhanced git operations for create/review functionality
+
+/// Create a new branch from current HEAD
+pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "checkout", "-b", branch_name])
+        .output()
+        .context("Failed to execute git checkout -b")?;
+
+    if output.status.success() {
+        debug!("Created branch '{}' in '{}'", branch_name, repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to create branch '{}': {}", branch_name, error))
+    }
+}
+
+/// Switch to an existing branch
+pub fn switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "checkout", branch_name])
+        .output()
+        .context("Failed to execute git checkout")?;
+
+    if output.status.success() {
+        debug!("Switched to branch '{}' in '{}'", branch_name, repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to switch to branch '{}': {}", branch_name, error))
+    }
+}
+
+/// Delete a local branch
+pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "branch", "-D", branch_name])
+        .output()
+        .context("Failed to execute git branch -D")?;
+
+    if output.status.success() {
+        debug!("Deleted local branch '{}' in '{}'", branch_name, repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to delete local branch '{}': {}", branch_name, error))
+    }
+}
+
+/// Stash uncommitted changes
+#[allow(dead_code)]
+pub fn stash_changes(repo_path: &std::path::Path, message: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "stash", "push", "-m", message])
+        .output()
+        .context("Failed to execute git stash push")?;
+
+    if output.status.success() {
+        debug!("Stashed changes in '{}' with message: {}", repo_path.display(), message);
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to stash changes: {}", error))
+    }
+}
+
+/// Add all changes to staging area
+pub fn add_all_changes(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "add", "."])
+        .output()
+        .context("Failed to execute git add")?;
+
+    if output.status.success() {
+        debug!("Added all changes to staging in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to add changes: {}", error))
+    }
+}
+
+/// Commit staged changes with a message
+pub fn commit_changes(repo_path: &std::path::Path, message: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "commit", "-m", message])
+        .output()
+        .context("Failed to execute git commit")?;
+
+    if output.status.success() {
+        debug!("Committed changes in '{}' with message: {}", repo_path.display(), message);
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to commit changes: {}", error))
+    }
+}
+
+/// Push branch to remote
+pub fn push_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "push", "--set-upstream", "origin", branch_name])
+        .output()
+        .context("Failed to execute git push")?;
+
+    if output.status.success() {
+        debug!("Pushed branch '{}' to remote from '{}'", branch_name, repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to push branch '{}': {}", branch_name, error))
+    }
+}
+
+/// Check if repository has uncommitted changes
+pub fn has_uncommitted_changes(repo_path: &std::path::Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .context("Failed to execute git status")?;
+
+    if output.status.success() {
+        let status_output = String::from_utf8(output.stdout)
+            .context("Invalid UTF-8 in git status output")?;
+        Ok(!status_output.trim().is_empty())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to check git status: {}", error))
+    }
+}
+
+/// Get the current branch name
+pub fn get_current_branch_name(repo_path: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "branch", "--show-current"])
+        .output()
+        .context("Failed to execute git branch --show-current")?;
+
+    if output.status.success() {
+        let branch = String::from_utf8(output.stdout)
+            .context("Invalid UTF-8 in git branch output")?
+            .trim()
+            .to_string();
+        Ok(branch)
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to get current branch: {}", error))
+    }
+}
+
+/// Check if a branch exists locally
+#[allow(dead_code)]
+pub fn branch_exists_locally(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "rev-parse", "--verify", &format!("refs/heads/{}", branch_name)])
+        .output()
+        .context("Failed to execute git rev-parse")?;
+
+    Ok(output.status.success())
+}
+
+/// Reset repository to HEAD (discard uncommitted changes)
+#[allow(dead_code)]
+pub fn reset_to_head(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "reset", "--hard", "HEAD"])
+        .output()
+        .context("Failed to execute git reset --hard")?;
+
+    if output.status.success() {
+        debug!("Reset repository to HEAD in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to reset repository: {}", error))
+    }
+}
+
+/// Pull latest changes from remote
+pub fn pull_latest(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["-C", &repo_path.to_string_lossy(), "pull"])
+        .output()
+        .context("Failed to execute git pull")?;
+
+    if output.status.success() {
+        debug!("Pulled latest changes in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to pull latest changes: {}", error))
+    }
+}
+
+/// Clone a repository to a target directory
+pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    debug!("Cloning repository from {} to {}", clone_url, target_dir.display());
+
+    if target_dir.exists() {
+        return Err(eyre::eyre!("Target directory already exists: {}", target_dir.display()));
+    }
+
+    let output = Command::new("git")
+        .args(["clone", clone_url, &target_dir.to_string_lossy()])
+        .output()
+        .context("Failed to execute git clone")?;
+
+    if output.status.success() {
+        debug!("Successfully cloned repository to '{}'", target_dir.display());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to clone repository: {}", error))
+    }
+}

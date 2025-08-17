@@ -19,3 +19,12 @@ pub fn get_max_depth_from_config(config: &Config) -> Option<usize> {
 pub fn get_nproc() -> Option<usize> {
     Some(num_cpus::get())
 }
+
+/// Indent text by a specified number of spaces
+pub fn indent(text: &str, spaces: usize) -> String {
+    let padding = " ".repeat(spaces);
+    text.lines()
+        .map(|line| format!("{}{}", padding, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

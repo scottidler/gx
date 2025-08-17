@@ -8,13 +8,18 @@ use std::path::PathBuf;
 
 mod cli;
 mod config;
+mod create;
+mod diff;
+mod file;
 mod git;
 mod github;
 mod output;
 mod repo;
+mod review;
 mod status;
 mod checkout;
 mod clone;
+mod transaction;
 mod utils;
 
 #[cfg(test)]
@@ -84,6 +89,45 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             patterns,
         } => {
             clone::process_clone_command(cli, config, user_or_org, *include_archived, patterns)
+        }
+        Commands::Create {
+            files,
+            change_id,
+            patterns,
+            commit,
+            pr,
+            action,
+        } => {
+            let change = match action {
+                cli::CreateAction::Add { path, content } => create::Change::Add(path.clone(), content.clone()),
+                cli::CreateAction::Delete => create::Change::Delete,
+                cli::CreateAction::Sub { pattern, replacement } => create::Change::Sub(pattern.clone(), replacement.clone()),
+                cli::CreateAction::Regex { pattern, replacement } => create::Change::Regex(pattern.clone(), replacement.clone()),
+            };
+            create::process_create_command(cli, config, files, change_id.clone(), patterns, commit.clone(), *pr, change)
+        }
+        Commands::Review {
+            org,
+            patterns,
+            action,
+        } => {
+            match action {
+                cli::ReviewAction::Ls { change_ids } => {
+                    review::process_review_ls_command(cli, config, org, patterns, change_ids)
+                }
+                cli::ReviewAction::Clone { change_id, all } => {
+                    review::process_review_clone_command(cli, config, org, patterns, change_id, *all)
+                }
+                cli::ReviewAction::Approve { change_id, admin } => {
+                    review::process_review_approve_command(cli, config, org, patterns, change_id, *admin)
+                }
+                cli::ReviewAction::Delete { change_id } => {
+                    review::process_review_delete_command(cli, config, org, patterns, change_id)
+                }
+                cli::ReviewAction::Purge => {
+                    review::process_review_purge_command(cli, config, org, patterns)
+                }
+            }
         }
     }
 }

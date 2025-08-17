@@ -1,4 +1,6 @@
 use crate::git::{RepoStatus, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
+use crate::create::{CreateResult, CreateAction};
+use crate::review::{ReviewResult, ReviewAction};
 use crate::config::OutputVerbosity;
 use colored::*;
 use eyre::{Context, Result};
@@ -199,6 +201,136 @@ impl UnifiedDisplay for &CheckoutResult {
     }
 
 
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for CreateResult
+impl UnifiedDisplay for CreateResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.change_id)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        None // Create results don't have commit SHA in the same way
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                CreateAction::DryRun => if opts.use_emoji { "👁️".to_string() } else { "DRY".to_string() },
+
+                CreateAction::Committed => if opts.use_emoji { "💾".to_string() } else { "COMMIT".to_string() },
+                CreateAction::PrCreated => if opts.use_emoji { "📥".to_string() } else { "PR".to_string() },
+            }
+        }
+    }
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for &CreateResult
+impl UnifiedDisplay for &CreateResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.change_id)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        None
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                CreateAction::DryRun => if opts.use_emoji { "👁️".to_string() } else { "DRY".to_string() },
+
+                CreateAction::Committed => if opts.use_emoji { "💾".to_string() } else { "COMMIT".to_string() },
+                CreateAction::PrCreated => if opts.use_emoji { "📥".to_string() } else { "PR".to_string() },
+            }
+        }
+    }
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for ReviewResult
+impl UnifiedDisplay for ReviewResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.change_id)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        None // Review results don't have commit SHA
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                ReviewAction::Listed => if opts.use_emoji { "📋".to_string() } else { "LIST".to_string() },
+                ReviewAction::Cloned => if opts.use_emoji { "📥".to_string() } else { "CLONE".to_string() },
+                ReviewAction::Approved => if opts.use_emoji { "✅".to_string() } else { "APPROVE".to_string() },
+                ReviewAction::Deleted => if opts.use_emoji { "❌".to_string() } else { "DELETE".to_string() },
+                ReviewAction::Purged => if opts.use_emoji { "🧹".to_string() } else { "PURGE".to_string() },
+            }
+        }
+    }
+
+    fn get_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+/// Implementation of UnifiedDisplay for &ReviewResult
+impl UnifiedDisplay for &ReviewResult {
+    fn get_branch(&self) -> Option<&str> {
+        Some(&self.change_id)
+    }
+
+    fn get_commit_sha(&self) -> Option<&str> {
+        None
+    }
+
+    fn get_repo(&self) -> &crate::repo::Repo {
+        &self.repo
+    }
+
+    fn get_emoji(&self, opts: &StatusOptions) -> String {
+        if let Some(_) = &self.error {
+            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        } else {
+            match self.action {
+                ReviewAction::Listed => if opts.use_emoji { "📋".to_string() } else { "LIST".to_string() },
+                ReviewAction::Cloned => if opts.use_emoji { "📥".to_string() } else { "CLONE".to_string() },
+                ReviewAction::Approved => if opts.use_emoji { "✅".to_string() } else { "APPROVE".to_string() },
+                ReviewAction::Deleted => if opts.use_emoji { "❌".to_string() } else { "DELETE".to_string() },
+                ReviewAction::Purged => if opts.use_emoji { "🧹".to_string() } else { "PURGE".to_string() },
+            }
+        }
+    }
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()

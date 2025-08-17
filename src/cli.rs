@@ -156,6 +156,123 @@ EXAMPLES:
         /// Repository name patterns to filter
         patterns: Vec<String>,
     },
+
+    /// Apply changes across multiple repositories and create PRs
+    #[command(after_help = "CREATE LEGEND:
+  📝  Files modified        ➕  Files added         ❌  Files deleted
+  🔄  Branch created        📥  PR created          📊  Summary stats
+  👁️  Dry run (preview)     💾  Changes committed   ❌  Error occurred
+
+EXAMPLES:
+  gx create --files '*.json' add config.json '{\"debug\": true}'
+  gx create --files '*.md' sub 'old-text' 'new-text' --commit 'Update docs'
+  gx create --files 'package.json' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
+  gx create --files '*.txt' delete --commit 'Remove old files' --pr")]
+    Create {
+        /// Files to target (glob patterns)
+        #[arg(short = 'f', long = "files", help = "File patterns to match")]
+        files: Vec<String>,
+
+        /// Change ID for branch and PR naming
+        #[arg(short = 'x', long = "change-id", help = "Change ID for branch/PR (auto-generated if not provided)")]
+        change_id: Option<String>,
+
+        /// Repository patterns to filter
+        #[arg(short = 'p', long = "pattern", help = "Repository patterns to filter")]
+        patterns: Vec<String>,
+
+        /// Commit changes with message
+        #[arg(short = 'c', long = "commit", help = "Commit changes with message")]
+        commit: Option<String>,
+
+        /// Create PR after committing
+        #[arg(long, help = "Create pull request after committing")]
+        pr: bool,
+
+        #[command(subcommand)]
+        action: CreateAction,
+    },
+
+    /// Manage PRs across multiple repositories
+    #[command(after_help = "REVIEW LEGEND:
+  📋  PR listed             📥  Repository cloned   ✅  PR approved
+  ❌  PR deleted            🧹  Repository purged   📊  Summary stats
+
+EXAMPLES:
+  gx review ls --org tatari-tv GX-2024-01-15    # List PRs for change ID
+  gx review clone --org tatari-tv GX-2024-01-15 # Clone repos with PRs
+  gx review approve --org tatari-tv GX-2024-01-15 --admin  # Approve and merge PRs
+  gx review delete --org tatari-tv GX-2024-01-15 # Delete PRs and branches
+  gx review purge --org tatari-tv     # Clean up all GX branches")]
+    Review {
+        /// GitHub organization
+        #[arg(short = 'o', long = "org", help = "GitHub organization")]
+        org: String,
+
+        /// Repository patterns to filter
+        #[arg(short = 'p', long = "pattern", help = "Repository patterns to filter")]
+        patterns: Vec<String>,
+
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReviewAction {
+    /// List PRs by change ID
+    Ls {
+        #[arg(help = "Change ID patterns to match")]
+        change_ids: Vec<String>,
+    },
+    /// Clone repositories with PRs
+    Clone {
+        #[arg(help = "Change ID to clone")]
+        change_id: String,
+        #[arg(short, long, help = "Include closed PRs")]
+        all: bool,
+    },
+    /// Approve and merge PRs
+    Approve {
+        #[arg(help = "Change ID to approve")]
+        change_id: String,
+        #[arg(long, help = "Use admin override for merge")]
+        admin: bool,
+    },
+    /// Delete PRs and branches
+    Delete {
+        #[arg(help = "Change ID to delete")]
+        change_id: String,
+    },
+    /// Purge all GX branches and PRs
+    Purge,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CreateAction {
+    /// Add new files
+    Add {
+        #[arg(help = "File path to create")]
+        path: String,
+        #[arg(help = "File content")]
+        content: String,
+    },
+    /// Delete matching files
+    Delete,
+    /// String substitution
+    Sub {
+        #[arg(help = "Pattern to find")]
+        pattern: String,
+        #[arg(help = "Replacement text")]
+        replacement: String,
+    },
+    /// Regex substitution
+    Regex {
+        #[arg(help = "Regex pattern to find")]
+        pattern: String,
+        #[arg(help = "Replacement text")]
+        replacement: String,
+    },
 }
 
 /// Generate tool validation help text
