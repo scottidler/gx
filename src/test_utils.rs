@@ -50,6 +50,7 @@ pub fn create_test_repo(base_path: &Path, repo_name: &str, with_remote: bool) ->
     run_git_command(&["init"], &repo_path);
     run_git_command(&["config", "user.email", "test@example.com"], &repo_path);
     run_git_command(&["config", "user.name", "Test User"], &repo_path);
+    run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Create initial commit
     let readme_path = repo_path.join("README.md");
@@ -113,6 +114,7 @@ pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
     run_git_command(&["init", "--quiet"], &repo_path);
     run_git_command(&["config", "user.email", "test@example.com"], &repo_path);
     run_git_command(&["config", "user.name", "Test User"], &repo_path);
+    run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Create one commit (minimal)
     let readme_path = repo_path.join("README.md");
@@ -189,6 +191,7 @@ pub fn create_test_repo_with_branches(base_path: &Path, repo_name: &str, remote_
     run_git_command(&["init"], &repo_path);
     run_git_command(&["config", "user.email", "test@example.com"], &repo_path);
     run_git_command(&["config", "user.name", "Test User"], &repo_path);
+    run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Create initial commit on main
     let readme_path = repo_path.join("README.md");
@@ -230,6 +233,7 @@ pub fn create_test_repo_with_commits(base_path: &Path, repo_name: &str, remote_s
     run_git_command(&["init"], &repo_path);
     run_git_command(&["config", "user.email", "test@example.com"], &repo_path);
     run_git_command(&["config", "user.name", "Test User"], &repo_path);
+    run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Add remote
     let remote_url = format!("git@github.com:{}.git", remote_slug);

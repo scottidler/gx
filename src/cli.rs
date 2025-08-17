@@ -98,30 +98,35 @@ EXAMPLES:
   ⚠️   Has untracked files                  📊  Summary stats
 
 EXAMPLES:
-  gx checkout feature-branch        # Checkout existing branch and sync with remote
+  gx checkout                       # Checkout default branch in all repos
+  gx checkout default               # Same as above (explicit)
+  gx checkout feature-branch        # Checkout existing branch in all repos
+  gx checkout -p frontend           # Checkout default branch in repos matching 'frontend'
+  gx checkout main -p frontend      # Checkout main branch in repos matching 'frontend'
   gx checkout -b new-feature        # Create and checkout new branch in all repos
   gx checkout -b fix -f main        # Create branch from specific base branch
   gx checkout main -s               # Checkout main and stash uncommitted changes
-  gx checkout main frontend api     # Checkout main in filtered repos")]
+  gx checkout main -p frontend -p api  # Checkout main in repos matching 'frontend' or 'api'")]
     Checkout {
         /// Create a new branch
         #[arg(short = 'b', long = "branch", help = "Create and checkout a new branch")]
         create_branch: bool,
 
-        /// Base branch to create from (defaults to current HEAD)
-        #[arg(short = 'f', long = "from", value_name = "BRANCH", help = "Base branch for new branch creation [Default: main|master]")]
+        /// Base branch to create from (defaults to 'default')
+        #[arg(short = 'f', long = "from", value_name = "BRANCH", help = "Base branch for new branch creation [Default: default]")]
         from_branch: Option<String>,
 
         /// Stash uncommitted changes before checkout
         #[arg(short = 's', long = "stash", help = "Stash uncommitted changes before checkout")]
         stash: bool,
 
-        /// Branch name to checkout or create
-        #[arg(value_name = "BRANCH")]
-        branch_name: String,
-
         /// Repository name patterns to filter
+        #[arg(short = 'p', long = "pattern", value_name = "PATTERN", help = "Repository name pattern to filter (can be used multiple times)")]
         patterns: Vec<String>,
+
+        /// Branch name to checkout ('default' for repo's default branch)
+        #[arg(value_name = "BRANCH", default_value = "default")]
+        branch_name: String,
     },
 
     /// Clone repositories from GitHub user/org

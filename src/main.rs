@@ -221,7 +221,45 @@ fn process_checkout_command(
     let success_count = AtomicUsize::new(0);
 
     filtered_repos.par_iter().for_each(|repo| {
-        let result = git::checkout_branch(repo, branch_name, create_branch, from_branch, stash);
+        // Resolve branch name per repo (handle 'default' keyword)
+        let resolved_branch = match git::resolve_branch_name(repo, branch_name) {
+            Ok(branch) => branch,
+            Err(e) => {
+                // Handle resolution error
+                let result = git::CheckoutResult {
+                    repo: repo.clone(),
+                    branch_name: branch_name.to_string(),
+                    action: git::CheckoutAction::CheckedOutSynced,
+                    error: Some(format!("Failed to resolve branch name: {}", e)),
+                };
+                error_count.fetch_add(1, Ordering::Relaxed);
+                output::display_checkout_result_immediate(&result);
+                return;
+            }
+        };
+
+        // Resolve from_branch if provided and it's 'default'
+        let resolved_from_branch = if let Some(from) = from_branch {
+            match git::resolve_branch_name(repo, from) {
+                Ok(branch) => Some(branch),
+                Err(e) => {
+                    // Handle from_branch resolution error
+                    let result = git::CheckoutResult {
+                        repo: repo.clone(),
+                        branch_name: branch_name.to_string(),
+                        action: git::CheckoutAction::CheckedOutSynced,
+                        error: Some(format!("Failed to resolve from branch '{}': {}", from, e)),
+                    };
+                    error_count.fetch_add(1, Ordering::Relaxed);
+                    output::display_checkout_result_immediate(&result);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let result = git::checkout_branch(repo, &resolved_branch, create_branch, resolved_from_branch.as_deref(), stash);
 
         // Count results atomically
         if result.error.is_some() {
