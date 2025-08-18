@@ -140,7 +140,7 @@ fn test_checkout_help_shows_default_examples() {
     assert!(stdout.contains("gx checkout                       # Checkout default branch"));
     assert!(stdout.contains("gx checkout default               # Same as above"));
     assert!(stdout.contains("gx checkout -p frontend           # Checkout default branch in repos matching"));
-    assert!(stdout.contains("-p, --pattern <PATTERN>"));
+    assert!(stdout.contains("-p, --patterns <PATTERN>"));
 
     // Should succeed
     assert!(output.status.success());
@@ -301,8 +301,8 @@ fn test_checkout_pattern_filters_correctly() {
 fn test_checkout_long_pattern_flag() {
     let workspace = create_full_test_workspace();
 
-    // Test using --pattern instead of -p
-    let output = run_gx_command(&["checkout", "default", "--pattern", "frontend"], workspace.path());
+    // Test using --patterns instead of -p
+    let output = run_gx_command(&["checkout", "default", "--patterns", "frontend"], workspace.path());
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -399,9 +399,8 @@ fn test_checkout_help_shows_new_syntax() {
 
     // Should show the new CLI syntax
     assert!(stdout.contains("Usage: gx checkout [OPTIONS] [BRANCH]"));
-    assert!(stdout.contains("-p, --pattern <PATTERN>"));
-    assert!(stdout.contains("Repository name pattern to filter"));
-    assert!(stdout.contains("can be used multiple times"));
+    assert!(stdout.contains("-p, --patterns <PATTERN>"));
+    assert!(stdout.contains("Repository name patterns to filter"));
 
     // Should show updated examples
     assert!(stdout.contains("gx checkout -p frontend"));

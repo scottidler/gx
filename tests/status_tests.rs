@@ -22,7 +22,7 @@ fn test_status_discovers_repositories() {
 fn test_status_shows_commit_hash() {
     let workspace = create_test_workspace();
 
-    let output = run_gx_command(&["status", "frontend"], workspace.path());
+    let output = run_gx_command(&["status", "-p", "frontend"], workspace.path());
     assert!(output.status.success(), "gx status command should succeed");
 
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -55,7 +55,7 @@ fn test_status_shows_commit_hash() {
 fn test_status_filtering_by_pattern() {
     let workspace = create_test_workspace();
 
-    let output = run_gx_command(&["status", "frontend"], workspace.path());
+    let output = run_gx_command(&["status", "-p", "frontend"], workspace.path());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 

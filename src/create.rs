@@ -13,6 +13,94 @@ use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::path::Path;
 
+/// Show matched repositories and files without performing any actions (dry-run mode)
+pub fn show_matches(
+    cli: &Cli,
+    config: &Config,
+    files: &[String],
+    patterns: &[String],
+) -> Result<()> {
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_ref().unwrap_or(&current_dir);
+    let max_depth = cli.max_depth.or_else(|| {
+        config.repo_discovery
+            .as_ref()
+            .and_then(|rd| rd.max_depth)
+    }).unwrap_or(3);
+
+    // Discover repositories
+    let repos = discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    // Filter repositories by patterns
+    let filtered_repos = filter_repos(repos, patterns);
+
+    // Count emojis like SLAM
+    let total_emoji = "🔍";
+    let repos_emoji = "📦";
+    let files_emoji = "📄";
+
+    let mut status = Vec::new();
+    status.push(format!("{}{}", filtered_repos.len(), total_emoji));
+
+    // Filter repos that have matching files
+    let mut matched_repos = Vec::new();
+    let mut total_files = 0;
+
+    for repo in filtered_repos {
+        let mut matched_files = Vec::new();
+
+        if !files.is_empty() {
+            for file_pattern in files {
+                if let Ok(files_found) = file::find_files_in_repo(&repo.path, file_pattern) {
+                    for file in files_found {
+                        matched_files.push(file.display().to_string());
+                        total_files += 1;
+                    }
+                }
+            }
+            matched_files.sort();
+            matched_files.dedup();
+        }
+
+        // Include repo if it has matching files OR if no file patterns specified
+        if !matched_files.is_empty() || files.is_empty() {
+            matched_repos.push((repo, matched_files));
+        }
+    }
+
+    if !patterns.is_empty() {
+        status.push(format!("{}{}", matched_repos.len(), repos_emoji));
+    }
+
+    if !files.is_empty() {
+        status.push(format!("{}{}", total_files, files_emoji));
+    }
+
+    // Display results exactly like SLAM
+    if matched_repos.is_empty() {
+        println!("No repositories matched your criteria.");
+    } else {
+        println!("Matched repositories:");
+        for (repo, matched_files) in &matched_repos {
+            // Show repo slug if available, otherwise repo name
+            let display_name = repo.slug.as_ref().unwrap_or(&repo.name);
+            println!("  {}", display_name);
+
+            if !files.is_empty() {
+                for file in matched_files {
+                    println!("    {}", file);
+                }
+            }
+        }
+
+        status.reverse();
+        println!("\n  {}", status.join(" | "));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub enum Change {
     Add(String, String),    // path, content

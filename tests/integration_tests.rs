@@ -244,7 +244,7 @@ fn test_repository_filtering_edge_cases() {
     create_test_repo(temp_dir.path(), "api", false);
 
     // Test exact match
-    let output = run_gx_command(&["status", "frontend"], temp_dir.path());
+    let output = run_gx_command(&["status", "-p", "frontend"], temp_dir.path());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 

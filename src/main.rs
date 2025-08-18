@@ -98,13 +98,20 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             pr,
             action,
         } => {
-            let change = match action {
-                cli::CreateAction::Add { path, content } => create::Change::Add(path.clone(), content.clone()),
-                cli::CreateAction::Delete => create::Change::Delete,
-                cli::CreateAction::Sub { pattern, replacement } => create::Change::Sub(pattern.clone(), replacement.clone()),
-                cli::CreateAction::Regex { pattern, replacement } => create::Change::Regex(pattern.clone(), replacement.clone()),
-            };
-            create::process_create_command(cli, config, files, change_id.clone(), patterns, commit.clone(), *pr, change)
+            match action {
+                None => {
+                    create::show_matches(cli, config, files, patterns)
+                }
+                Some(action) => {
+                    let change = match action {
+                        cli::CreateAction::Add { path, content } => create::Change::Add(path.clone(), content.clone()),
+                        cli::CreateAction::Delete => create::Change::Delete,
+                        cli::CreateAction::Sub { pattern, replacement } => create::Change::Sub(pattern.clone(), replacement.clone()),
+                        cli::CreateAction::Regex { pattern, replacement } => create::Change::Regex(pattern.clone(), replacement.clone()),
+                    };
+                    create::process_create_command(cli, config, files, change_id.clone(), patterns, commit.clone(), *pr, change)
+                }
+            }
         }
         Commands::Review {
             org,

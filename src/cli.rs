@@ -72,7 +72,7 @@ REMOTE STATUS:
 EXAMPLES:
   gx status                     # Show all repositories
   gx status --detailed          # Show file-by-file details
-  gx status frontend api        # Filter by repo patterns
+  gx status -p frontend -p api  # Filter by repo patterns
   gx status --no-emoji          # Plain text for scripts")]
     Status {
         /// Show detailed file-by-file status
@@ -88,6 +88,7 @@ EXAMPLES:
         no_color: bool,
 
         /// Repository name patterns to filter
+        #[arg(short = 'p', long = "patterns", help = "Repository name patterns to filter")]
         patterns: Vec<String>,
     },
 
@@ -121,7 +122,7 @@ EXAMPLES:
         stash: bool,
 
         /// Repository name patterns to filter
-        #[arg(short = 'p', long = "pattern", value_name = "PATTERN", help = "Repository name pattern to filter (can be used multiple times)")]
+        #[arg(short = 'p', long = "patterns", value_name = "PATTERN", help = "Repository name patterns to filter")]
         patterns: Vec<String>,
 
         /// Branch name to checkout ('default' for repo's default branch)
@@ -142,7 +143,7 @@ WORKING DIRECTORY:
 
 EXAMPLES:
   gx clone scottidler                     # Clone to ./scottidler/<repo-name>/
-  gx clone tatari-tv frontend api         # Clone filtered repos to ./tatari-tv/<repo-name>/
+  gx clone tatari-tv -p frontend -p api   # Clone filtered repos to ./tatari-tv/<repo-name>/
   gx --cwd /workspace clone tatari-tv     # Clone to /workspace/tatari-tv/<repo-name>/")]
     Clone {
         /// GitHub user or organization name
@@ -154,6 +155,7 @@ EXAMPLES:
         include_archived: bool,
 
         /// Repository name patterns to filter
+        #[arg(short = 'p', long = "patterns", help = "Repository name patterns to filter")]
         patterns: Vec<String>,
     },
 
@@ -164,7 +166,9 @@ EXAMPLES:
   👁️  Dry run (preview)     💾  Changes committed   ❌  Error occurred
 
 EXAMPLES:
-  gx create --files '*.json' add config.json '{\"debug\": true}'
+  gx create --files '*.json'                                    # Show matching files (dry-run)
+  gx create --files '*.json' -p frontend                       # Show matches in frontend repos only
+  gx create --files '*.json' add config.json '{\"debug\": true}' # Actually create files
   gx create --files '*.md' sub 'old-text' 'new-text' --commit 'Update docs'
   gx create --files 'package.json' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
   gx create --files '*.txt' delete --commit 'Remove old files' --pr")]
@@ -178,7 +182,7 @@ EXAMPLES:
         change_id: Option<String>,
 
         /// Repository patterns to filter
-        #[arg(short = 'p', long = "pattern", help = "Repository patterns to filter")]
+        #[arg(short = 'p', long = "patterns", help = "Repository patterns to filter")]
         patterns: Vec<String>,
 
         /// Commit changes with message
@@ -190,7 +194,7 @@ EXAMPLES:
         pr: bool,
 
         #[command(subcommand)]
-        action: CreateAction,
+        action: Option<CreateAction>,
     },
 
     /// Manage PRs across multiple repositories
@@ -210,7 +214,7 @@ EXAMPLES:
         org: String,
 
         /// Repository patterns to filter
-        #[arg(short = 'p', long = "pattern", help = "Repository patterns to filter")]
+        #[arg(short = 'p', long = "patterns", help = "Repository patterns to filter")]
         patterns: Vec<String>,
 
         #[command(subcommand)]
