@@ -16,6 +16,7 @@ mod github;
 mod output;
 mod repo;
 mod review;
+mod ssh;
 mod status;
 mod checkout;
 mod clone;

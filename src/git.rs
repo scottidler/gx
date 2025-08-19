@@ -1,4 +1,5 @@
 use crate::repo::Repo;
+use crate::ssh::{SshUrlBuilder, SshCommandDetector};
 use eyre::{Context, Result};
 use log::debug;
 use std::process::Command;
@@ -582,6 +583,18 @@ pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> 
 fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> CloneResult {
     debug!("Cloning new repo: {} to {}", repo_slug, target_dir.display());
 
+    // Pre-flight SSH connectivity check
+    match SshCommandDetector::test_github_ssh_connection() {
+        Ok(username) => debug!("SSH authenticated as: {}", username),
+        Err(e) => {
+            return CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: Some(format!("SSH connectivity test failed: {}", e)),
+            };
+        }
+    }
+
     // Create parent directory if needed
     if let Some(parent) = target_dir.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -593,10 +606,42 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
         }
     }
 
-    // Clone the repository
-    let clone_url = format!("https://github.com/{}.git", repo_slug);
+    // Clone the repository using SSH
+    let clone_url = match SshUrlBuilder::build_ssh_url(repo_slug) {
+        Ok(url) => {
+            // Validate the generated SSH URL
+            if let Err(e) = SshUrlBuilder::validate_ssh_url(&url) {
+                return CloneResult {
+                    repo_slug: repo_slug.to_string(),
+                    action: CloneAction::Cloned,
+                    error: Some(format!("Generated invalid SSH URL: {}", e)),
+                };
+            }
+            url
+        },
+        Err(e) => {
+            return CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: Some(format!("Invalid repository slug: {}", e)),
+            };
+        }
+    };
+
+    let ssh_command = match SshCommandDetector::get_ssh_command() {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            return CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Cloned,
+                error: Some(format!("Failed to get SSH command: {}", e)),
+            };
+        }
+    };
+
     let output = Command::new("git")
-        .args(["clone", &clone_url, &target_dir.to_string_lossy()])
+        .env("GIT_SSH_COMMAND", ssh_command)
+        .args(["clone", "--quiet", &clone_url, &target_dir.to_string_lossy()])
         .output();
 
     match output {
@@ -898,7 +943,11 @@ pub fn commit_changes(repo_path: &std::path::Path, message: &str) -> Result<()> 
 
 /// Push branch to remote
 pub fn push_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let ssh_command = SshCommandDetector::get_ssh_command()
+        .context("Failed to get SSH command for push")?;
+
     let output = Command::new("git")
+        .env("GIT_SSH_COMMAND", ssh_command)
         .args(["-C", &repo_path.to_string_lossy(), "push", "--set-upstream", "origin", branch_name])
         .output()
         .context("Failed to execute git push")?;

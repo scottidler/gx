@@ -11,6 +11,7 @@ pub mod github;
 pub mod output;
 pub mod repo;
 pub mod review;
+pub mod ssh;
 pub mod status;
 pub mod checkout;
 pub mod clone;

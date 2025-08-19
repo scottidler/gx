@@ -3,6 +3,7 @@ use crate::git;
 use crate::github::{self, PrInfo};
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
+use crate::ssh::SshUrlBuilder;
 use crate::cli::Cli;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
@@ -375,8 +376,19 @@ fn clone_repo_for_pr(org_dir: &Path, pr: &PrInfo, change_id: &str) -> ReviewResu
             }
         }
     } else {
-        // Clone the repository
-        let clone_url = format!("https://github.com/{}.git", pr.repo_slug);
+        // Clone the repository using SSH
+        let clone_url = match SshUrlBuilder::build_ssh_url(&pr.repo_slug) {
+            Ok(url) => url,
+            Err(e) => {
+                return ReviewResult {
+                    repo,
+                    change_id: change_id.to_string(),
+                    pr_number: Some(pr.number),
+                    action: ReviewAction::Cloned,
+                    error: Some(format!("Invalid repository slug: {}", e)),
+                };
+            }
+        };
         match git::clone_repository(&clone_url, &repo_dir) {
             Ok(()) => {
                 info!("Cloned repository: {}", repo_name);
