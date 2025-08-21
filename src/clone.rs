@@ -37,7 +37,7 @@ pub fn process_clone_command(
         .context("Failed to initialize thread pool")?;
 
     // 1. Get repositories from GitHub
-    let all_repos = github::get_user_repos(user_or_org, include_archived)
+    let all_repos = github::get_user_repos(user_or_org, include_archived, config)
         .context("Failed to get repositories from GitHub")?;
 
     info!("Found {} repositories for {}", all_repos.len(), user_or_org);
@@ -58,7 +58,7 @@ pub fn process_clone_command(
     }
 
     // 3. Read GitHub token
-    let token = github::read_token(user_or_org)
+    let token = github::read_token(user_or_org, config)
         .context("Failed to read GitHub token")?;
 
     // 4. Process repositories in parallel with streaming output

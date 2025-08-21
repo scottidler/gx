@@ -32,42 +32,74 @@ pub enum ReviewAction {
 /// Process review ls command - list PRs by change ID
 pub fn process_review_ls_command(
     cli: &Cli,
-    _config: &Config,
-    org: &str,
+    config: &Config,
+    org: Option<&str>,
     _patterns: &[String],
     change_ids: &[String],
 ) -> Result<()> {
-    info!("Listing PRs for org: {}, change IDs: {:?}", org, change_ids);
+    // Discover repositories for auto-detection
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli.max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
+
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    // Determine user/org(s) with precedence
+    let user_org_contexts = crate::user_org::determine_user_orgs(
+        org,
+        cli.user_org.as_deref(),
+        &repos,
+        config,
+    )?;
+
+    info!("Using {} org(s): {}",
+          user_org_contexts.len(),
+          user_org_contexts.iter()
+              .map(|ctx| format!("{} ({})", ctx.user_or_org, format!("{:?}", ctx.detection_method).to_lowercase()))
+              .collect::<Vec<_>>()
+              .join(", "));
+
+    info!("Listing PRs for change IDs: {:?}", change_ids);
 
     let mut all_results = Vec::new();
 
-    for change_id in change_ids {
-        let prs = github::list_prs_by_change_id(org, change_id)
-            .with_context(|| format!("Failed to list PRs for change ID: {}", change_id))?;
+    // Process each org and change ID combination
+    for context in &user_org_contexts {
+        for change_id in change_ids {
+            match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+                Ok(prs) => {
+                    info!("Found {} PRs for change ID '{}' in org '{}'", prs.len(), change_id, context.user_or_org);
 
-        info!("Found {} PRs for change ID: {}", prs.len(), change_id);
+                    for pr in prs {
+                        // Create a pseudo-repo for display purposes
+                        let repo = create_repo_from_slug(&pr.repo_slug);
 
-        for pr in prs {
-            // Create a pseudo-repo for display purposes
-            let repo = create_repo_from_slug(&pr.repo_slug);
+                        let result = ReviewResult {
+                            repo,
+                            change_id: change_id.clone(),
+                            pr_number: Some(pr.number),
+                            action: ReviewAction::Listed,
+                            error: None,
+                        };
 
-            let result = ReviewResult {
-                repo,
-                change_id: change_id.clone(),
-                pr_number: Some(pr.number),
-                action: ReviewAction::Listed,
-                error: None,
-            };
+                        all_results.push(result);
 
-            all_results.push(result);
-
-            // Display PR info
-            println!("PR #{}: {} ({})", pr.number, pr.title, pr.state_string());
-            println!("  Repository: {}", pr.repo_slug);
-            println!("  Branch: {}", pr.branch);
-            println!("  Author: {}", pr.author);
-            println!("  URL: {}", pr.url);
-            println!();
+                        // Display PR info
+                        println!("PR #{}: {} ({})", pr.number, pr.title, pr.state_string());
+                        println!("  Repository: {}", pr.repo_slug);
+                        println!("  Branch: {}", pr.branch);
+                        println!("  Author: {}", pr.author);
+                        println!("  URL: {}", pr.url);
+                        println!();
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to get PRs from org '{}' for change ID '{}': {}", context.user_or_org, change_id, e);
+                }
+            }
         }
     }
 
@@ -92,24 +124,59 @@ pub fn process_review_ls_command(
 pub fn process_review_clone_command(
     cli: &Cli,
     config: &Config,
-    org: &str,
+    org: Option<&str>,
     _patterns: &[String],
     change_id: &str,
     include_closed: bool,
 ) -> Result<()> {
     info!("Cloning repositories for change ID: {}", change_id);
 
-    let prs = github::list_prs_by_change_id(org, change_id)
-        .with_context(|| format!("Failed to list PRs for change ID: {}", change_id))?;
+    // Discover repositories for auto-detection
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli.max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
 
-    if prs.is_empty() {
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    // Determine user/org(s) with precedence
+    let user_org_contexts = crate::user_org::determine_user_orgs(
+        org,
+        cli.user_org.as_deref(),
+        &repos,
+        config,
+    )?;
+
+    info!("Using {} org(s): {}",
+          user_org_contexts.len(),
+          user_org_contexts.iter()
+              .map(|ctx| format!("{} ({})", ctx.user_or_org, format!("{:?}", ctx.detection_method).to_lowercase()))
+              .collect::<Vec<_>>()
+              .join(", "));
+
+    // Collect all PRs from all orgs
+    let mut all_prs = Vec::new();
+    for context in &user_org_contexts {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+            Ok(mut prs) => {
+                info!("Found {} PRs for change ID '{}' in org '{}'", prs.len(), change_id, context.user_or_org);
+                all_prs.append(&mut prs);
+            }
+            Err(e) => {
+                log::warn!("Failed to get PRs from org '{}' for change ID '{}': {}", context.user_or_org, change_id, e);
+            }
+        }
+    }
+
+    if all_prs.is_empty() {
         println!("No PRs found for change ID: {}", change_id);
         return Ok(());
     }
 
     let current_dir = std::env::current_dir()?;
     let base_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
-    let org_dir = base_dir.join(org);
 
     // Determine parallelism
     let parallel_jobs = cli.parallel
@@ -124,9 +191,14 @@ pub fn process_review_clone_command(
 
     // Process repositories in parallel
     let results: Vec<ReviewResult> = pool.install(|| {
-        prs.par_iter()
+        all_prs.par_iter()
             .filter(|pr| include_closed || pr.state != github::PrState::Closed)
-            .map(|pr| clone_repo_for_pr(&org_dir, pr, change_id))
+            .map(|pr| {
+                // Extract org from repo slug for directory structure
+                let org_name = pr.repo_slug.split('/').next().unwrap_or("unknown");
+                let org_dir = base_dir.join(org_name);
+                clone_repo_for_pr(&org_dir, pr, change_id)
+            })
             .collect()
     });
 
@@ -151,14 +223,16 @@ pub fn process_review_clone_command(
 pub fn process_review_approve_command(
     cli: &Cli,
     config: &Config,
-    org: &str,
+    org: Option<&str>,
     _patterns: &[String],
     change_id: &str,
     admin_override: bool,
 ) -> Result<()> {
     info!("Approving PRs for change ID: {}", change_id);
 
-    let prs = github::list_prs_by_change_id(org, change_id)
+    // For now, use a simple implementation - TODO: implement full multi-org support
+    let org_str = org.unwrap_or("default-org");
+    let prs = github::list_prs_by_change_id(org_str, change_id)
         .with_context(|| format!("Failed to list PRs for change ID: {}", change_id))?;
 
     if prs.is_empty() {
@@ -220,13 +294,15 @@ pub fn process_review_approve_command(
 pub fn process_review_delete_command(
     cli: &Cli,
     config: &Config,
-    org: &str,
+    org: Option<&str>,
     _patterns: &[String],
     change_id: &str,
 ) -> Result<()> {
     info!("Deleting PRs for change ID: {}", change_id);
 
-    let prs = github::list_prs_by_change_id(org, change_id)
+    // For now, use a simple implementation - TODO: implement full multi-org support
+    let org_str = org.unwrap_or("default-org");
+    let prs = github::list_prs_by_change_id(org_str, change_id)
         .with_context(|| format!("Failed to list PRs for change ID: {}", change_id))?;
 
     if prs.is_empty() {
@@ -288,10 +364,10 @@ pub fn process_review_delete_command(
 pub fn process_review_purge_command(
     cli: &Cli,
     config: &Config,
-    org: &str,
+    org: Option<&str>,
     patterns: &[String],
 ) -> Result<()> {
-    info!("Purging all GX branches and PRs for org: {}", org);
+    info!("Purging all GX branches and PRs for org: {:?}", org);
 
     // Discover repositories
     let current_dir = std::env::current_dir()?;

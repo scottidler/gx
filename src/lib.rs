@@ -16,4 +16,5 @@ pub mod status;
 pub mod checkout;
 pub mod clone;
 pub mod transaction;
+pub mod user_org;
 pub mod utils;

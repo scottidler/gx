@@ -1,6 +1,7 @@
 # Test configuration for gx-testing organization
 default-user-org: gx-testing
 jobs: 2
+token-path: "~/.config/github/tokens/{user_or_org}"
 repo-discovery:
   max-depth: 3
 output:

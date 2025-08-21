@@ -9,6 +9,8 @@ pub struct Config {
     #[serde(rename = "default-user-org")]
     pub default_user_org: Option<String>,
     pub jobs: Option<String>, // Can be "nproc" or a number
+    #[serde(rename = "token-path")]
+    pub token_path: Option<String>,
     pub output: Option<OutputConfig>,
     #[serde(rename = "repo-discovery")]
     pub repo_discovery: Option<RepoDiscoveryConfig>,
@@ -57,6 +59,7 @@ impl Default for Config {
         Self {
             default_user_org: None,
             jobs: None,
+            token_path: Some("~/.config/github/tokens/{user_or_org}".to_string()),
             output: None,
             repo_discovery: Some(RepoDiscoveryConfig::default()),
             logging: None,

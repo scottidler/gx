@@ -2,24 +2,14 @@ use eyre::{Context, Result};
 use log::{debug, info, warn};
 use std::fs;
 use std::process::Command;
+use crate::config::Config;
 
 /// Get all repositories for a user/org from GitHub API
-pub fn get_user_repos(user_or_org: &str, include_archived: bool) -> Result<Vec<String>> {
+pub fn get_user_repos(user_or_org: &str, include_archived: bool, config: &Config) -> Result<Vec<String>> {
     debug!("Getting repos for user/org: {}, include_archived: {}", user_or_org, include_archived);
 
-    // Read token from ~/.config/github/tokens/{user_or_org} (plain text)
-    let token_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("github")
-        .join("tokens")
-        .join(user_or_org);
-
-    let token = fs::read_to_string(&token_path)
-        .context(format!("Failed to read token from {}", token_path.display()))?
-        .trim()
-        .to_string();
-
-    debug!("Using token from: {}", token_path.display());
+    let token = read_token(user_or_org, config)?;
+    debug!("Using token for user/org: {}", user_or_org);
 
     // Query GitHub API - try both user and org endpoints
     let archived_filter = if include_archived {
@@ -108,18 +98,22 @@ pub fn get_default_branch(repo_slug: &str, token: &str) -> Result<String> {
     Ok(branch)
 }
 
-/// Read GitHub token for a user/org
-pub fn read_token(user_or_org: &str) -> Result<String> {
-    let token_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("github")
-        .join("tokens")
-        .join(user_or_org);
+/// Read GitHub token for a user/org using configurable path
+pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
+    let token_template = config.token_path
+        .as_deref()
+        .unwrap_or("~/.config/github/tokens/{user_or_org}");
+
+    let token_path = super::user_org::build_token_path(token_template, user_or_org);
 
     let token = fs::read_to_string(&token_path)
         .context(format!("Failed to read token from {}", token_path.display()))?
         .trim()
         .to_string();
+
+    if token.is_empty() {
+        return Err(eyre::eyre!("Token file is empty: {}", token_path.display()));
+    }
 
     Ok(token)
 }

@@ -21,6 +21,7 @@ mod status;
 mod checkout;
 mod clone;
 mod transaction;
+mod user_org;
 mod utils;
 
 #[cfg(test)]
@@ -121,19 +122,19 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
         } => {
             match action {
                 cli::ReviewAction::Ls { change_ids } => {
-                    review::process_review_ls_command(cli, config, org, patterns, change_ids)
+                    review::process_review_ls_command(cli, config, org.as_deref(), patterns, change_ids)
                 }
                 cli::ReviewAction::Clone { change_id, all } => {
-                    review::process_review_clone_command(cli, config, org, patterns, change_id, *all)
+                    review::process_review_clone_command(cli, config, org.as_deref(), patterns, change_id, *all)
                 }
                 cli::ReviewAction::Approve { change_id, admin } => {
-                    review::process_review_approve_command(cli, config, org, patterns, change_id, *admin)
+                    review::process_review_approve_command(cli, config, org.as_deref(), patterns, change_id, *admin)
                 }
                 cli::ReviewAction::Delete { change_id } => {
-                    review::process_review_delete_command(cli, config, org, patterns, change_id)
+                    review::process_review_delete_command(cli, config, org.as_deref(), patterns, change_id)
                 }
                 cli::ReviewAction::Purge => {
-                    review::process_review_purge_command(cli, config, org, patterns)
+                    review::process_review_purge_command(cli, config, org.as_deref(), patterns)
                 }
             }
         }

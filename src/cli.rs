@@ -52,6 +52,10 @@ pub struct Cli {
     #[arg(short = 'm', long = "depth", value_name = "INT", help = DEPTH_HELP.as_str())]
     pub max_depth: Option<usize>,
 
+    /// Override user/org for operations
+    #[arg(long = "user-org", help = "Override user/org (auto-detected from directory structure if not specified)")]
+    pub user_org: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -203,15 +207,16 @@ EXAMPLES:
   ❌  PR deleted            🧹  Repository purged   📊  Summary stats
 
 EXAMPLES:
-  gx review ls --org tatari-tv GX-2024-01-15    # List PRs for change ID
-  gx review clone --org tatari-tv GX-2024-01-15 # Clone repos with PRs
-  gx review approve --org tatari-tv GX-2024-01-15 --admin  # Approve and merge PRs
-  gx review delete --org tatari-tv GX-2024-01-15 # Delete PRs and branches
-  gx review purge --org tatari-tv     # Clean up all GX branches")]
+  gx review ls GX-2024-01-15                    # List PRs (auto-detect org)
+  gx review ls --org tatari-tv GX-2024-01-15    # List PRs for specific org
+  gx review clone GX-2024-01-15                 # Clone repos with PRs (auto-detect)
+  gx review approve GX-2024-01-15 --admin       # Approve and merge PRs (auto-detect)
+  gx review delete GX-2024-01-15                # Delete PRs and branches (auto-detect)
+  gx review purge --org tatari-tv                # Clean up GX branches (explicit org)")]
     Review {
-        /// GitHub organization
-        #[arg(short = 'o', long = "org", help = "GitHub organization")]
-        org: String,
+        /// GitHub organization (auto-detected if not specified)
+        #[arg(short = 'o', long = "org", help = "GitHub organization (auto-detected from directory structure if not specified)")]
+        org: Option<String>,
 
         /// Repository patterns to filter
         #[arg(short = 'p', long = "patterns", help = "Repository patterns to filter")]

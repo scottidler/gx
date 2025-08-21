@@ -1,6 +1,7 @@
 # gx.yml - Sample configuration file
 default-user-org: "scottidler"
 jobs: "nproc"
+token-path: "~/.config/github/tokens/{user_or_org}"  # {user_or_org} is replaced at runtime
 
 # Repository discovery settings
 repo-discovery:
