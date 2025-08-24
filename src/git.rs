@@ -130,6 +130,21 @@ fn get_current_commit_sha(repo: &Repo) -> Option<String> {
     }
 }
 
+/// Get current commit SHA (full length)
+fn get_current_commit_sha_full(repo: &Repo) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo.path.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let sha = String::from_utf8(output.stdout).ok()?;
+        Some(sha.trim().to_string())
+    } else {
+        None
+    }
+}
+
 /// Get the current branch name for a repository
 fn get_current_branch(repo: &Repo) -> Option<String> {
     let output = Command::new("git")
@@ -243,67 +258,103 @@ fn get_remote_status(repo: &Repo, branch: &Option<String>) -> RemoteStatus {
         _ => return RemoteStatus::NoRemote,
     };
 
-    // First check if there's a remote tracking branch
-    let upstream_output = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .arg("rev-parse")
-        .arg("--abbrev-ref")
-        .arg(&format!("{}@{{upstream}}", branch))
-        .output();
+    debug!("Checking remote status for {}: {}", repo.name, branch);
 
-    let upstream_branch = match upstream_output {
-        Ok(output) if output.status.success() => {
-            match String::from_utf8(output.stdout) {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => return RemoteStatus::Error("Invalid UTF-8 in upstream branch".to_string()),
-            }
-        }
-        _ => return RemoteStatus::NoRemote,
+    // Get local HEAD SHA (current commit, not branch tip)
+    let local_sha = match get_current_commit_sha_full(repo) {
+        Some(sha) => sha,
+        None => return RemoteStatus::Error("Failed to get local HEAD SHA".to_string()),
     };
 
-    debug!("Checking remote status for {}: {} -> {}", repo.name, branch, upstream_branch);
+    // Get remote SHA using ls-remote (non-destructive!)
+    let remote_sha = match get_remote_sha_ls_remote(repo, branch) {
+        Ok(sha) => sha,
+        Err(e) => return RemoteStatus::Error(e.to_string()),
+    };
 
-    // Get ahead/behind counts
-    let status_output = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .arg("rev-list")
-        .arg("--left-right")
-        .arg("--count")
-        .arg(&format!("{}...{}", branch, upstream_branch))
-        .output();
+    debug!("Remote status for {}: local={}, remote={}", repo.name, &local_sha[..7], &remote_sha[..7]);
 
-    match status_output {
-        Ok(output) if output.status.success() => {
-            let counts = match String::from_utf8(output.stdout) {
-                Ok(s) => s,
-                Err(_) => return RemoteStatus::Error("Invalid UTF-8 in rev-list output".to_string()),
-            };
-            let parts: Vec<&str> = counts.trim().split('\t').collect();
+    // Quick comparison first
+    if local_sha == remote_sha {
+        return RemoteStatus::UpToDate;
+    }
 
-            if parts.len() == 2 {
-                let ahead = parts[0].parse::<u32>().unwrap_or(0);
-                let behind = parts[1].parse::<u32>().unwrap_or(0);
+    // Count ahead/behind using actual SHAs
+    // When remote SHA doesn't exist locally, we can't count commits accurately
+    // This indicates the repo needs to be fetched/synced
+    let behind = count_commits_between(&local_sha, &remote_sha, repo).unwrap_or_else(|_| {
+        debug!("Cannot count commits behind for {} - remote SHA not in local repo", repo.name);
+        1 // Indicate that we're behind, but can't count exactly
+    });
 
-                debug!("Remote status for {}: ahead={}, behind={}", repo.name, ahead, behind);
+    let ahead = count_commits_between(&remote_sha, &local_sha, repo).unwrap_or_else(|_| {
+        debug!("Cannot count commits ahead for {} - remote SHA not in local repo", repo.name);
+        0 // If we can't count, assume we're not ahead
+    });
 
-                match (ahead, behind) {
-                    (0, 0) => RemoteStatus::UpToDate,
-                    (a, 0) if a > 0 => RemoteStatus::Ahead(a),
-                    (0, b) if b > 0 => RemoteStatus::Behind(b),
-                    (a, b) if a > 0 && b > 0 => RemoteStatus::Diverged(a, b),
-                    _ => RemoteStatus::UpToDate,
-                }
-            } else {
-                RemoteStatus::Error("Invalid rev-list output".to_string())
-            }
+    debug!("Remote status for {}: ahead={}, behind={}", repo.name, ahead, behind);
+
+    match (ahead, behind) {
+        (0, 0) => RemoteStatus::UpToDate,
+        (a, 0) if a > 0 => RemoteStatus::Ahead(a),
+        (0, b) if b > 0 => RemoteStatus::Behind(b),
+        (a, b) if a > 0 && b > 0 => RemoteStatus::Diverged(a, b),
+        _ => RemoteStatus::UpToDate,
+    }
+}
+
+/// Get remote SHA using git ls-remote (non-destructive)
+fn get_remote_sha_ls_remote(repo: &Repo, branch: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo.path.to_string_lossy(), "ls-remote", "origin", branch])
+        .output()
+        .context("Failed to run git ls-remote")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("git ls-remote failed: {}", stderr));
+    }
+
+    let output_str = String::from_utf8(output.stdout)
+        .context("Invalid UTF-8 in ls-remote output")?;
+
+    // Parse: "SHA\trefs/heads/branch"
+    if let Some(line) = output_str.lines().next() {
+        if let Some(sha) = line.split('\t').next() {
+            return Ok(sha.to_string());
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            RemoteStatus::Error(format!("git rev-list failed: {}", stderr))
+    }
+
+    Err(eyre::eyre!("Could not parse ls-remote output"))
+}
+
+/// Count commits between two SHAs
+fn count_commits_between(from_sha: &str, to_sha: &str, repo: &Repo) -> Result<u32> {
+    let output = Command::new("git")
+        .args([
+            "-C", &repo.path.to_string_lossy(),
+            "rev-list", "--count",
+            &format!("{}..{}", from_sha, to_sha)
+        ])
+        .output()
+        .context("Failed to count commits")?;
+
+    if output.status.success() {
+        let count_str = String::from_utf8(output.stdout)
+            .context("Invalid UTF-8 in rev-list output")?;
+        let count = count_str.trim().parse::<u32>()
+            .context("Failed to parse commit count")?;
+        Ok(count)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // If the SHA doesn't exist locally, we can't count commits
+        // This happens when remote has commits we haven't fetched
+        if stderr.contains("unknown revision") || stderr.contains("ambiguous argument") {
+            debug!("Cannot count commits between {} and {} - remote SHA not in local repo", from_sha, to_sha);
+            Err(eyre::eyre!("Remote SHA not found in local repository"))
+        } else {
+            Err(eyre::eyre!("git rev-list failed: {}", stderr))
         }
-        Err(e) => RemoteStatus::Error(format!("Failed to run git rev-list: {}", e)),
     }
 }
 

@@ -493,35 +493,6 @@ pub fn display_unified_results<T: UnifiedDisplay>(
     }
 }
 
-/// Display status results with summary using unified formatting
-pub fn display_status_results(results: Vec<RepoStatus>, opts: &StatusOptions) {
-    let mut clean_count = 0;
-    let mut dirty_count = 0;
-    let mut error_count = 0;
-
-    // Filter results based on verbosity (existing logic)
-    let filtered_results: Vec<&RepoStatus> = results.iter()
-        .filter(|result| {
-            match (&result.error, result.is_clean, opts.verbosity) {
-                (Some(_), _, _) => { error_count += 1; true }, // Always show errors
-                (None, true, OutputVerbosity::Compact) => { clean_count += 1; false }, // Skip clean in compact
-                (None, true, _) => { clean_count += 1; true }, // Show clean in other modes
-                (None, false, _) => { dirty_count += 1; true }, // Always show dirty
-            }
-        })
-        .collect();
-
-    // Use unified display for filtered results
-    display_unified_results(&filtered_results, opts);
-
-    // Display summary (existing logic)
-    display_unified_summary(clean_count, dirty_count, error_count, opts);
-}
-
-
-
-
-
 /// Display unified summary matching status format (clean/dirty/errors)
 pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_count: usize, opts: &StatusOptions) {
     if clean_count == 0 && dirty_count == 0 && error_count == 0 {
@@ -584,5 +555,72 @@ pub fn display_checkout_result_immediate(result: &CheckoutResult) -> Result<()> 
 
     display_unified_format(result, &opts, &widths);
     io::stdout().flush().context("Failed to flush stdout")?;
+    Ok(())
+}
+
+/// Get current branch name quickly (no network calls, no status parsing)
+fn get_current_branch_name_fast(repo: &crate::repo::Repo) -> String {
+    use std::process::Command;
+
+    Command::new("git")
+        .args(["-C", &repo.path.to_string_lossy(), "branch", "--show-current"])
+        .output()
+        .map(|output| {
+            if output.status.success() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                "unknown".to_string()
+            }
+        })
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Calculate alignment widths quickly using fast git commands (no expensive operations)
+pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> AlignmentWidths {
+    use rayon::prelude::*;
+
+    // Branch width: Fast git command, no network calls
+    let branch_width = repos.par_iter()
+        .map(|repo| get_current_branch_name_fast(repo).len())
+        .max()
+        .unwrap_or(7)
+        .max(7); // Minimum readable width
+
+    // SHA width: Always fixed
+    let sha_width = 7;
+
+    // Emoji width: Set to maximum possible width to handle all cases
+    // Covers: 🟢 (2), ⬇️1 (3), ⬆️12 (4), ⚠️abc (5), 🔀2↑3↓ (6)
+    let emoji_width = 6; // Maximum width for diverged case
+
+    AlignmentWidths {
+        branch_width,
+        sha_width,
+        emoji_width
+    }
+}
+
+/// Display a single status result immediately with pre-calculated alignment
+pub fn display_status_result_immediate(
+    result: &crate::git::RepoStatus,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) -> Result<()> {
+    // Apply verbosity filtering (same logic as batch display)
+    let should_display = match (&result.error, result.is_clean, opts.verbosity) {
+        (Some(_), _, _) => true, // Always show errors
+        (None, true, OutputVerbosity::Compact) => false, // Skip clean in compact
+        (None, true, _) => true, // Show clean in other modes
+        (None, false, _) => true, // Always show dirty
+    };
+
+    if should_display {
+        // Use existing unified formatting with fixed widths
+        display_unified_format(result, opts, widths);
+
+        // Ensure immediate visibility
+        io::stdout().flush().context("Failed to flush stdout")?;
+    }
+
     Ok(())
 }

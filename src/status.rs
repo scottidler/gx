@@ -11,6 +11,7 @@ use eyre::{Context, Result};
 use log::{debug, info};
 use rayon::prelude::*;
 use std::env;
+use std::sync::Mutex;
 
 /// Process the status subcommand
 pub fn process_status_command(
@@ -59,13 +60,10 @@ pub fn process_status_command(
         return Ok(());
     }
 
-    // 3. Process repositories in parallel
-    let results: Vec<git::RepoStatus> = filtered_repos
-        .par_iter()
-        .map(|repo| git::get_repo_status(repo))
-        .collect();
+    // 3. Fast pre-scan for alignment widths
+    let widths = output::calculate_alignment_widths_fast(&filtered_repos);
 
-    // 4. Display results using output.rs
+    // 4. Create status options
     let verbosity = if detailed {
         // CLI --detailed flag overrides config
         OutputVerbosity::Detailed
@@ -83,13 +81,51 @@ pub fn process_status_command(
         use_colors,
     };
 
-    output::display_status_results(results.clone(), &status_opts);
+    // 5. Process repositories in parallel with streaming output
+    let results = Mutex::new(Vec::new());
 
-    // 5. Exit with error count
-    let error_count = results.iter().filter(|r| r.error.is_some()).count();
+    filtered_repos.par_iter().for_each(|repo| {
+        let result = git::get_repo_status(repo);
+
+        // Store for final summary
+        if let Ok(mut results_vec) = results.lock() {
+            results_vec.push(result.clone());
+        }
+
+        // Display immediately with pre-calculated alignment
+        if let Err(e) = output::display_status_result_immediate(&result, &status_opts, &widths) {
+            log::error!("Failed to display status result: {}", e);
+        }
+    });
+
+    // 6. Final summary
+    let results_vec = results.into_inner().unwrap_or_default();
+    let (clean_count, dirty_count, error_count) = categorize_status_results(&results_vec);
+    output::display_unified_summary(clean_count, dirty_count, error_count, &status_opts);
+
+    // 7. Exit with error count
     if error_count > 0 {
         std::process::exit(error_count.min(255) as i32);
     }
 
     Ok(())
+}
+
+/// Categorize status results into clean/dirty/error counts
+fn categorize_status_results(results: &[git::RepoStatus]) -> (usize, usize, usize) {
+    let mut clean_count = 0;
+    let mut dirty_count = 0;
+    let mut error_count = 0;
+
+    for result in results {
+        if result.error.is_some() {
+            error_count += 1;
+        } else if result.is_clean {
+            clean_count += 1;
+        } else {
+            dirty_count += 1;
+        }
+    }
+
+    (clean_count, dirty_count, error_count)
 }
