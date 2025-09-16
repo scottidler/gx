@@ -1,6 +1,8 @@
 use crate::config::OutputVerbosity;
 use crate::create::{CreateAction, CreateResult};
-use crate::git::{CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus};
+use crate::git::{
+    CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus,
+};
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
@@ -712,7 +714,11 @@ fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, use_colors: b
 }
 
 /// Display a single item using unified formatting
-pub fn display_unified_format<T: UnifiedDisplay>(item: &T, opts: &StatusOptions, widths: &AlignmentWidths) {
+pub fn display_unified_format<T: UnifiedDisplay>(
+    item: &T,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) {
     // Branch (right-justified)
     let branch = item.get_branch().unwrap_or("unknown");
     let branch_display = if opts.use_colors {
@@ -724,7 +730,11 @@ pub fn display_unified_format<T: UnifiedDisplay>(item: &T, opts: &StatusOptions,
     // Commit SHA (fixed width)
     let commit_display = item.get_commit_sha().unwrap_or("-------");
     let sha_display = if opts.use_colors {
-        format!("{:width$}", commit_display.bright_black(), width = widths.sha_width)
+        format!(
+            "{:width$}",
+            commit_display.bright_black(),
+            width = widths.sha_width
+        )
     } else {
         format!("{:width$}", commit_display, width = widths.sha_width)
     };
@@ -768,7 +778,12 @@ pub fn display_unified_results<T: UnifiedDisplay>(items: &[T], opts: &StatusOpti
 }
 
 /// Display unified summary matching status format (clean/dirty/errors)
-pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_count: usize, opts: &StatusOptions) {
+pub fn display_unified_summary(
+    clean_count: usize,
+    dirty_count: usize,
+    error_count: usize,
+    opts: &StatusOptions,
+) {
     if clean_count == 0 && dirty_count == 0 && error_count == 0 {
         let msg = if opts.use_emoji {
             "🔍 No repositories found"
@@ -801,7 +816,11 @@ pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_cou
 pub fn display_clone_result_immediate(result: &CloneResult) -> Result<()> {
     match &result.error {
         Some(err) => {
-            println!("⚠️  {} Failed: {}", result.repo_slug.red().bold(), err.red());
+            println!(
+                "⚠️  {} Failed: {}",
+                result.repo_slug.red().bold(),
+                err.red()
+            );
         }
         None => {
             let (emoji, _action) = match result.action {
@@ -833,7 +852,12 @@ fn get_current_branch_name_fast(repo: &crate::repo::Repo) -> String {
     use std::process::Command;
 
     Command::new("git")
-        .args(["-C", &repo.path.to_string_lossy(), "branch", "--show-current"])
+        .args([
+            "-C",
+            &repo.path.to_string_lossy(),
+            "branch",
+            "--show-current",
+        ])
         .output()
         .map(|output| {
             if output.status.success() {

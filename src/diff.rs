@@ -8,7 +8,11 @@ pub fn generate_diff(original: &str, updated: &str, buffer: usize) -> String {
     if updated.is_empty() {
         let mut result = String::new();
         for (i, line) in original.lines().enumerate() {
-            result.push_str(&format!("{} | {}\n", format!("-{:4}", i + 1).red(), line.red()));
+            result.push_str(&format!(
+                "{} | {}\n",
+                format!("-{:4}", i + 1).red(),
+                line.red()
+            ));
         }
         return result;
     }
@@ -49,7 +53,12 @@ pub fn generate_diff(original: &str, updated: &str, buffer: usize) -> String {
 }
 
 /// Apply a string substitution to content and return diff if changed
-pub fn apply_substitution(content: &str, pattern: &str, replacement: &str, buffer: usize) -> Option<(String, String)> {
+pub fn apply_substitution(
+    content: &str,
+    pattern: &str,
+    replacement: &str,
+    buffer: usize,
+) -> Option<(String, String)> {
     if !content.contains(pattern) {
         return None;
     }
@@ -95,7 +104,11 @@ pub fn reconstruct_files_from_unified_diff(diff_text: &str) -> Vec<(String, Stri
     for line in diff_text.lines() {
         if line.starts_with("diff --git ") {
             if !current_filename.is_empty() {
-                results.push((current_filename.clone(), orig_lines.join("\n"), upd_lines.join("\n")));
+                results.push((
+                    current_filename.clone(),
+                    orig_lines.join("\n"),
+                    upd_lines.join("\n"),
+                ));
             }
             current_filename.clear();
             orig_lines.clear();
@@ -145,14 +158,22 @@ pub fn reconstruct_files_from_unified_diff(diff_text: &str) -> Vec<(String, Stri
         }
     }
     if !current_filename.is_empty() {
-        results.push((current_filename, orig_lines.join("\n"), upd_lines.join("\n")));
+        results.push((
+            current_filename,
+            orig_lines.join("\n"),
+            upd_lines.join("\n"),
+        ));
     }
     results
 }
 
 /// Generate a summary of changes for display
 #[allow(dead_code)]
-pub fn generate_change_summary(files_modified: usize, files_added: usize, files_deleted: usize) -> String {
+pub fn generate_change_summary(
+    files_modified: usize,
+    files_added: usize,
+    files_deleted: usize,
+) -> String {
     let mut parts = Vec::new();
 
     if files_modified > 0 {
@@ -294,7 +315,10 @@ index 2345678..bcdefgh 100644
         assert_eq!(generate_change_summary(1, 0, 0), "1 modified");
         assert_eq!(generate_change_summary(0, 1, 0), "1 added");
         assert_eq!(generate_change_summary(0, 0, 1), "1 deleted");
-        assert_eq!(generate_change_summary(2, 1, 1), "2 modified, 1 added, 1 deleted");
+        assert_eq!(
+            generate_change_summary(2, 1, 1),
+            "2 modified, 1 added, 1 deleted"
+        );
     }
 
     #[test]
@@ -322,7 +346,8 @@ index 2345678..bcdefgh 100644
         let content = "version 1.2.3\nother line\nversion 4.5.6";
 
         // Test successful regex substitution
-        let result = apply_regex_substitution(content, r"version \d+\.\d+\.\d+", "version X.X.X", 1);
+        let result =
+            apply_regex_substitution(content, r"version \d+\.\d+\.\d+", "version X.X.X", 1);
         assert!(result.is_ok());
         let result = result.unwrap();
         assert!(result.is_some());

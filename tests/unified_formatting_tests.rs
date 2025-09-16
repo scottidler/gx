@@ -274,7 +274,12 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         error: None,
     };
 
-    let items = vec![&simple_emoji_status, &ahead_status, &diverged_status, &error_status];
+    let items = vec![
+        &simple_emoji_status,
+        &ahead_status,
+        &diverged_status,
+        &error_status,
+    ];
     let widths = AlignmentWidths::calculate(&items);
 
     // The emoji width should be calculated based on the widest emoji combination

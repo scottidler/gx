@@ -105,14 +105,18 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             None => create::show_matches(cli, config, files, patterns),
             Some(action) => {
                 let change = match action {
-                    cli::CreateAction::Add { path, content } => create::Change::Add(path.clone(), content.clone()),
+                    cli::CreateAction::Add { path, content } => {
+                        create::Change::Add(path.clone(), content.clone())
+                    }
                     cli::CreateAction::Delete => create::Change::Delete,
-                    cli::CreateAction::Sub { pattern, replacement } => {
-                        create::Change::Sub(pattern.clone(), replacement.clone())
-                    }
-                    cli::CreateAction::Regex { pattern, replacement } => {
-                        create::Change::Regex(pattern.clone(), replacement.clone())
-                    }
+                    cli::CreateAction::Sub {
+                        pattern,
+                        replacement,
+                    } => create::Change::Sub(pattern.clone(), replacement.clone()),
+                    cli::CreateAction::Regex {
+                        pattern,
+                        replacement,
+                    } => create::Change::Regex(pattern.clone(), replacement.clone()),
                 };
                 create::process_create_command(
                     cli,
@@ -126,20 +130,42 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 )
             }
         },
-        Commands::Review { org, patterns, action } => match action {
+        Commands::Review {
+            org,
+            patterns,
+            action,
+        } => match action {
             cli::ReviewAction::Ls { change_ids } => {
                 review::process_review_ls_command(cli, config, org.as_deref(), patterns, change_ids)
             }
-            cli::ReviewAction::Clone { change_id, all } => {
-                review::process_review_clone_command(cli, config, org.as_deref(), patterns, change_id, *all)
-            }
+            cli::ReviewAction::Clone { change_id, all } => review::process_review_clone_command(
+                cli,
+                config,
+                org.as_deref(),
+                patterns,
+                change_id,
+                *all,
+            ),
             cli::ReviewAction::Approve { change_id, admin } => {
-                review::process_review_approve_command(cli, config, org.as_deref(), patterns, change_id, *admin)
+                review::process_review_approve_command(
+                    cli,
+                    config,
+                    org.as_deref(),
+                    patterns,
+                    change_id,
+                    *admin,
+                )
             }
-            cli::ReviewAction::Delete { change_id } => {
-                review::process_review_delete_command(cli, config, org.as_deref(), patterns, change_id)
+            cli::ReviewAction::Delete { change_id } => review::process_review_delete_command(
+                cli,
+                config,
+                org.as_deref(),
+                patterns,
+                change_id,
+            ),
+            cli::ReviewAction::Purge => {
+                review::process_review_purge_command(cli, config, org.as_deref(), patterns)
             }
-            cli::ReviewAction::Purge => review::process_review_purge_command(cli, config, org.as_deref(), patterns),
         },
     }
 }
@@ -153,7 +179,8 @@ fn main() -> Result<()> {
 
     // ONLY change directory if user explicitly provided --cwd
     if let Some(cwd) = &cli.cwd {
-        env::set_current_dir(cwd).context(format!("Failed to change to directory: {}", cwd.display()))?;
+        env::set_current_dir(cwd)
+            .context(format!("Failed to change to directory: {}", cwd.display()))?;
         info!("Changed working directory to: {}", cwd.display());
     }
 

@@ -112,7 +112,10 @@ fn filter_repository_slugs(all_repos: &[String], patterns: &[String]) -> Vec<Str
         .collect();
 
     let filtered_repos = repo::filter_repos(fake_repos, patterns);
-    filtered_repos.iter().filter_map(|r| r.slug.clone()).collect()
+    filtered_repos
+        .iter()
+        .filter_map(|r| r.slug.clone())
+        .collect()
 }
 
 /// Categorize clone results into clean/dirty/error counts

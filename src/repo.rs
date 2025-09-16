@@ -101,7 +101,10 @@ fn parse_repo_slug_from_url(url: &str) -> Option<String> {
 /// Check if directory should be ignored during discovery
 fn is_ignored_directory(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        matches!(name, "node_modules" | "target" | "build" | ".next" | "dist" | "vendor")
+        matches!(
+            name,
+            "node_modules" | "target" | "build" | ".next" | "dist" | "vendor"
+        )
     } else {
         false
     }
@@ -113,10 +116,18 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
         return repos;
     }
 
-    debug!("Filtering {} repos with patterns: {:?}", repos.len(), patterns);
+    debug!(
+        "Filtering {} repos with patterns: {:?}",
+        repos.len(),
+        patterns
+    );
 
     // Level 1: Exact match on repository name
-    let level1: Vec<Repo> = repos.iter().filter(|r| patterns.contains(&r.name)).cloned().collect();
+    let level1: Vec<Repo> = repos
+        .iter()
+        .filter(|r| patterns.contains(&r.name))
+        .cloned()
+        .collect();
 
     if !level1.is_empty() {
         debug!("Level 1 (exact name match): {} repos", level1.len());
@@ -191,7 +202,10 @@ mod tests {
             Some("scottidler/gx".to_string())
         );
 
-        assert_eq!(parse_repo_slug_from_url("https://gitlab.com/org/repo.git"), None);
+        assert_eq!(
+            parse_repo_slug_from_url("https://gitlab.com/org/repo.git"),
+            None
+        );
     }
 
     #[test]

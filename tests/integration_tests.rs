@@ -39,7 +39,10 @@ fn test_version_output() {
 
 #[test]
 fn test_invalid_command() {
-    let output = run_gx_command(&["invalid-command"], std::env::current_dir().unwrap().as_path());
+    let output = run_gx_command(
+        &["invalid-command"],
+        std::env::current_dir().unwrap().as_path(),
+    );
 
     // Should fail with error
     assert!(!output.status.success());
@@ -116,7 +119,10 @@ max_depth: 5
     let config_path = temp_dir.path().join("gx.yml");
     std::fs::write(&config_path, config_content).unwrap();
 
-    let output = run_gx_command(&["--config", config_path.to_str().unwrap(), "status"], temp_dir.path());
+    let output = run_gx_command(
+        &["--config", config_path.to_str().unwrap(), "status"],
+        temp_dir.path(),
+    );
 
     // Should succeed with custom config
     assert!(output.status.success());

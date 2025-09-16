@@ -5,14 +5,22 @@ use std::fs;
 use std::process::Command;
 
 /// Get all repositories for a user/org from GitHub API
-pub fn get_user_repos(user_or_org: &str, include_archived: bool, config: &Config) -> Result<Vec<String>> {
+pub fn get_user_repos(
+    user_or_org: &str,
+    include_archived: bool,
+    config: &Config,
+) -> Result<Vec<String>> {
     debug!("Getting repos for user/org: {user_or_org}, include_archived: {include_archived}");
 
     let token = read_token(user_or_org, config)?;
     debug!("Using token for user/org: {user_or_org}");
 
     // Query GitHub API - try both user and org endpoints
-    let archived_filter = if include_archived { "" } else { " | select(.archived == false)" };
+    let archived_filter = if include_archived {
+        ""
+    } else {
+        " | select(.archived == false)"
+    };
 
     // First try as an organization
     let org_query = format!("orgs/{user_or_org}/repos");
@@ -75,7 +83,12 @@ pub fn get_default_branch(repo_slug: &str, token: &str) -> Result<String> {
 
     let output = Command::new("gh")
         .env("GH_TOKEN", token)
-        .args(["api", &format!("repos/{repo_slug}"), "--jq", ".default_branch"])
+        .args([
+            "api",
+            &format!("repos/{repo_slug}"),
+            "--jq",
+            ".default_branch",
+        ])
         .output()
         .context("Failed to get default branch")?;
 
@@ -99,7 +112,10 @@ pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
     let token_path = super::user_org::build_token_path(token_template, user_or_org);
 
     let token = fs::read_to_string(&token_path)
-        .context(format!("Failed to read token from {}", token_path.display()))?
+        .context(format!(
+            "Failed to read token from {}",
+            token_path.display()
+        ))?
         .trim()
         .to_string();
 
@@ -115,7 +131,8 @@ pub fn create_pr(repo_slug: &str, branch_name: &str, commit_message: &str) -> Re
     debug!("Creating PR for repo: {repo_slug}, branch: {branch_name}");
 
     let title = branch_name.to_string();
-    let body = format!("{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md");
+    let body =
+        format!("{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md");
 
     let output = Command::new("gh")
         .args([
@@ -190,7 +207,8 @@ pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<P
         return Err(eyre::eyre!("Failed to list PRs: {}", error));
     }
 
-    let json_output = String::from_utf8(output.stdout).context("Invalid UTF-8 in gh pr list output")?;
+    let json_output =
+        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh pr list output")?;
 
     parse_pr_list_json(&json_output)
 }
@@ -214,7 +232,14 @@ pub fn approve_and_merge_pr(repo_slug: &str, pr_number: u64, admin_override: boo
 
     // First approve the PR
     let approve_output = Command::new("gh")
-        .args(["pr", "review", &pr_number.to_string(), "--repo", repo_slug, "--approve"])
+        .args([
+            "pr",
+            "review",
+            &pr_number.to_string(),
+            "--repo",
+            repo_slug,
+            "--approve",
+        ])
         .output()
         .context("Failed to execute gh pr review --approve")?;
 

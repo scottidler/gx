@@ -99,18 +99,25 @@ impl Config {
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
         // If explicit config path provided, try to load it
         if let Some(path) = config_path {
-            return Self::load_from_file(path).context(format!("Failed to load config from {}", path.display()));
+            return Self::load_from_file(path)
+                .context(format!("Failed to load config from {}", path.display()));
         }
 
         // Try primary location: ~/.config/<project>/<project>.yml
         if let Some(config_dir) = dirs::config_dir() {
             let project_name = env!("CARGO_PKG_NAME");
-            let primary_config = config_dir.join(project_name).join(format!("{project_name}.yml"));
+            let primary_config = config_dir
+                .join(project_name)
+                .join(format!("{project_name}.yml"));
             if primary_config.exists() {
                 match Self::load_from_file(&primary_config) {
                     Ok(config) => return Ok(config),
                     Err(e) => {
-                        log::warn!("Failed to load config from {}: {}", primary_config.display(), e);
+                        log::warn!(
+                            "Failed to load config from {}: {}",
+                            primary_config.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -123,7 +130,11 @@ impl Config {
             match Self::load_from_file(&fallback_config) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
-                    log::warn!("Failed to load config from {}: {}", fallback_config.display(), e);
+                    log::warn!(
+                        "Failed to load config from {}: {}",
+                        fallback_config.display(),
+                        e
+                    );
                 }
             }
         }

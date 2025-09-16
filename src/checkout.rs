@@ -44,13 +44,17 @@ pub fn process_checkout_command(
         .context("Failed to initialize thread pool")?;
 
     // Determine max depth
-    let max_depth = cli.max_depth.or_else(|| get_max_depth_from_config(config)).unwrap_or(3);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| get_max_depth_from_config(config))
+        .unwrap_or(3);
 
     debug!("Using max depth: {max_depth}");
 
     // 1. Discover repositories
     let start_dir = env::current_dir().context("Failed to get current directory")?;
-    let repos = repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos =
+        repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 

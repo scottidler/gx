@@ -1,0 +1,12 @@
+# rustfmt.toml
+
+# Keep the default width, which is what CI is using
+max_width = 100
+
+# Make rustfmt aggressively wrap method chains and function arguments
+use_small_heuristics = "Default"
+
+# Always put function args on multiple lines if they exceed max_width
+fn_call_width = 60
+chain_width = 60
+attr_fn_like_width = 60

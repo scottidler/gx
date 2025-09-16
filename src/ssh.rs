@@ -19,7 +19,10 @@ impl SshUrlBuilder {
 
         // Validate parts are not empty
         if parts[0].is_empty() || parts[1].is_empty() {
-            return Err(eyre::eyre!("Repository slug parts cannot be empty: '{}'", repo_slug));
+            return Err(eyre::eyre!(
+                "Repository slug parts cannot be empty: '{}'",
+                repo_slug
+            ));
         }
 
         Ok(format!("git@github.com:{repo_slug}.git"))
@@ -49,7 +52,10 @@ impl SshUrlBuilder {
 
         let parts: Vec<&str> = repo_part.split('/').collect();
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-            return Err(eyre::eyre!("Invalid repository format in SSH URL: '{}'", repo_part));
+            return Err(eyre::eyre!(
+                "Invalid repository format in SSH URL: '{}'",
+                repo_part
+            ));
         }
 
         Ok(())
@@ -214,14 +220,20 @@ mod tests {
     fn test_validate_ssh_url_invalid_suffix() {
         let result = SshUrlBuilder::validate_ssh_url("git@github.com:scottidler/gx");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Expected to end with '.git'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expected to end with '.git'"));
     }
 
     #[test]
     fn test_validate_ssh_url_invalid_repo_format() {
         let result = SshUrlBuilder::validate_ssh_url("git@github.com:invalid.git");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid repository format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid repository format"));
     }
 
     #[test]

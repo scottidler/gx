@@ -10,7 +10,10 @@ fn test_checkout_existing_branch() {
     run_git_command(&["checkout", "main"], &frontend_path);
 
     // Test gx checkout to existing branch
-    let output = run_gx_command(&["checkout", "feature-branch", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "feature-branch", "-p", "frontend"],
+        workspace.path(),
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 
@@ -32,7 +35,10 @@ fn test_checkout_create_new_branch() {
     let frontend_path = workspace.path().join("frontend");
 
     // Test creating new branch with -b flag
-    let output = run_gx_command(&["checkout", "-b", "new-feature", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "-b", "new-feature", "-p", "frontend"],
+        workspace.path(),
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 
@@ -70,7 +76,10 @@ fn test_checkout_with_stash() {
     );
 
     // Test checkout with stash flag
-    let output = run_gx_command(&["checkout", "feature", "-s", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "feature", "-s", "-p", "frontend"],
+        workspace.path(),
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 
@@ -142,7 +151,8 @@ fn test_checkout_help_shows_default_examples() {
     // Should show new examples with default keyword and pattern flag
     assert!(stdout.contains("gx checkout                       # Checkout default branch"));
     assert!(stdout.contains("gx checkout default               # Same as above"));
-    assert!(stdout.contains("gx checkout -p frontend           # Checkout default branch in repos matching"));
+    assert!(stdout
+        .contains("gx checkout -p frontend           # Checkout default branch in repos matching"));
     assert!(stdout.contains("-p, --patterns <PATTERN>"));
 
     // Should succeed
@@ -316,7 +326,10 @@ fn test_checkout_long_pattern_flag() {
     let workspace = create_full_test_workspace();
 
     // Test using --patterns instead of -p
-    let output = run_gx_command(&["checkout", "default", "--patterns", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "default", "--patterns", "frontend"],
+        workspace.path(),
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -329,7 +342,10 @@ fn test_checkout_create_branch_with_default_from() {
     let frontend_path = workspace.path().join("frontend");
 
     // Test creating branch with default 'from' branch (should use 'default' which resolves to main)
-    let output = run_gx_command(&["checkout", "-b", "new-feature", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "-b", "new-feature", "-p", "frontend"],
+        workspace.path(),
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -402,7 +418,10 @@ fn test_checkout_nonexistent_branch_fails_gracefully() {
     let workspace = create_full_test_workspace();
 
     // Test checkout to non-existent branch
-    let output = run_gx_command(&["checkout", "nonexistent-branch", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "nonexistent-branch", "-p", "frontend"],
+        workspace.path(),
+    );
 
     // Command should fail because the branch doesn't exist
     assert!(!output.status.success());
@@ -466,7 +485,10 @@ fn test_resolve_branch_name_unit_test() {
     // Test non-default branch names pass through unchanged
     assert_eq!(resolve_branch_name(&repo, "main").unwrap(), "main");
     assert_eq!(resolve_branch_name(&repo, "master").unwrap(), "master");
-    assert_eq!(resolve_branch_name(&repo, "feature-branch").unwrap(), "feature-branch");
+    assert_eq!(
+        resolve_branch_name(&repo, "feature-branch").unwrap(),
+        "feature-branch"
+    );
     assert_eq!(resolve_branch_name(&repo, "develop").unwrap(), "develop");
 
     // Test 'default' keyword attempts resolution (will fail in test env, but that's expected)
@@ -510,7 +532,10 @@ fn test_checkout_stash_with_default_branch() {
     run_git_command(&["checkout", "-b", "feature"], &frontend_path);
 
     // Test checkout to default branch with stash
-    let output = run_gx_command(&["checkout", "default", "-s", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "default", "-s", "-p", "frontend"],
+        workspace.path(),
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();

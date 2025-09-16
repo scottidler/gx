@@ -39,13 +39,17 @@ pub fn process_status_command(
         .context("Failed to initialize thread pool")?;
 
     // Determine max depth
-    let max_depth = cli.max_depth.or_else(|| get_max_depth_from_config(config)).unwrap_or(2);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| get_max_depth_from_config(config))
+        .unwrap_or(2);
 
     debug!("Using max depth: {max_depth}");
 
     // 1. Discover repositories
     let start_dir = env::current_dir().context("Failed to get current directory")?;
-    let repos = repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos =
+        repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
@@ -67,7 +71,11 @@ pub fn process_status_command(
         OutputVerbosity::Detailed
     } else {
         // Use config verbosity or default
-        config.output.as_ref().and_then(|o| o.verbosity).unwrap_or_default()
+        config
+            .output
+            .as_ref()
+            .and_then(|o| o.verbosity)
+            .unwrap_or_default()
     };
 
     let status_opts = StatusOptions {

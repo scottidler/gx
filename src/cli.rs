@@ -4,8 +4,12 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
-static JOBS_HELP: LazyLock<String> =
-    LazyLock::new(|| format!("Number of parallel operations [default: {}]", num_cpus::get()));
+static JOBS_HELP: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Number of parallel operations [default: {}]",
+        num_cpus::get()
+    )
+});
 static DEPTH_HELP: LazyLock<String> = LazyLock::new(|| {
     let effective_default = get_effective_max_depth_default();
     format!("Maximum directory depth to scan [default: {effective_default}]")
@@ -16,7 +20,11 @@ fn get_effective_max_depth_default() -> usize {
     // Try to load config to get the actual default that would be used
     match crate::config::Config::load(None) {
         Ok(config) => {
-            config.repo_discovery.as_ref().and_then(|rd| rd.max_depth).unwrap_or(3)
+            config
+                .repo_discovery
+                .as_ref()
+                .and_then(|rd| rd.max_depth)
+                .unwrap_or(3)
             // Program default if not in config
         }
         Err(_) => 3, // Program default if config fails to load
@@ -82,7 +90,11 @@ EXAMPLES:
   gx status --no-emoji          # Plain text for scripts")]
     Status {
         /// Show detailed file-by-file status
-        #[arg(short, long, help = "Show detailed status instead of compact")]
+        #[arg(
+            short,
+            long,
+            help = "Show detailed status instead of compact"
+        )]
         detailed: bool,
 
         /// Disable emoji output
@@ -94,7 +106,11 @@ EXAMPLES:
         no_color: bool,
 
         /// Repository name patterns to filter
-        #[arg(short = 'p', long = "patterns", help = "Repository name patterns to filter")]
+        #[arg(
+            short = 'p',
+            long = "patterns",
+            help = "Repository name patterns to filter"
+        )]
         patterns: Vec<String>,
     },
 
@@ -116,7 +132,11 @@ EXAMPLES:
   gx checkout main -p frontend -p api  # Checkout main in repos matching 'frontend' or 'api'")]
     Checkout {
         /// Create a new branch
-        #[arg(short = 'b', long = "branch", help = "Create and checkout a new branch")]
+        #[arg(
+            short = 'b',
+            long = "branch",
+            help = "Create and checkout a new branch"
+        )]
         create_branch: bool,
 
         /// Base branch to create from (defaults to 'default')
@@ -129,7 +149,11 @@ EXAMPLES:
         from_branch: Option<String>,
 
         /// Stash uncommitted changes before checkout
-        #[arg(short = 's', long = "stash", help = "Stash uncommitted changes before checkout")]
+        #[arg(
+            short = 's',
+            long = "stash",
+            help = "Stash uncommitted changes before checkout"
+        )]
         stash: bool,
 
         /// Repository name patterns to filter
@@ -171,7 +195,11 @@ EXAMPLES:
         include_archived: bool,
 
         /// Repository name patterns to filter
-        #[arg(short = 'p', long = "patterns", help = "Repository name patterns to filter")]
+        #[arg(
+            short = 'p',
+            long = "patterns",
+            help = "Repository name patterns to filter"
+        )]
         patterns: Vec<String>,
     },
 
@@ -202,11 +230,19 @@ EXAMPLES:
         change_id: Option<String>,
 
         /// Repository patterns to filter
-        #[arg(short = 'p', long = "patterns", help = "Repository patterns to filter")]
+        #[arg(
+            short = 'p',
+            long = "patterns",
+            help = "Repository patterns to filter"
+        )]
         patterns: Vec<String>,
 
         /// Commit changes with message
-        #[arg(short = 'c', long = "commit", help = "Commit changes with message")]
+        #[arg(
+            short = 'c',
+            long = "commit",
+            help = "Commit changes with message"
+        )]
         commit: Option<String>,
 
         /// Create PR after committing
@@ -239,7 +275,11 @@ EXAMPLES:
         org: Option<String>,
 
         /// Repository patterns to filter
-        #[arg(short = 'p', long = "patterns", help = "Repository patterns to filter")]
+        #[arg(
+            short = 'p',
+            long = "patterns",
+            help = "Repository patterns to filter"
+        )]
         patterns: Vec<String>,
 
         #[command(subcommand)]
@@ -347,7 +387,11 @@ fn check_tool_version(tool: &str, version_arg: &str, min_version: &str) -> ToolS
             };
 
             ToolStatus {
-                version: if version.is_empty() { "unknown".to_string() } else { version },
+                version: if version.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    version
+                },
                 status_icon: if meets_requirement { "✅" } else { "⚠️" }.to_string(),
             }
         }
@@ -384,7 +428,8 @@ fn extract_version_from_output(tool: &str, output: &str) -> String {
 
 /// Simple version comparison (assumes semantic versioning)
 fn version_compare(version: &str, min_version: &str) -> bool {
-    let parse_version = |v: &str| -> Vec<u32> { v.split('.').map(|part| part.parse().unwrap_or(0)).collect() };
+    let parse_version =
+        |v: &str| -> Vec<u32> { v.split('.').map(|part| part.parse().unwrap_or(0)).collect() };
 
     let v1 = parse_version(version);
     let v2 = parse_version(min_version);

@@ -14,7 +14,12 @@ use rayon::prelude::*;
 use std::path::Path;
 
 /// Show matched repositories and files without performing any actions (dry-run mode)
-pub fn show_matches(cli: &Cli, config: &Config, files: &[String], patterns: &[String]) -> Result<()> {
+pub fn show_matches(
+    cli: &Cli,
+    config: &Config,
+    files: &[String],
+    patterns: &[String],
+) -> Result<()> {
     let current_dir = std::env::current_dir()?;
     let start_dir = cli.cwd.as_ref().unwrap_or(&current_dir);
     let max_depth = cli
@@ -155,7 +160,10 @@ pub fn process_create_command(
     info!("Discovered {} repositories", repos.len());
 
     let filtered_repos = filter_repos(repos, patterns);
-    info!("Filtered to {} repositories matching patterns", filtered_repos.len());
+    info!(
+        "Filtered to {} repositories matching patterns",
+        filtered_repos.len()
+    );
 
     if filtered_repos.is_empty() {
         println!("No repositories found matching the specified patterns.");
@@ -178,7 +186,16 @@ pub fn process_create_command(
     let results: Vec<CreateResult> = pool.install(|| {
         filtered_repos
             .par_iter()
-            .map(|repo| process_single_repo(repo, &change_id, files, &change, commit_message.as_deref(), create_pr))
+            .map(|repo| {
+                process_single_repo(
+                    repo,
+                    &change_id,
+                    files,
+                    &change,
+                    commit_message.as_deref(),
+                    create_pr,
+                )
+            })
             .collect()
     });
 
@@ -224,7 +241,10 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
 
-                error: Some("Repository has uncommitted changes. Please commit or stash them first.".to_string()),
+                error: Some(
+                    "Repository has uncommitted changes. Please commit or stash them first."
+                        .to_string(),
+                ),
             };
         }
         Ok(false) => {} // Good, no uncommitted changes
@@ -396,14 +416,22 @@ fn apply_add_change(
     let (_, diff) = file::create_file_with_content(&full_path, content, 3)?;
 
     files_affected.push(file_path.to_string());
-    diff_parts.push(format!("  A {}\n{}", file_path, crate::utils::indent(&diff, 4)));
+    diff_parts.push(format!(
+        "  A {}\n{}",
+        file_path,
+        crate::utils::indent(&diff, 4)
+    ));
 
     // Add rollback action to delete the created file
     let full_path_clone = full_path.clone();
     transaction.add_rollback(move || {
         if full_path_clone.exists() {
-            std::fs::remove_file(&full_path_clone)
-                .with_context(|| format!("Failed to rollback file creation: {}", full_path_clone.display()))?;
+            std::fs::remove_file(&full_path_clone).with_context(|| {
+                format!(
+                    "Failed to rollback file creation: {}",
+                    full_path_clone.display()
+                )
+            })?;
         }
         Ok(())
     });
@@ -439,8 +467,9 @@ fn apply_delete_change(
         }
 
         // Read content for diff
-        let content = std::fs::read_to_string(&full_path)
-            .with_context(|| format!("Failed to read file for deletion: {}", full_path.display()))?;
+        let content = std::fs::read_to_string(&full_path).with_context(|| {
+            format!("Failed to read file for deletion: {}", full_path.display())
+        })?;
 
         // Create backup for rollback
         let backup_path = file::backup_file(&full_path)?;
@@ -459,7 +488,8 @@ fn apply_delete_change(
         // Add rollback action
         let backup_path_clone = backup_path.clone();
         let full_path_clone = full_path.clone();
-        transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
+        transaction
+            .add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
     }
 
     Ok(())
@@ -495,7 +525,9 @@ fn apply_substitution_change(
         }
 
         // Try to apply substitution
-        if let Some((updated_content, diff)) = file::apply_substitution_to_file(&full_path, pattern, replacement, 3)? {
+        if let Some((updated_content, diff)) =
+            file::apply_substitution_to_file(&full_path, pattern, replacement, 3)?
+        {
             // Create backup for rollback
             let backup_path = file::backup_file(&full_path)?;
 
@@ -512,7 +544,9 @@ fn apply_substitution_change(
             // Add rollback action
             let backup_path_clone = backup_path.clone();
             let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
+            transaction.add_rollback(move || {
+                file::restore_from_backup(&backup_path_clone, &full_path_clone)
+            });
         }
     }
 
@@ -549,7 +583,9 @@ fn apply_regex_change(
         }
 
         // Try to apply regex substitution
-        if let Some((updated_content, diff)) = file::apply_regex_to_file(&full_path, pattern, replacement, 3)? {
+        if let Some((updated_content, diff)) =
+            file::apply_regex_to_file(&full_path, pattern, replacement, 3)?
+        {
             // Create backup for rollback
             let backup_path = file::backup_file(&full_path)?;
 
@@ -566,7 +602,9 @@ fn apply_regex_change(
             // Add rollback action
             let backup_path_clone = backup_path.clone();
             let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
+            transaction.add_rollback(move || {
+                file::restore_from_backup(&backup_path_clone, &full_path_clone)
+            });
         }
     }
 
@@ -582,7 +620,8 @@ fn commit_changes(
     transaction: &mut Transaction,
 ) -> Result<()> {
     // Create and switch to new branch
-    git::create_branch(repo_path, change_id).with_context(|| format!("Failed to create branch: {change_id}"))?;
+    git::create_branch(repo_path, change_id)
+        .with_context(|| format!("Failed to create branch: {change_id}"))?;
 
     // Add rollback to switch back to original branch
     let original_branch = original_branch.to_string();
@@ -621,7 +660,10 @@ fn create_pull_request(repo: &Repo, change_id: &str, commit_message: &str) -> Re
             .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
         info!("Created PR for repository: {repo_slug}");
     } else {
-        return Err(eyre::eyre!("Repository {} has no slug, cannot create PR", repo.name));
+        return Err(eyre::eyre!(
+            "Repository {} has no slug, cannot create PR",
+            repo.name
+        ));
     }
     Ok(())
 }
@@ -777,7 +819,10 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("File already exists"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("File already exists"));
     }
 
     #[test]

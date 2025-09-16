@@ -54,7 +54,8 @@ pub fn create_test_repo(base_path: &Path, repo_name: &str, with_remote: bool) ->
 
     // Create initial commit
     let readme_path = repo_path.join("README.md");
-    fs::write(&readme_path, format!("# {repo_name}\n\nTest repository")).expect("Failed to write README");
+    fs::write(&readme_path, format!("# {repo_name}\n\nTest repository"))
+        .expect("Failed to write README");
 
     run_git_command(&["add", "README.md"], &repo_path);
     run_git_command(&["commit", "-m", "Initial commit"], &repo_path);
@@ -137,8 +138,12 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
     );
 
     // 2. Backend repo - API service with different commit history
-    let _backend_path =
-        create_test_repo_with_branches(temp_dir.path(), "backend", "gx-testing/backend", &["main", "staging"]);
+    let _backend_path = create_test_repo_with_branches(
+        temp_dir.path(),
+        "backend",
+        "gx-testing/backend",
+        &["main", "staging"],
+    );
 
     // 3. Mobile app repo - with untracked files
     let mobile_path = create_test_repo_with_branches(
@@ -148,7 +153,8 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
         &["main", "ios-fixes", "android-fixes"],
     );
     // Add untracked files
-    fs::write(mobile_path.join("temp.log"), "temporary log file").expect("Failed to create temp file");
+    fs::write(mobile_path.join("temp.log"), "temporary log file")
+        .expect("Failed to create temp file");
     fs::write(mobile_path.join("build.cache"), "build cache").expect("Failed to create cache file");
 
     // 4. Infrastructure repo - with uncommitted changes
@@ -159,7 +165,11 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
         &["main", "production", "development"],
     );
     // Add staged changes
-    fs::write(infra_path.join("terraform.tf"), "# Updated terraform config").expect("Failed to write terraform file");
+    fs::write(
+        infra_path.join("terraform.tf"),
+        "# Updated terraform config",
+    )
+    .expect("Failed to write terraform file");
     run_git_command(&["add", "terraform.tf"], &infra_path);
 
     // 5. Documentation repo - clean repo, multiple commits
@@ -170,7 +180,11 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
         &[
             ("Initial docs", "README.md", "# Project Documentation"),
             ("Add API docs", "api.md", "# API Documentation"),
-            ("Update installation guide", "install.md", "# Installation Guide"),
+            (
+                "Update installation guide",
+                "install.md",
+                "# Installation Guide",
+            ),
         ],
     );
 
@@ -221,8 +235,14 @@ pub fn create_test_repo_with_branches(
         )
         .expect("Failed to write branch file");
 
-        run_git_command(&["add", &format!("{}.md", branch.replace('/', "_"))], &repo_path);
-        run_git_command(&["commit", "-m", &format!("Add {branch} specific changes")], &repo_path);
+        run_git_command(
+            &["add", &format!("{}.md", branch.replace('/', "_"))],
+            &repo_path,
+        );
+        run_git_command(
+            &["commit", "-m", &format!("Add {branch} specific changes")],
+            &repo_path,
+        );
     }
 
     // Return to main branch
@@ -264,14 +284,18 @@ pub fn create_test_repo_with_commits(
 
 /// Check if GitHub integration tests should be run (requires scottidler token file)
 pub fn should_run_github_tests() -> bool {
-    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.config/github/tokens/scottidler";
+    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        + "/.config/github/tokens/scottidler";
     std::path::Path::new(&token_path).exists()
 }
 
 /// Get the GitHub token for testing from token file
 pub fn get_test_github_token() -> Option<String> {
-    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) + "/.config/github/tokens/scottidler";
-    std::fs::read_to_string(token_path).ok().map(|s| s.trim().to_string())
+    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        + "/.config/github/tokens/scottidler";
+    std::fs::read_to_string(token_path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Create a test environment configured for gx-testing organization
@@ -292,7 +316,12 @@ pub fn create_gx_testing_workspace() -> TempDir {
 
         // Update remote to point to gx-testing org
         run_git_command(
-            &["remote", "set-url", "origin", &format!("git@github.com:{slug}.git")],
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("git@github.com:{slug}.git"),
+            ],
             &repo_path,
         );
     }

@@ -45,10 +45,12 @@ pub fn process_review_ls_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
-    let user_org_contexts = crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+    let user_org_contexts =
+        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     info!(
         "Using {} org(s): {}",
@@ -151,10 +153,12 @@ pub fn process_review_clone_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
-    let user_org_contexts = crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+    let user_org_contexts =
+        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     info!(
         "Using {} org(s): {}",
@@ -267,7 +271,10 @@ pub fn process_review_approve_command(
     }
 
     // Filter to only open PRs
-    let open_prs: Vec<_> = prs.iter().filter(|pr| pr.state == github::PrState::Open).collect();
+    let open_prs: Vec<_> = prs
+        .iter()
+        .filter(|pr| pr.state == github::PrState::Open)
+        .collect();
 
     if open_prs.is_empty() {
         println!("No open PRs found for change ID: {change_id}");
@@ -337,7 +344,10 @@ pub fn process_review_delete_command(
     }
 
     // Filter to only open PRs
-    let open_prs: Vec<_> = prs.iter().filter(|pr| pr.state == github::PrState::Open).collect();
+    let open_prs: Vec<_> = prs
+        .iter()
+        .filter(|pr| pr.state == github::PrState::Open)
+        .collect();
 
     if open_prs.is_empty() {
         println!("No open PRs found for change ID: {change_id}");
@@ -387,7 +397,12 @@ pub fn process_review_delete_command(
 }
 
 /// Process review purge command - clean up all GX branches and PRs
-pub fn process_review_purge_command(cli: &Cli, config: &Config, org: Option<&str>, patterns: &[String]) -> Result<()> {
+pub fn process_review_purge_command(
+    cli: &Cli,
+    config: &Config,
+    org: Option<&str>,
+    patterns: &[String],
+) -> Result<()> {
     info!("Purging all GX branches and PRs for org: {org:?}");
 
     // Discover repositories
@@ -420,7 +435,8 @@ pub fn process_review_purge_command(cli: &Cli, config: &Config, org: Option<&str
         .context("Failed to create thread pool")?;
 
     // Process repositories in parallel
-    let results: Vec<ReviewResult> = pool.install(|| filtered_repos.par_iter().map(purge_gx_branches).collect());
+    let results: Vec<ReviewResult> =
+        pool.install(|| filtered_repos.par_iter().map(purge_gx_branches).collect());
 
     // Display results
     let opts = StatusOptions {
@@ -546,7 +562,10 @@ fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
             // Then delete the remote branch
             match github::delete_remote_branch(&pr.repo_slug, &pr.branch) {
                 Ok(()) => {
-                    info!("Successfully deleted PR #{} and branch {}", pr.number, pr.branch);
+                    info!(
+                        "Successfully deleted PR #{} and branch {}",
+                        pr.number, pr.branch
+                    );
                     ReviewResult {
                         repo,
                         change_id: change_id.to_string(),
@@ -663,7 +682,11 @@ fn create_repo_from_slug(repo_slug: &str) -> Repo {
 
 /// Extract repository name from a slug like "owner/repo"
 fn extract_repo_name(repo_slug: &str) -> String {
-    repo_slug.split('/').next_back().unwrap_or(repo_slug).to_string()
+    repo_slug
+        .split('/')
+        .next_back()
+        .unwrap_or(repo_slug)
+        .to_string()
 }
 
 /// Display summary of review results

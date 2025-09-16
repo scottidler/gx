@@ -128,10 +128,19 @@ mod tests {
         );
 
         // Invalid cases - not 3 components or excluded names
-        assert_eq!(extract_user_org_from_path(&PathBuf::from("./standalone-repo")), None);
-        assert_eq!(extract_user_org_from_path(&PathBuf::from("./src/main")), None);
+        assert_eq!(
+            extract_user_org_from_path(&PathBuf::from("./standalone-repo")),
+            None
+        );
+        assert_eq!(
+            extract_user_org_from_path(&PathBuf::from("./src/main")),
+            None
+        );
         assert_eq!(extract_user_org_from_path(&PathBuf::from(".")), None);
-        assert_eq!(extract_user_org_from_path(&PathBuf::from("./projects/test")), None);
+        assert_eq!(
+            extract_user_org_from_path(&PathBuf::from("./projects/test")),
+            None
+        );
     }
 
     #[test]

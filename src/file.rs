@@ -38,10 +38,15 @@ pub fn apply_substitution_to_file(
     replacement: &str,
     buffer: usize,
 ) -> Result<Option<(String, String)>> {
-    let content =
-        fs::read_to_string(file_path).with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
-    Ok(diff::apply_substitution(&content, pattern, replacement, buffer))
+    Ok(diff::apply_substitution(
+        &content,
+        pattern,
+        replacement,
+        buffer,
+    ))
 }
 
 /// Apply a regex substitution to a file
@@ -51,8 +56,8 @@ pub fn apply_regex_to_file(
     replacement: &str,
     buffer: usize,
 ) -> Result<Option<(String, String)>> {
-    let content =
-        fs::read_to_string(file_path).with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
     diff::apply_regex_substitution(&content, pattern, replacement, buffer)
 }
@@ -60,11 +65,16 @@ pub fn apply_regex_to_file(
 /// Write content to a file, creating parent directories if needed
 pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create parent directories for: {}", file_path.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create parent directories for: {}",
+                file_path.display()
+            )
+        })?;
     }
 
-    fs::write(file_path, content).with_context(|| format!("Failed to write file: {}", file_path.display()))?;
+    fs::write(file_path, content)
+        .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
 
     debug!("Wrote content to file: {}", file_path.display());
     Ok(())
@@ -72,14 +82,19 @@ pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
 
 /// Delete a file
 pub fn delete_file(file_path: &Path) -> Result<()> {
-    fs::remove_file(file_path).with_context(|| format!("Failed to delete file: {}", file_path.display()))?;
+    fs::remove_file(file_path)
+        .with_context(|| format!("Failed to delete file: {}", file_path.display()))?;
 
     debug!("Deleted file: {}", file_path.display());
     Ok(())
 }
 
 /// Create a new file with content
-pub fn create_file_with_content(file_path: &Path, content: &str, buffer: usize) -> Result<(String, String)> {
+pub fn create_file_with_content(
+    file_path: &Path,
+    content: &str,
+    buffer: usize,
+) -> Result<(String, String)> {
     // Ensure content has exactly one trailing newline
     let mut file_content = content.to_string();
     if !file_content.ends_with('\n') {
@@ -110,7 +125,11 @@ pub fn backup_file(file_path: &Path) -> Result<PathBuf> {
         )
     })?;
 
-    debug!("Created backup: {} -> {}", file_path.display(), backup_path.display());
+    debug!(
+        "Created backup: {} -> {}",
+        file_path.display(),
+        backup_path.display()
+    );
     Ok(backup_path)
 }
 
@@ -125,7 +144,8 @@ pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<(
     })?;
 
     // Remove backup file
-    fs::remove_file(backup_path).with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
+    fs::remove_file(backup_path)
+        .with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
 
     debug!(
         "Restored from backup: {} -> {}",
@@ -172,8 +192,8 @@ pub fn is_file_accessible(file_path: &Path) -> bool {
 /// Get file size in bytes
 #[allow(dead_code)]
 pub fn get_file_size(file_path: &Path) -> Result<u64> {
-    let metadata =
-        fs::metadata(file_path).with_context(|| format!("Failed to get metadata for: {}", file_path.display()))?;
+    let metadata = fs::metadata(file_path)
+        .with_context(|| format!("Failed to get metadata for: {}", file_path.display()))?;
     Ok(metadata.len())
 }
 
@@ -212,15 +232,23 @@ mod tests {
         // Create nested structure
         fs::create_dir_all(repo_path.join("src").join("utils")).unwrap();
         fs::write(repo_path.join("src").join("main.rs"), "fn main() {}").unwrap();
-        fs::write(repo_path.join("src").join("utils").join("helper.rs"), "// helper").unwrap();
+        fs::write(
+            repo_path.join("src").join("utils").join("helper.rs"),
+            "// helper",
+        )
+        .unwrap();
 
         let result = find_files_in_repo(repo_path, "**/*.rs");
         assert!(result.is_ok());
 
         let files = result.unwrap();
         assert_eq!(files.len(), 2);
-        assert!(files.iter().any(|f| f.to_string_lossy().contains("main.rs")));
-        assert!(files.iter().any(|f| f.to_string_lossy().contains("helper.rs")));
+        assert!(files
+            .iter()
+            .any(|f| f.to_string_lossy().contains("main.rs")));
+        assert!(files
+            .iter()
+            .any(|f| f.to_string_lossy().contains("helper.rs")));
     }
 
     #[test]

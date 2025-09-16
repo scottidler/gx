@@ -19,7 +19,10 @@ fn test_ssh_url_construction_integration() {
             url.starts_with("git@github.com:"),
             "SSH URL should start with git@github.com: for {repo_slug}"
         );
-        assert!(url.ends_with(".git"), "SSH URL should end with .git for {repo_slug}");
+        assert!(
+            url.ends_with(".git"),
+            "SSH URL should end with .git for {repo_slug}"
+        );
         assert!(
             url.contains(repo_slug),
             "SSH URL should contain repo slug for {repo_slug}"
@@ -103,10 +106,16 @@ fn test_ssh_url_roundtrip() {
 
         // Validate the built URL
         let validate_result = SshUrlBuilder::validate_ssh_url(&ssh_url);
-        assert!(validate_result.is_ok(), "Built SSH URL should be valid for {repo_slug}");
+        assert!(
+            validate_result.is_ok(),
+            "Built SSH URL should be valid for {repo_slug}"
+        );
 
         // Verify the URL contains the expected parts
-        assert!(ssh_url.contains(repo_slug), "SSH URL should contain repo slug");
+        assert!(
+            ssh_url.contains(repo_slug),
+            "SSH URL should contain repo slug"
+        );
         assert_eq!(ssh_url, format!("git@github.com:{repo_slug}.git"));
     }
 }
@@ -143,8 +152,14 @@ fn test_ssh_error_handling() {
 fn test_ssh_url_special_characters() {
     // Test repo slugs with special but valid characters
     let special_cases = vec![
-        ("org-name/repo-name", "git@github.com:org-name/repo-name.git"),
-        ("user_name/repo_name", "git@github.com:user_name/repo_name.git"),
+        (
+            "org-name/repo-name",
+            "git@github.com:org-name/repo-name.git",
+        ),
+        (
+            "user_name/repo_name",
+            "git@github.com:user_name/repo_name.git",
+        ),
         ("123org/456repo", "git@github.com:123org/456repo.git"),
         ("a/b", "git@github.com:a/b.git"), // Minimal case
     ];
@@ -154,7 +169,10 @@ fn test_ssh_url_special_characters() {
         assert!(result.is_ok(), "Should build URL for special slug: {slug}");
 
         let url = result.unwrap();
-        assert_eq!(url, expected_url, "URL should match expected for slug: {slug}");
+        assert_eq!(
+            url, expected_url,
+            "URL should match expected for slug: {slug}"
+        );
 
         // Validate the URL
         let validation = SshUrlBuilder::validate_ssh_url(&url);
