@@ -37,7 +37,7 @@ pub fn apply_substitution_to_file(
     pattern: &str,
     replacement: &str,
     buffer: usize,
-) -> Result<Option<(String, String)>> {
+) -> Result<crate::diff::SubstitutionResult> {
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
@@ -55,7 +55,7 @@ pub fn apply_regex_to_file(
     pattern: &str,
     replacement: &str,
     buffer: usize,
-) -> Result<Option<(String, String)>> {
+) -> Result<crate::diff::SubstitutionResult> {
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
@@ -286,11 +286,12 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert!(result.is_some());
+        assert!(matches!(result, crate::diff::SubstitutionResult::Changed(_, _)));
 
-        let (updated, diff) = result.unwrap();
-        assert_eq!(updated, "Hi world\nThis is a test\nHi again");
-        assert!(!diff.is_empty());
+        if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
+            assert_eq!(updated, "Hi world\nThis is a test\nHi again");
+            assert!(!diff.is_empty());
+        }
     }
 
     #[test]
@@ -303,11 +304,12 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert!(result.is_some());
+        assert!(matches!(result, crate::diff::SubstitutionResult::Changed(_, _)));
 
-        let (updated, diff) = result.unwrap();
-        assert_eq!(updated, "version X.X.X\nother line\nversion X.X.X");
-        assert!(!diff.is_empty());
+        if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
+            assert_eq!(updated, "version X.X.X\nother line\nversion X.X.X");
+            assert!(!diff.is_empty());
+        }
     }
 
     #[test]

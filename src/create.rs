@@ -13,6 +13,16 @@ use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::path::Path;
 
+/// Statistics for substitution operations
+#[derive(Debug, Default, Clone)]
+pub struct SubstitutionStats {
+    pub files_scanned: usize,
+    pub files_changed: usize,
+    pub files_no_matches: usize,
+    pub files_no_change: usize,
+    pub total_matches: usize,
+}
+
 /// Show matched repositories and files without performing any actions (dry-run mode)
 pub fn show_matches(
     cli: &Cli,
@@ -113,6 +123,7 @@ pub struct CreateResult {
     pub change_id: String,
     pub action: CreateAction,
     pub files_affected: Vec<String>,
+    pub substitution_stats: Option<SubstitutionStats>,
 
     pub error: Option<String>,
 }
@@ -240,6 +251,7 @@ fn process_single_repo(
                 change_id: change_id.to_string(),
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
+                substitution_stats: None,
 
                 error: Some(
                     "Repository has uncommitted changes. Please commit or stash them first."
@@ -254,6 +266,7 @@ fn process_single_repo(
                 change_id: change_id.to_string(),
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
+                substitution_stats: None,
 
                 error: Some(format!("Failed to check repository status: {e}")),
             };
@@ -269,6 +282,7 @@ fn process_single_repo(
                 change_id: change_id.to_string(),
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
+                substitution_stats: None,
 
                 error: Some(format!("Failed to get current branch: {e}")),
             };
@@ -276,6 +290,7 @@ fn process_single_repo(
     };
 
     // Apply changes based on change type
+    let mut substitution_stats = None;
     let change_result = match change {
         Change::Add(path, content) => apply_add_change(
             repo_path,
@@ -284,32 +299,48 @@ fn process_single_repo(
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
-        ),
+        ).map(|_| ()),
         Change::Delete => apply_delete_change(
             repo_path,
             file_patterns,
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
-        ),
-        Change::Sub(pattern, replacement) => apply_substitution_change(
-            repo_path,
-            file_patterns,
-            pattern,
-            replacement,
-            &mut transaction,
-            &mut files_affected,
-            &mut diff_parts,
-        ),
-        Change::Regex(pattern, replacement) => apply_regex_change(
-            repo_path,
-            file_patterns,
-            pattern,
-            replacement,
-            &mut transaction,
-            &mut files_affected,
-            &mut diff_parts,
-        ),
+        ).map(|_| ()),
+        Change::Sub(pattern, replacement) => {
+            match apply_substitution_change(
+                repo_path,
+                file_patterns,
+                pattern,
+                replacement,
+                &mut transaction,
+                &mut files_affected,
+                &mut diff_parts,
+            ) {
+                Ok(stats) => {
+                    substitution_stats = Some(stats);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Change::Regex(pattern, replacement) => {
+            match apply_regex_change(
+                repo_path,
+                file_patterns,
+                pattern,
+                replacement,
+                &mut transaction,
+                &mut files_affected,
+                &mut diff_parts,
+            ) {
+                Ok(stats) => {
+                    substitution_stats = Some(stats);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
     };
 
     if let Err(e) = change_result {
@@ -319,6 +350,7 @@ fn process_single_repo(
             change_id: change_id.to_string(),
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
+            substitution_stats,
 
             error: Some(format!("Failed to apply changes: {e}")),
         };
@@ -331,6 +363,7 @@ fn process_single_repo(
             change_id: change_id.to_string(),
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
+            substitution_stats,
 
             error: None,
         };
@@ -344,6 +377,7 @@ fn process_single_repo(
             change_id: change_id.to_string(),
             action: CreateAction::DryRun,
             files_affected,
+            substitution_stats,
 
             error: None,
         };
@@ -378,6 +412,7 @@ fn process_single_repo(
                 change_id: change_id.to_string(),
                 action: final_action,
                 files_affected,
+                substitution_stats,
 
                 error: None,
             }
@@ -389,6 +424,7 @@ fn process_single_repo(
                 change_id: change_id.to_string(),
                 action: CreateAction::DryRun,
                 files_affected,
+                substitution_stats,
 
                 error: Some(format!("Failed to commit changes: {e}")),
             }
@@ -504,8 +540,9 @@ fn apply_substitution_change(
     transaction: &mut Transaction,
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<SubstitutionStats> {
     let mut all_files = Vec::new();
+    let mut stats = SubstitutionStats::default();
 
     // Find files matching all patterns
     for file_pattern in file_patterns {
@@ -516,6 +553,8 @@ fn apply_substitution_change(
     // Remove duplicates
     all_files.sort();
     all_files.dedup();
+    
+    stats.files_scanned = all_files.len();
 
     for file_path in all_files {
         let full_path = repo_path.join(&file_path);
@@ -525,32 +564,50 @@ fn apply_substitution_change(
         }
 
         // Try to apply substitution
-        if let Some((updated_content, diff)) =
-            file::apply_substitution_to_file(&full_path, pattern, replacement, 3)?
-        {
-            // Create backup for rollback
-            let backup_path = file::backup_file(&full_path)?;
+        match file::apply_substitution_to_file(&full_path, pattern, replacement, 3)? {
+            diff::SubstitutionResult::Changed(updated_content, diff) => {
+                // Create backup for rollback
+                let backup_path = file::backup_file(&full_path)?;
 
-            // Write updated content
-            file::write_file_content(&full_path, &updated_content)?;
+                // Write updated content
+                file::write_file_content(&full_path, &updated_content)?;
 
-            files_affected.push(file_path.to_string_lossy().to_string());
-            diff_parts.push(format!(
-                "  M {}\n{}",
-                file_path.display(),
-                crate::utils::indent(&diff, 4)
-            ));
+                files_affected.push(file_path.to_string_lossy().to_string());
+                diff_parts.push(format!(
+                    "  M {}\n{}",
+                    file_path.display(),
+                    crate::utils::indent(&diff, 4)
+                ));
 
-            // Add rollback action
-            let backup_path_clone = backup_path.clone();
-            let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || {
-                file::restore_from_backup(&backup_path_clone, &full_path_clone)
-            });
+                // Add rollback action
+                let backup_path_clone = backup_path.clone();
+                let full_path_clone = full_path.clone();
+                transaction.add_rollback(move || {
+                    file::restore_from_backup(&backup_path_clone, &full_path_clone)
+                });
+                
+                stats.files_changed += 1;
+                // Count matches in the original content
+                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                stats.total_matches += original_content.matches(pattern).count();
+            }
+            diff::SubstitutionResult::NoMatches => {
+                // Pattern didn't match anything in this file
+                debug!("No matches found for pattern '{}' in {}", pattern, file_path.display());
+                stats.files_no_matches += 1;
+            }
+            diff::SubstitutionResult::NoChange => {
+                // Pattern matched but replacement resulted in no changes
+                debug!("Pattern '{}' matched but no changes resulted in {}", pattern, file_path.display());
+                stats.files_no_change += 1;
+                // Count matches even though no changes were made
+                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                stats.total_matches += original_content.matches(pattern).count();
+            }
         }
     }
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Apply regex change
@@ -562,8 +619,9 @@ fn apply_regex_change(
     transaction: &mut Transaction,
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<SubstitutionStats> {
     let mut all_files = Vec::new();
+    let mut stats = SubstitutionStats::default();
 
     // Find files matching all patterns
     for file_pattern in file_patterns {
@@ -574,6 +632,8 @@ fn apply_regex_change(
     // Remove duplicates
     all_files.sort();
     all_files.dedup();
+    
+    stats.files_scanned = all_files.len();
 
     for file_path in all_files {
         let full_path = repo_path.join(&file_path);
@@ -583,32 +643,54 @@ fn apply_regex_change(
         }
 
         // Try to apply regex substitution
-        if let Some((updated_content, diff)) =
-            file::apply_regex_to_file(&full_path, pattern, replacement, 3)?
-        {
-            // Create backup for rollback
-            let backup_path = file::backup_file(&full_path)?;
+        match file::apply_regex_to_file(&full_path, pattern, replacement, 3)? {
+            diff::SubstitutionResult::Changed(updated_content, diff) => {
+                // Create backup for rollback
+                let backup_path = file::backup_file(&full_path)?;
 
-            // Write updated content
-            file::write_file_content(&full_path, &updated_content)?;
+                // Write updated content
+                file::write_file_content(&full_path, &updated_content)?;
 
-            files_affected.push(file_path.to_string_lossy().to_string());
-            diff_parts.push(format!(
-                "  M {}\n{}",
-                file_path.display(),
-                crate::utils::indent(&diff, 4)
-            ));
+                files_affected.push(file_path.to_string_lossy().to_string());
+                diff_parts.push(format!(
+                    "  M {}\n{}",
+                    file_path.display(),
+                    crate::utils::indent(&diff, 4)
+                ));
 
-            // Add rollback action
-            let backup_path_clone = backup_path.clone();
-            let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || {
-                file::restore_from_backup(&backup_path_clone, &full_path_clone)
-            });
+                // Add rollback action
+                let backup_path_clone = backup_path.clone();
+                let full_path_clone = full_path.clone();
+                transaction.add_rollback(move || {
+                    file::restore_from_backup(&backup_path_clone, &full_path_clone)
+                });
+                
+                stats.files_changed += 1;
+                // Count regex matches in the original content
+                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    stats.total_matches += regex.find_iter(&original_content).count();
+                }
+            }
+            diff::SubstitutionResult::NoMatches => {
+                // Pattern didn't match anything in this file
+                debug!("No matches found for regex pattern '{}' in {}", pattern, file_path.display());
+                stats.files_no_matches += 1;
+            }
+            diff::SubstitutionResult::NoChange => {
+                // Pattern matched but replacement resulted in no changes
+                debug!("Regex pattern '{}' matched but no changes resulted in {}", pattern, file_path.display());
+                stats.files_no_change += 1;
+                // Count matches even though no changes were made
+                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    stats.total_matches += regex.find_iter(&original_content).count();
+                }
+            }
         }
     }
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Commit changes to a new branch
@@ -673,6 +755,85 @@ fn create_pull_request(
     Ok(())
 }
 
+/// Display pattern analysis for substitution operations
+fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
+    // Check if any results have substitution stats (indicating substitution operations)
+    let has_substitution_stats = results.iter().any(|r| r.substitution_stats.is_some());
+    
+    if !has_substitution_stats {
+        return; // No substitution operations, skip analysis
+    }
+
+    // Aggregate statistics from all results
+    let total_files_scanned = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.files_scanned)
+        .sum::<usize>();
+    
+    let files_changed = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.files_changed)
+        .sum::<usize>();
+    
+    let files_no_matches = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.files_no_matches)
+        .sum::<usize>();
+    
+    let files_no_change = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.files_no_change)
+        .sum::<usize>();
+    
+    let total_matches = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.total_matches)
+        .sum::<usize>();
+
+    if total_files_scanned > 0 {
+        if opts.use_emoji {
+            println!("\n🔍 Pattern Analysis:");
+            println!("   📄 Files scanned: {total_files_scanned}");
+            println!("   ✅ Files changed: {files_changed}");
+            if total_matches > 0 {
+                println!("   🎯 Total matches: {total_matches}");
+            }
+            if files_no_matches > 0 {
+                println!("   ❌ Files with no matches: {files_no_matches}");
+            }
+            if files_no_change > 0 {
+                println!("   🔄 Files matched but unchanged: {files_no_change}");
+            }
+            
+            if files_changed == 0 && total_files_scanned > 0 {
+                println!("   ⚠️  No files were modified by the pattern");
+            }
+        } else {
+            println!("\nPattern Analysis:");
+            println!("   Files scanned: {total_files_scanned}");
+            println!("   Files changed: {files_changed}");
+            if total_matches > 0 {
+                println!("   Total matches: {total_matches}");
+            }
+            if files_no_matches > 0 {
+                println!("   Files with no matches: {files_no_matches}");
+            }
+            if files_no_change > 0 {
+                println!("   Files matched but unchanged: {files_no_change}");
+            }
+            
+            if files_changed == 0 && total_files_scanned > 0 {
+                println!("   Warning: No files were modified by the pattern");
+            }
+        }
+    }
+}
+
 /// Display summary of create results
 fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
     let total = results.len();
@@ -713,6 +874,9 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
             println!("   {errors} errors");
         }
     }
+
+    // Add pattern analysis for substitution operations
+    display_pattern_analysis(results, opts);
 }
 
 #[cfg(test)]
@@ -752,6 +916,7 @@ mod tests {
             change_id: "test-change".to_string(),
             action: CreateAction::DryRun,
             files_affected: vec!["test.txt".to_string()],
+            substitution_stats: None,
 
             error: None,
         };
