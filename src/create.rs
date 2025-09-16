@@ -6,7 +6,7 @@ use crate::git;
 use crate::github;
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
-use crate::transaction::Transaction;
+use crate::transaction::{RollbackType, Transaction};
 use chrono::Local;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
@@ -239,10 +239,15 @@ fn process_single_repo(
     debug!("Processing repository: {}", repo.name);
 
     let mut transaction = Transaction::new();
+    transaction.set_continue_on_failure(true); // Continue rollback even if some actions fail
     let repo_path = &repo.path;
     let mut files_affected = Vec::new();
     let mut diff_parts = Vec::new();
     let mut _stash_ref: Option<String> = None;
+
+    // Add rollback points for major phases
+    transaction.add_rollback_point("Repository preparation phase".to_string());
+
     // 1. Handle uncommitted changes with stash
     match git::has_uncommitted_changes(repo_path) {
         Ok(true) => {
@@ -250,14 +255,18 @@ fn process_single_repo(
             match git::stash_save(repo_path, &format!("GX auto-stash for {change_id}")) {
                 Ok(stash) => {
                     _stash_ref = Some(stash.clone());
-                    transaction.add_rollback({
-                        let repo_path = repo_path.clone();
-                        let stash_ref = stash.clone();
-                        move || {
-                            debug!("Rolling back: restoring stashed changes");
-                            git::stash_pop(&repo_path, &stash_ref)
-                        }
-                    });
+                    transaction.add_rollback_with_type(
+                        {
+                            let repo_path = repo_path.clone();
+                            let stash_ref = stash.clone();
+                            move || {
+                                debug!("Rolling back: restoring stashed changes");
+                                git::stash_pop(&repo_path, &stash_ref)
+                            }
+                        },
+                        format!("Restore stash: {stash}"),
+                        RollbackType::StashOperation,
+                    );
                 }
                 Err(e) => {
                     return CreateResult {
@@ -283,6 +292,8 @@ fn process_single_repo(
             };
         }
     }
+
+    transaction.add_rollback_point("Branch operations phase".to_string());
 
     // 2. Get current branch and switch to head branch if needed
     let original_branch = match git::get_current_branch_name(repo_path) {
@@ -319,14 +330,18 @@ fn process_single_repo(
                     }
 
                     // Add rollback to switch back to original branch
-                    transaction.add_rollback({
-                        let repo_path = repo_path.clone();
-                        let original_branch = current.clone();
-                        move || {
-                            debug!("Rolling back: switching back to original branch '{original_branch}'");
-                            git::switch_branch(&repo_path, &original_branch)
-                        }
-                    });
+                    transaction.add_rollback_with_type(
+                        {
+                            let repo_path = repo_path.clone();
+                            let original_branch = current.clone();
+                            move || {
+                                debug!("Rolling back: switching back to original branch '{original_branch}'");
+                                git::switch_branch(&repo_path, &original_branch)
+                            }
+                        },
+                        format!("Switch back to branch: {current}"),
+                        RollbackType::BranchOperation,
+                    );
                 }
             }
         }
@@ -334,6 +349,8 @@ fn process_single_repo(
             debug!("Could not determine head branch, continuing with current branch: {e}");
         }
     }
+
+    transaction.add_rollback_point("File modifications phase".to_string());
 
     // 4. Pull latest changes
     if let Err(e) = git::pull_latest_changes(repo_path) {
@@ -406,13 +423,17 @@ fn process_single_repo(
 
     // Add file modification rollback after changes are applied
     if !files_affected.is_empty() {
-        transaction.add_rollback({
-            let repo_path = repo_path.clone();
-            move || {
-                debug!("Rolling back: resetting file modifications");
-                git::reset_hard(&repo_path)
-            }
-        });
+        transaction.add_rollback_with_type(
+            {
+                let repo_path = repo_path.clone();
+                move || {
+                    debug!("Rolling back: resetting file modifications");
+                    git::reset_hard(&repo_path)
+                }
+            },
+            "Reset file modifications".to_string(),
+            RollbackType::FileOperation,
+        );
     }
 
     if let Err(e) = change_result {
@@ -452,6 +473,8 @@ fn process_single_repo(
             error: None,
         };
     }
+
+    transaction.add_rollback_point("Git operations phase".to_string());
 
     // 6. Create branch and commit changes with comprehensive rollback
     let commit_result = commit_changes_with_rollback(
@@ -793,27 +816,31 @@ fn commit_changes_with_rollback(
         .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
 
     // Add branch rollback
-    transaction.add_rollback({
-        let repo_path = repo_path.to_path_buf();
-        let original_branch = original_branch.to_string();
-        let change_id = change_id.to_string();
-        move || {
-            debug!("Rolling back: switching back to original branch and cleaning up");
-            // Switch back to original branch
-            if let Err(e) = git::switch_branch(&repo_path, &original_branch) {
-                warn!("Failed to switch back to original branch {original_branch}: {e}");
-            }
-
-            // Only delete the branch if we created it (not if it existed before)
-            if !branch_existed {
-                if let Err(e) = git::delete_local_branch(&repo_path, &change_id) {
-                    warn!("Failed to delete branch {change_id}: {e}");
+    transaction.add_rollback_with_type(
+        {
+            let repo_path = repo_path.to_path_buf();
+            let original_branch = original_branch.to_string();
+            let change_id = change_id.to_string();
+            move || {
+                debug!("Rolling back: switching back to original branch and cleaning up");
+                // Switch back to original branch
+                if let Err(e) = git::switch_branch(&repo_path, &original_branch) {
+                    warn!("Failed to switch back to original branch {original_branch}: {e}");
                 }
-            }
 
-            Ok(())
-        }
-    });
+                // Only delete the branch if we created it (not if it existed before)
+                if !branch_existed {
+                    if let Err(e) = git::delete_local_branch(&repo_path, &change_id) {
+                        warn!("Failed to delete branch {change_id}: {e}");
+                    }
+                }
+
+                Ok(())
+            }
+        },
+        format!("Branch cleanup: switch to {original_branch} and delete {change_id}"),
+        RollbackType::BranchOperation,
+    );
 
     // Stage all changes
     git::add_all_changes(repo_path).context("Failed to stage changes")?;
@@ -822,26 +849,34 @@ fn commit_changes_with_rollback(
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
     // Add commit rollback
-    transaction.add_rollback({
-        let repo_path = repo_path.to_path_buf();
-        move || {
-            debug!("Rolling back: resetting commit");
-            git::reset_commit(&repo_path)
-        }
-    });
+    transaction.add_rollback_with_type(
+        {
+            let repo_path = repo_path.to_path_buf();
+            move || {
+                debug!("Rolling back: resetting commit");
+                git::reset_commit(&repo_path)
+            }
+        },
+        "Reset commit".to_string(),
+        RollbackType::GitOperation,
+    );
 
     // Push branch to remote
     git::push_branch(repo_path, change_id).context("Failed to push branch")?;
 
     // Add push rollback (delete remote branch)
-    transaction.add_rollback({
-        let repo_path = repo_path.to_path_buf();
-        let change_id = change_id.to_string();
-        move || {
-            debug!("Rolling back: deleting remote branch '{change_id}'");
-            git::delete_remote_branch(&repo_path, &change_id)
-        }
-    });
+    transaction.add_rollback_with_type(
+        {
+            let repo_path = repo_path.to_path_buf();
+            let change_id = change_id.to_string();
+            move || {
+                debug!("Rolling back: deleting remote branch '{change_id}'");
+                git::delete_remote_branch(&repo_path, &change_id)
+            }
+        },
+        format!("Delete remote branch: {change_id}"),
+        RollbackType::RemoteOperation,
+    );
 
     Ok(())
 }
