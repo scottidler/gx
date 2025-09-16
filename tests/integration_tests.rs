@@ -210,7 +210,11 @@ fn test_error_handling_and_exit_codes() {
         assert!(exit_code > 0);
     } else {
         // If it succeeds, should show error in summary or no repos found message
-        assert!(stdout.contains("error") || stdout.contains("📊") || stdout.contains("🔍 No repositories found"));
+        assert!(
+            stdout.contains("error")
+                || stdout.contains("📊")
+                || stdout.contains("🔍 No repositories found")
+        );
     }
 }
 

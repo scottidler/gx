@@ -8,28 +8,6 @@ pub struct Repo {
     pub path: PathBuf,
     pub name: String,
     pub slug: String, // Always determinable from git config or panic
-    #[allow(dead_code)]
-    pub user_org: UserOrg, // Per-repo user/org (always present or panic)
-    #[allow(dead_code)]
-    pub remote_info: RemoteInfo, // Enhanced remote information
-}
-
-#[derive(Debug, Clone)]
-pub struct UserOrg {
-    pub user: String, // GitHub account (user or org)
-    #[allow(dead_code)]
-    pub org: Option<String>, // Reserved for future enterprise GitHub distinction
-}
-
-#[derive(Debug, Clone)]
-pub struct RemoteInfo {
-    pub origin_url: String, // Always present (panic if missing)
-    #[allow(dead_code)]
-    pub upstream_url: Option<String>, // Optional upstream remote
-    #[allow(dead_code)]
-    pub ssh_url: Option<String>, // Derived SSH URL if applicable
-    #[allow(dead_code)]
-    pub https_url: Option<String>, // Derived HTTPS URL if applicable
 }
 
 impl Repo {
@@ -40,43 +18,27 @@ impl Repo {
             .unwrap_or("unknown")
             .to_string();
 
-        // Extract git config information
-        let remote_info = extract_remote_info(&path);
-        let user_org = extract_user_org_from_remote(&remote_info.origin_url);
-        let slug = format!("{}/{}", user_org.user, name);
+        // Extract git config information to determine slug
+        let origin_url = extract_origin_url(&path);
+        let user = extract_user_from_remote(&origin_url);
+        let slug = format!("{user}/{name}");
 
-        Self {
-            path,
-            name,
-            slug,
-            user_org,
-            remote_info,
-        }
+        Self { path, name, slug }
     }
 
     /// Create a fake repo from slug for filtering purposes (used in clone command)
     pub fn from_slug(slug: String) -> Self {
         let parts: Vec<&str> = slug.split('/').collect();
-        let (user, name) = if parts.len() == 2 {
-            (parts[0].to_string(), parts[1].to_string())
+        let name = if parts.len() == 2 {
+            parts[1].to_string()
         } else {
-            ("unknown".to_string(), slug.clone())
-        };
-
-        let user_org = UserOrg { user, org: None };
-        let remote_info = RemoteInfo {
-            origin_url: format!("git@github.com:{slug}"),
-            upstream_url: None,
-            ssh_url: Some(format!("git@github.com:{slug}")),
-            https_url: Some(format!("https://github.com/{slug}")),
+            slug.clone()
         };
 
         Self {
             path: PathBuf::from(&name),
             name,
             slug,
-            user_org,
-            remote_info,
         }
     }
 }
@@ -198,8 +160,8 @@ fn count_git_repos_at_level(dir: &Path) -> Result<usize> {
     Ok(count)
 }
 
-/// Extract complete remote information from git config
-fn extract_remote_info(repo_path: &Path) -> RemoteInfo {
+/// Extract origin URL from git config
+fn extract_origin_url(repo_path: &Path) -> String {
     let config_path = repo_path.join(".git").join("config");
 
     // Try to read git config
@@ -212,32 +174,18 @@ fn extract_remote_info(repo_path: &Path) -> RemoteInfo {
     };
 
     // Extract origin URL (required)
-    let origin_url =
-        extract_remote_url_from_config(&config_content, "origin").unwrap_or_else(|| {
-            panic!(
-                "Repository at {} has no remote origin configured",
-                repo_path.display()
-            )
-        });
-
-    // Extract upstream URL (optional)
-    let upstream_url = extract_remote_url_from_config(&config_content, "upstream");
-
-    // Derive SSH and HTTPS URLs from origin
-    let (ssh_url, https_url) = derive_alternate_urls(&origin_url);
-
-    RemoteInfo {
-        origin_url,
-        upstream_url,
-        ssh_url,
-        https_url,
-    }
+    extract_remote_url_from_config(&config_content, "origin").unwrap_or_else(|| {
+        panic!(
+            "Repository at {} has no remote origin configured",
+            repo_path.display()
+        )
+    })
 }
 
-/// Extract user/org from remote URL (panics if unable to parse)
-fn extract_user_org_from_remote(remote_url: &str) -> UserOrg {
-    parse_user_org_from_url(remote_url)
-        .unwrap_or_else(|_| panic!("Cannot parse user/org from remote URL: {remote_url}"))
+/// Extract user from remote URL (panics if unable to parse)
+fn extract_user_from_remote(remote_url: &str) -> String {
+    parse_user_from_url(remote_url)
+        .unwrap_or_else(|_| panic!("Cannot parse user from remote URL: {remote_url}"))
 }
 
 /// Parse git config to extract remote URL
@@ -268,15 +216,15 @@ fn extract_remote_url_from_config(config_content: &str, remote_name: &str) -> Op
     None
 }
 
-/// Parse user/org from various git remote URL formats
-fn parse_user_org_from_url(url: &str) -> Result<UserOrg> {
+/// Parse user from various git remote URL formats
+fn parse_user_from_url(url: &str) -> Result<String> {
     // Handle SSH format: git@github.com:user/repo.git
     if let Some(ssh_match) = url.strip_prefix("git@") {
         if let Some(colon_pos) = ssh_match.find(':') {
             let path_part = &ssh_match[colon_pos + 1..];
             if let Some(slash_pos) = path_part.find('/') {
                 let user = path_part[..slash_pos].to_string();
-                return Ok(UserOrg { user, org: None });
+                return Ok(user);
             }
         }
     }
@@ -286,30 +234,12 @@ fn parse_user_org_from_url(url: &str) -> Result<UserOrg> {
         if let Some(path_part) = url.strip_prefix("https://github.com/") {
             if let Some(slash_pos) = path_part.find('/') {
                 let user = path_part[..slash_pos].to_string();
-                return Ok(UserOrg { user, org: None });
+                return Ok(user);
             }
         }
     }
 
     Err(eyre::eyre!("Unsupported remote URL format: {url}"))
-}
-
-/// Derive SSH and HTTPS URLs from the origin URL
-fn derive_alternate_urls(origin_url: &str) -> (Option<String>, Option<String>) {
-    // If origin is SSH, derive HTTPS
-    if let Some(path_part) = origin_url.strip_prefix("git@github.com:") {
-        let https_url = format!("https://github.com/{path_part}");
-        return (Some(origin_url.to_string()), Some(https_url));
-    }
-
-    // If origin is HTTPS, derive SSH
-    if let Some(path_part) = origin_url.strip_prefix("https://github.com/") {
-        let ssh_url = format!("git@github.com:{path_part}");
-        return (Some(ssh_url), Some(origin_url.to_string()));
-    }
-
-    // For other formats, just return the origin as-is
-    (None, None)
 }
 
 /// Check if directory should be ignored during discovery
@@ -394,19 +324,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_user_org_from_url() {
+    fn test_parse_user_from_url() {
         // Test SSH format
-        let result = parse_user_org_from_url("git@github.com:tatari-tv/frontend.git").unwrap();
-        assert_eq!(result.user, "tatari-tv");
-        assert_eq!(result.org, None);
+        let result = parse_user_from_url("git@github.com:tatari-tv/frontend.git").unwrap();
+        assert_eq!(result, "tatari-tv");
 
         // Test HTTPS format
-        let result = parse_user_org_from_url("https://github.com/scottidler/gx.git").unwrap();
-        assert_eq!(result.user, "scottidler");
-        assert_eq!(result.org, None);
+        let result = parse_user_from_url("https://github.com/scottidler/gx.git").unwrap();
+        assert_eq!(result, "scottidler");
 
         // Test unsupported format should return error
-        let result = parse_user_org_from_url("https://gitlab.com/org/repo.git");
+        let result = parse_user_from_url("https://gitlab.com/org/repo.git");
         assert!(result.is_err());
     }
 

@@ -50,8 +50,6 @@ pub struct Transaction {
     rollback_points: Vec<String>,
     continue_on_rollback_failure: bool,
     transaction_id: String,
-    #[allow(dead_code)]
-    serializable_actions: Vec<SerializableRollbackAction>,
     recovery_enabled: bool,
 }
 
@@ -70,29 +68,8 @@ impl Transaction {
             rollback_points: Vec::new(),
             continue_on_rollback_failure: true,
             transaction_id,
-            serializable_actions: Vec::new(),
             recovery_enabled: false,
         }
-    }
-
-    /// Create a new transaction with recovery enabled
-    #[allow(dead_code)]
-    pub fn new_with_recovery() -> Self {
-        let mut transaction = Self::new();
-        transaction.recovery_enabled = true;
-        transaction
-    }
-
-    /// Enable or disable recovery mode
-    #[allow(dead_code)]
-    pub fn set_recovery_enabled(&mut self, enabled: bool) {
-        self.recovery_enabled = enabled;
-    }
-
-    /// Get the transaction ID
-    #[allow(dead_code)]
-    pub fn get_transaction_id(&self) -> &str {
-        &self.transaction_id
     }
 
     /// Register a rollback action with description and type
@@ -110,31 +87,6 @@ impl Transaction {
             operation_type: rollback_type.clone(),
         });
         self.operation_count += 1;
-    }
-
-    /// Register a rollback action with recovery support
-    #[allow(dead_code)]
-    pub fn add_rollback_with_recovery<F>(
-        &mut self,
-        action: F,
-        description: String,
-        rollback_type: RollbackType,
-        repo_path: &Path,
-        parameters: Vec<String>,
-    ) where
-        F: Fn() -> Result<()> + Send + 'static,
-    {
-        // Add the regular rollback action
-        self.add_rollback_with_type(action, description.clone(), rollback_type.clone());
-
-        // Add serializable action for recovery
-        let serializable_action = SerializableRollbackAction {
-            description,
-            operation_type: rollback_type,
-            repo_path: repo_path.to_string_lossy().to_string(),
-            parameters,
-        };
-        self.add_serializable_action(serializable_action);
     }
 
     /// Register a rollback action (backward compatibility)
@@ -222,51 +174,9 @@ impl Transaction {
         }
     }
 
-    /// Rollback only specific types of operations
-    #[allow(dead_code)]
-    pub fn rollback_type(&mut self, rollback_type: RollbackType) {
-        if self.committed {
-            debug!("Transaction already committed, skipping selective rollback");
-            return;
-        }
-
-        debug!("Executing selective rollback for type: {rollback_type:?}");
-
-        let mut i = 0;
-        while i < self.rollbacks.len() {
-            if self.rollbacks[i].operation_type == rollback_type {
-                let rollback_action = self.rollbacks.remove(i);
-                debug!(
-                    "Executing selective rollback: {}",
-                    rollback_action.description
-                );
-
-                if let Err(e) = (rollback_action.action)() {
-                    error!(
-                        "Selective rollback failed: {} - Error: {e:?}",
-                        rollback_action.description
-                    );
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-
     /// Set whether to continue rollback on individual failures
     pub fn set_continue_on_failure(&mut self, continue_on_failure: bool) {
         self.continue_on_rollback_failure = continue_on_failure;
-    }
-
-    /// Get rollback statistics
-    #[allow(dead_code)]
-    pub fn get_stats(&self) -> TransactionStats {
-        TransactionStats {
-            total_operations: self.operation_count,
-            pending_rollbacks: self.rollbacks.len(),
-            rollback_points: self.rollback_points.len(),
-            committed: self.committed,
-        }
     }
 
     /// Marks the transaction as committed and clears the rollback stack
@@ -378,32 +288,6 @@ impl Transaction {
                 "Cleanup completed: {successful_cleanups} successes, {failed_cleanups} failures"
             );
         }
-    }
-
-    /// Save transaction state for recovery
-    #[allow(dead_code)]
-    pub fn save_recovery_state(&self) -> Result<()> {
-        if !self.recovery_enabled {
-            return Ok(());
-        }
-
-        let state = TransactionState {
-            transaction_id: self.transaction_id.clone(),
-            rollback_actions: self.serializable_actions.clone(),
-            rollback_points: self.rollback_points.clone(),
-            operation_count: self.operation_count,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        let recovery_dir = get_recovery_dir()?;
-        fs::create_dir_all(&recovery_dir)?;
-
-        let state_file = recovery_dir.join(format!("{}.json", self.transaction_id));
-        let state_json = serde_json::to_string_pretty(&state)?;
-        fs::write(&state_file, state_json)?;
-
-        debug!("Saved transaction recovery state: {}", state_file.display());
-        Ok(())
     }
 
     /// Load transaction state from recovery file
@@ -566,26 +450,6 @@ impl Transaction {
 
         Ok(())
     }
-
-    /// Add a serializable rollback action for recovery
-    #[allow(dead_code)]
-    fn add_serializable_action(&mut self, action: SerializableRollbackAction) {
-        if self.recovery_enabled {
-            self.serializable_actions.push(action);
-            // Auto-save recovery state
-            let _ = self.save_recovery_state();
-        }
-    }
-}
-
-/// Transaction statistics for monitoring and debugging
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct TransactionStats {
-    pub total_operations: usize,
-    pub pending_rollbacks: usize,
-    pub rollback_points: usize,
-    pub committed: bool,
 }
 
 impl Default for Transaction {
@@ -1079,39 +943,12 @@ mod tests {
             RollbackType::BranchOperation,
         );
 
-        // Only rollback stash operations
-        transaction.rollback_type(RollbackType::StashOperation);
+        // Test regular rollback instead
+        transaction.rollback();
 
-        // Only the stash operation should have executed
+        // Both operations should have executed
         let final_count = *counter.lock().unwrap();
-        assert_eq!(final_count, 1);
-
-        // Branch operation should still be in the rollbacks
-        assert_eq!(transaction.rollbacks.len(), 1);
-        assert_eq!(
-            transaction.rollbacks[0].operation_type,
-            RollbackType::BranchOperation
-        );
-    }
-
-    #[test]
-    fn test_transaction_stats() {
-        let mut transaction = Transaction::new();
-
-        transaction.add_rollback_point("Test phase".to_string());
-        transaction.add_rollback(|| Ok(()));
-        transaction.add_rollback(|| Ok(()));
-
-        let stats = transaction.get_stats();
-        assert_eq!(stats.total_operations, 2);
-        assert_eq!(stats.pending_rollbacks, 2);
-        assert_eq!(stats.rollback_points, 1);
-        assert!(!stats.committed);
-
-        transaction.commit();
-        let stats_after_commit = transaction.get_stats();
-        assert!(stats_after_commit.committed);
-        assert_eq!(stats_after_commit.pending_rollbacks, 0);
+        assert_eq!(final_count, 11); // 1 + 10
     }
 
     #[test]
@@ -1121,27 +958,6 @@ mod tests {
 
         transaction.set_continue_on_failure(false);
         assert!(!transaction.continue_on_rollback_failure);
-    }
-
-    // Phase 3 Recovery Tests
-    #[test]
-    fn test_new_with_recovery() {
-        let transaction = Transaction::new_with_recovery();
-        assert!(transaction.recovery_enabled);
-        assert!(!transaction.transaction_id.is_empty());
-        assert!(transaction.transaction_id.starts_with("gx-tx-"));
-    }
-
-    #[test]
-    fn test_recovery_enabled_setting() {
-        let mut transaction = Transaction::new();
-        assert!(!transaction.recovery_enabled);
-
-        transaction.set_recovery_enabled(true);
-        assert!(transaction.recovery_enabled);
-
-        transaction.set_recovery_enabled(false);
-        assert!(!transaction.recovery_enabled);
     }
 
     #[test]

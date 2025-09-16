@@ -117,7 +117,7 @@ pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
     run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Add remote origin (required by new Repo struct)
-    let remote_url = format!("git@github.com:testorg/{}.git", repo_name);
+    let remote_url = format!("git@github.com:testorg/{repo_name}.git");
     run_git_command(&["remote", "add", "origin", &remote_url], &repo_path);
 
     // Create one commit (minimal)

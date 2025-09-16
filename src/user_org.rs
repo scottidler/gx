@@ -55,11 +55,18 @@ pub fn determine_user_orgs(
     Err(eyre::eyre!("Unable to determine user/org: not specified explicitly, cannot auto-detect from directory structure, and no default configured"))
 }
 
-/// Auto-detect user/org(s) from repository user_org field
+/// Auto-detect user/org(s) from repository slugs
 fn auto_detect_from_repos(repos: &[Repo]) -> Result<Vec<String>> {
     let user_orgs: HashSet<String> = repos
         .iter()
-        .map(|repo| repo.user_org.user.clone())
+        .filter_map(|repo| {
+            let parts: Vec<&str> = repo.slug.split('/').collect();
+            if parts.len() == 2 {
+                Some(parts[0].to_string())
+            } else {
+                None
+            }
+        })
         .collect();
 
     match user_orgs.len() {
