@@ -420,8 +420,7 @@ pub fn process_review_purge_command(cli: &Cli, config: &Config, org: Option<&str
         .context("Failed to create thread pool")?;
 
     // Process repositories in parallel
-    let results: Vec<ReviewResult> =
-        pool.install(|| filtered_repos.par_iter().map(purge_gx_branches).collect());
+    let results: Vec<ReviewResult> = pool.install(|| filtered_repos.par_iter().map(purge_gx_branches).collect());
 
     // Display results
     let opts = StatusOptions {

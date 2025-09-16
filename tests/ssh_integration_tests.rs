@@ -103,10 +103,7 @@ fn test_ssh_url_roundtrip() {
 
         // Validate the built URL
         let validate_result = SshUrlBuilder::validate_ssh_url(&ssh_url);
-        assert!(
-            validate_result.is_ok(),
-            "Built SSH URL should be valid for {repo_slug}"
-        );
+        assert!(validate_result.is_ok(), "Built SSH URL should be valid for {repo_slug}");
 
         // Verify the URL contains the expected parts
         assert!(ssh_url.contains(repo_slug), "SSH URL should contain repo slug");

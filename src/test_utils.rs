@@ -222,10 +222,7 @@ pub fn create_test_repo_with_branches(
         .expect("Failed to write branch file");
 
         run_git_command(&["add", &format!("{}.md", branch.replace('/', "_"))], &repo_path);
-        run_git_command(
-            &["commit", "-m", &format!("Add {branch} specific changes")],
-            &repo_path,
-        );
+        run_git_command(&["commit", "-m", &format!("Add {branch} specific changes")], &repo_path);
     }
 
     // Return to main branch

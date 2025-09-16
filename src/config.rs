@@ -21,13 +21,12 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum OutputVerbosity {
-    Compact,  // only summary output for the repos that had any errors; skip successful ones in the output
+    Compact, // only summary output for the repos that had any errors; skip successful ones in the output
     #[default]
-    Summary,  // only the summary of every repo, success or failure
+    Summary, // only the summary of every repo, success or failure
     Detailed, // show the detailed output only for failures, successes still remain as summary
-    Full,     // show the detailed output for all repos irrespective of errors or not
+    Full,    // show the detailed output for all repos irrespective of errors or not
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]

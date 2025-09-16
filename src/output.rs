@@ -780,13 +780,9 @@ pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_cou
     }
 
     let summary = if opts.use_emoji {
-        format!(
-            "\n📊 {clean_count} clean, {dirty_count} dirty, {error_count} errors"
-        )
+        format!("\n📊 {clean_count} clean, {dirty_count} dirty, {error_count} errors")
     } else {
-        format!(
-            "\nSummary: {clean_count} clean, {dirty_count} dirty, {error_count} errors"
-        )
+        format!("\nSummary: {clean_count} clean, {dirty_count} dirty, {error_count} errors")
     };
 
     if opts.use_colors {

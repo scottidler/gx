@@ -6,9 +6,7 @@ use std::process::Command;
 
 /// Get all repositories for a user/org from GitHub API
 pub fn get_user_repos(user_or_org: &str, include_archived: bool, config: &Config) -> Result<Vec<String>> {
-    debug!(
-        "Getting repos for user/org: {user_or_org}, include_archived: {include_archived}"
-    );
+    debug!("Getting repos for user/org: {user_or_org}, include_archived: {include_archived}");
 
     let token = read_token(user_or_org, config)?;
     debug!("Using token for user/org: {user_or_org}");
@@ -117,9 +115,7 @@ pub fn create_pr(repo_slug: &str, branch_name: &str, commit_message: &str) -> Re
     debug!("Creating PR for repo: {repo_slug}, branch: {branch_name}");
 
     let title = branch_name.to_string();
-    let body = format!(
-        "{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md"
-    );
+    let body = format!("{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md");
 
     let output = Command::new("gh")
         .args([

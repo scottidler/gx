@@ -354,9 +354,7 @@ fn count_commits_between(from_sha: &str, to_sha: &str, repo: &Repo) -> Result<u3
         // If the SHA doesn't exist locally, we can't count commits
         // This happens when remote has commits we haven't fetched
         if stderr.contains("unknown revision") || stderr.contains("ambiguous argument") {
-            debug!(
-                "Cannot count commits between {from_sha} and {to_sha} - remote SHA not in local repo"
-            );
+            debug!("Cannot count commits between {from_sha} and {to_sha} - remote SHA not in local repo");
             Err(eyre::eyre!("Remote SHA not found in local repository"))
         } else {
             Err(eyre::eyre!("git rev-list failed: {}", stderr))
@@ -600,9 +598,7 @@ pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> 
         }
         Ok(origin) => {
             // Different remote URL
-            debug!(
-                "Different remote URL detected. Expected: {repo_slug}, Found: {origin}"
-            );
+            debug!("Different remote URL detected. Expected: {repo_slug}, Found: {origin}");
             CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::DifferentRemote,

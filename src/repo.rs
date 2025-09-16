@@ -116,11 +116,7 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
     debug!("Filtering {} repos with patterns: {:?}", repos.len(), patterns);
 
     // Level 1: Exact match on repository name
-    let level1: Vec<Repo> = repos
-        .iter()
-        .filter(|r| patterns.contains(&r.name))
-        .cloned()
-        .collect();
+    let level1: Vec<Repo> = repos.iter().filter(|r| patterns.contains(&r.name)).cloned().collect();
 
     if !level1.is_empty() {
         debug!("Level 1 (exact name match): {} repos", level1.len());
