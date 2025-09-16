@@ -141,7 +141,7 @@ pub fn process_create_command(
     change_id: Option<String>,
     patterns: &[String],
     commit_message: Option<String>,
-    create_pr: bool,
+    pr: Option<crate::cli::PR>,
     change: Change,
 ) -> Result<()> {
     info!("Starting create command with change: {change:?}");
@@ -193,7 +193,7 @@ pub fn process_create_command(
                     files,
                     &change,
                     commit_message.as_deref(),
-                    create_pr,
+                    pr.as_ref(),
                 )
             })
             .collect()
@@ -223,7 +223,7 @@ fn process_single_repo(
     file_patterns: &[String],
     change: &Change,
     commit_message: Option<&str>,
-    create_pr: bool,
+    pr: Option<&crate::cli::PR>,
 ) -> CreateResult {
     debug!("Processing repository: {}", repo.name);
 
@@ -360,8 +360,8 @@ fn process_single_repo(
 
     match commit_result {
         Ok(()) => {
-            let final_action = if create_pr {
-                match create_pull_request(repo, change_id, commit_message.unwrap()) {
+            let final_action = if let Some(pr) = pr {
+                match create_pull_request(repo, change_id, commit_message.unwrap(), pr) {
                     Ok(()) => CreateAction::PrCreated,
                     Err(e) => {
                         warn!("Failed to create PR for {}: {}", repo.name, e);
@@ -654,9 +654,14 @@ fn commit_changes(
 }
 
 /// Create a pull request for the changes
-fn create_pull_request(repo: &Repo, change_id: &str, commit_message: &str) -> Result<()> {
+fn create_pull_request(
+    repo: &Repo,
+    change_id: &str,
+    commit_message: &str,
+    pr: &crate::cli::PR,
+) -> Result<()> {
     if let Some(repo_slug) = &repo.slug {
-        github::create_pr(repo_slug, change_id, commit_message)
+        github::create_pr(repo_slug, change_id, commit_message, pr)
             .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
         info!("Created PR for repository: {repo_slug}");
     } else {

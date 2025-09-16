@@ -1,7 +1,18 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
+
+/// Pull request type
+#[derive(Debug, Clone, ValueEnum)]
+pub enum PR {
+    /// Create a normal pull request
+    #[value(name = "normal")]
+    Normal,
+    /// Create a draft pull request
+    #[value(name = "draft")]
+    Draft,
+}
 
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 static JOBS_HELP: LazyLock<String> = LazyLock::new(|| {
@@ -215,7 +226,8 @@ EXAMPLES:
   gx create --files '*.json' add config.json '{\"debug\": true}' # Actually create files
   gx create --files '*.md' sub 'old-text' 'new-text' --commit 'Update docs'
   gx create --files 'package.json' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
-  gx create --files '*.txt' delete --commit 'Remove old files' --pr")]
+  gx create --files '*.txt' delete --commit 'Remove old files' --pr
+  gx create --files '*.md' sub 'old' 'new' --commit 'Draft update' --pr=draft")]
     Create {
         /// Files to target (glob patterns)
         #[arg(short = 'f', long = "files", help = "File patterns to match")]
@@ -245,9 +257,14 @@ EXAMPLES:
         )]
         commit: Option<String>,
 
-        /// Create PR after committing
-        #[arg(long, help = "Create pull request after committing")]
-        pr: bool,
+        /// Create PR after committing (use --pr=draft for draft mode)
+        #[arg(
+            long,
+            help = "Create pull request after committing (use --pr=draft for draft mode)",
+            default_missing_value = "normal",
+            num_args = 0..=1
+        )]
+        pr: Option<PR>,
 
         #[command(subcommand)]
         action: Option<CreateAction>,

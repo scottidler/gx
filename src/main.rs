@@ -125,7 +125,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                     change_id.clone(),
                     patterns,
                     commit.clone(),
-                    *pr,
+                    pr.clone(),
                     change,
                 )
             }

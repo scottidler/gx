@@ -127,28 +127,39 @@ pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
 }
 
 /// Create a pull request using GitHub CLI
-pub fn create_pr(repo_slug: &str, branch_name: &str, commit_message: &str) -> Result<()> {
+pub fn create_pr(
+    repo_slug: &str,
+    branch_name: &str,
+    commit_message: &str,
+    pr: &crate::cli::PR,
+) -> Result<()> {
     debug!("Creating PR for repo: {repo_slug}, branch: {branch_name}");
 
     let title = branch_name.to_string();
     let body =
         format!("{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md");
 
+    let mut args = vec![
+        "pr",
+        "create",
+        "--repo",
+        repo_slug,
+        "--head",
+        branch_name,
+        "--title",
+        &title,
+        "--body",
+        &body,
+        "--base",
+        "main",
+    ];
+
+    if matches!(pr, crate::cli::PR::Draft) {
+        args.push("--draft");
+    }
+
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--repo",
-            repo_slug,
-            "--head",
-            branch_name,
-            "--title",
-            &title,
-            "--body",
-            &body,
-            "--base",
-            "main",
-        ])
+        .args(&args)
         .output()
         .context("Failed to execute gh pr create")?;
 
