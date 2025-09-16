@@ -605,78 +605,66 @@ fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
 fn purge_gx_branches(repo: &Repo) -> ReviewResult {
     debug!("Purging GX branches from repository: {}", repo.name);
 
-    if let Some(repo_slug) = &repo.slug {
-        // List all GX branches (assuming they start with "GX-")
-        match github::list_branches_with_prefix(repo_slug, "GX-") {
-            Ok(branches) => {
-                let mut errors = Vec::new();
-                let mut deleted_count = 0;
+    let repo_slug = &repo.slug;
+    // List all GX branches (assuming they start with "GX-")
+    match github::list_branches_with_prefix(repo_slug, "GX-") {
+        Ok(branches) => {
+            let mut errors = Vec::new();
+            let mut deleted_count = 0;
 
-                for branch in branches {
-                    match github::delete_remote_branch(repo_slug, &branch) {
-                        Ok(()) => {
-                            deleted_count += 1;
-                            debug!("Deleted branch: {branch}");
-                        }
-                        Err(e) => {
-                            errors.push(format!("Failed to delete {branch}: {e}"));
-                        }
+            for branch in branches {
+                match github::delete_remote_branch(repo_slug, &branch) {
+                    Ok(()) => {
+                        deleted_count += 1;
+                        debug!("Deleted branch: {branch}");
                     }
-                }
-
-                if errors.is_empty() {
-                    info!("Purged {} GX branches from {}", deleted_count, repo.name);
-                    ReviewResult {
-                        repo: repo.clone(),
-                        change_id: "PURGE".to_string(),
-                        pr_number: None,
-                        action: ReviewAction::Purged,
-                        error: None,
-                    }
-                } else {
-                    warn!(
-                        "Purged {} branches but had {} errors in {}",
-                        deleted_count,
-                        errors.len(),
-                        repo.name
-                    );
-                    ReviewResult {
-                        repo: repo.clone(),
-                        change_id: "PURGE".to_string(),
-                        pr_number: None,
-                        action: ReviewAction::Purged,
-                        error: Some(format!("Partial success: {}", errors.join("; "))),
+                    Err(e) => {
+                        errors.push(format!("Failed to delete {branch}: {e}"));
                     }
                 }
             }
-            Err(e) => {
-                warn!("Failed to list branches for {}: {}", repo.name, e);
+
+            if errors.is_empty() {
+                info!("Purged {} GX branches from {}", deleted_count, repo.name);
                 ReviewResult {
                     repo: repo.clone(),
                     change_id: "PURGE".to_string(),
                     pr_number: None,
                     action: ReviewAction::Purged,
-                    error: Some(format!("Failed to list branches: {e}")),
+                    error: None,
+                }
+            } else {
+                warn!(
+                    "Purged {} branches but had {} errors in {}",
+                    deleted_count,
+                    errors.len(),
+                    repo.name
+                );
+                ReviewResult {
+                    repo: repo.clone(),
+                    change_id: "PURGE".to_string(),
+                    pr_number: None,
+                    action: ReviewAction::Purged,
+                    error: Some(format!("Partial success: {}", errors.join("; "))),
                 }
             }
         }
-    } else {
-        ReviewResult {
-            repo: repo.clone(),
-            change_id: "PURGE".to_string(),
-            pr_number: None,
-            action: ReviewAction::Purged,
-            error: Some("Repository has no slug, cannot purge remote branches".to_string()),
+        Err(e) => {
+            warn!("Failed to list branches for {}: {}", repo.name, e);
+            ReviewResult {
+                repo: repo.clone(),
+                change_id: "PURGE".to_string(),
+                pr_number: None,
+                action: ReviewAction::Purged,
+                error: Some(format!("Failed to list branches: {e}")),
+            }
         }
     }
 }
 
 /// Create a pseudo-repo from a repository slug
 fn create_repo_from_slug(repo_slug: &str) -> Repo {
-    let repo_name = extract_repo_name(repo_slug);
-    let mut repo = Repo::new(std::path::PathBuf::from(&repo_name));
-    repo.slug = Some(repo_slug.to_string());
-    repo
+    Repo::from_slug(repo_slug.to_string())
 }
 
 /// Extract repository name from a slug like "owner/repo"
@@ -794,13 +782,12 @@ mod tests {
     fn test_create_repo_from_slug() {
         let repo = create_repo_from_slug("owner/test-repo");
         assert_eq!(repo.name, "test-repo");
-        assert_eq!(repo.slug, Some("owner/test-repo".to_string()));
+        assert_eq!(repo.slug, "owner/test-repo".to_string());
     }
 
     #[test]
     fn test_review_result_debug() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let repo = Repo::new(temp_dir.path().to_path_buf());
+        let repo = Repo::from_slug("test/repo".to_string());
 
         let result = ReviewResult {
             repo,

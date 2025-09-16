@@ -92,7 +92,7 @@ pub fn show_matches(
         println!("Matched repositories:");
         for (repo, matched_files) in &matched_repos {
             // Show repo slug if available, otherwise repo name
-            let display_name = repo.slug.as_ref().unwrap_or(&repo.name);
+            let display_name = &repo.slug;
             println!("  {display_name}");
 
             if !files.is_empty() {
@@ -926,16 +926,10 @@ fn create_pull_request(
     commit_message: &str,
     pr: &crate::cli::PR,
 ) -> Result<()> {
-    if let Some(repo_slug) = &repo.slug {
-        github::create_pr(repo_slug, change_id, commit_message, pr)
-            .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
-        info!("Created PR for repository: {repo_slug}");
-    } else {
-        return Err(eyre::eyre!(
-            "Repository {} has no slug, cannot create PR",
-            repo.name
-        ));
-    }
+    let repo_slug = &repo.slug;
+    github::create_pr(repo_slug, change_id, commit_message, pr)
+        .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
+    info!("Created PR for repository: {repo_slug}");
     Ok(())
 }
 
@@ -1092,8 +1086,7 @@ mod tests {
 
     #[test]
     fn test_create_result_debug() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo = Repo::new(temp_dir.path().to_path_buf());
+        let repo = Repo::from_slug("test/repo".to_string());
 
         let result = CreateResult {
             repo,

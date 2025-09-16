@@ -2,15 +2,10 @@ use gx::config::OutputVerbosity;
 use gx::git::{CheckoutAction, CheckoutResult, RepoStatus};
 use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 use gx::repo::Repo;
-use std::path::PathBuf;
 
 #[test]
 fn test_unified_display_trait_for_repo_status() {
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     let status = RepoStatus {
         repo,
@@ -34,11 +29,7 @@ fn test_unified_display_trait_for_repo_status() {
 
 #[test]
 fn test_unified_display_trait_for_checkout_result() {
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     let result = CheckoutResult {
         repo,
@@ -60,17 +51,8 @@ fn test_unified_display_trait_for_checkout_result() {
 
 #[test]
 fn test_alignment_widths_calculation() {
-    let repo1 = Repo {
-        path: PathBuf::from("/tmp/short"),
-        name: "short".to_string(),
-        slug: Some("user/short".to_string()),
-    };
-
-    let repo2 = Repo {
-        path: PathBuf::from("/tmp/very-long-repository-name"),
-        name: "very-long-repository-name".to_string(),
-        slug: Some("user/very-long-repository-name".to_string()),
-    };
+    let repo1 = Repo::from_slug("user/short".to_string());
+    let repo2 = Repo::from_slug("user/very-long-repository-name".to_string());
 
     let status1 = RepoStatus {
         repo: repo1,
@@ -106,11 +88,7 @@ fn test_alignment_widths_calculation() {
 #[test]
 fn test_unified_format_consistency() {
     // Create test data
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     let status = RepoStatus {
         repo: repo.clone(),
@@ -153,11 +131,7 @@ fn test_unified_format_consistency() {
 
 #[test]
 fn test_error_handling_in_unified_display() {
-    let repo = Repo {
-        path: PathBuf::from("/tmp/error-repo"),
-        name: "error-repo".to_string(),
-        slug: Some("user/error-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/error-repo".to_string());
 
     let error_status = RepoStatus {
         repo: repo.clone(),
@@ -190,11 +164,7 @@ fn test_error_handling_in_unified_display() {
 
 #[test]
 fn test_no_emoji_mode() {
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     let status = RepoStatus {
         repo: repo.clone(),
@@ -227,11 +197,7 @@ fn test_no_emoji_mode() {
 
 #[test]
 fn test_emoji_width_calculation_with_complex_combinations() {
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     // Create statuses with different emoji combinations that have varying widths
     let simple_emoji_status = RepoStatus {

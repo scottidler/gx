@@ -10,7 +10,6 @@ use crate::{git, github, output, repo};
 use eyre::{Context, Result};
 use log::{debug, info};
 use rayon::prelude::*;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Process the clone subcommand
@@ -100,22 +99,11 @@ fn filter_repository_slugs(all_repos: &[String], patterns: &[String]) -> Vec<Str
     // Convert repo slugs to fake Repo objects for filtering
     let fake_repos: Vec<repo::Repo> = all_repos
         .iter()
-        .map(|slug| {
-            let parts: Vec<&str> = slug.split('/').collect();
-            let name = if parts.len() == 2 { parts[1] } else { slug };
-            repo::Repo {
-                path: PathBuf::from(name), // Not used for filtering
-                name: name.to_string(),
-                slug: Some(slug.clone()),
-            }
-        })
+        .map(|slug| repo::Repo::from_slug(slug.clone()))
         .collect();
 
     let filtered_repos = repo::filter_repos(fake_repos, patterns);
-    filtered_repos
-        .iter()
-        .filter_map(|r| r.slug.clone())
-        .collect()
+    filtered_repos.iter().map(|r| r.slug.clone()).collect()
 }
 
 /// Categorize clone results into clean/dirty/error counts

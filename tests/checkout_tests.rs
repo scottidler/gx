@@ -473,14 +473,9 @@ fn test_checkout_help_shows_new_syntax() {
 fn test_resolve_branch_name_unit_test() {
     use gx::git::resolve_branch_name;
     use gx::repo::Repo;
-    use std::path::PathBuf;
 
     // Create a test repo struct
-    let repo = Repo {
-        path: PathBuf::from("/tmp/test-repo"),
-        name: "test-repo".to_string(),
-        slug: Some("user/test-repo".to_string()),
-    };
+    let repo = Repo::from_slug("user/test-repo".to_string());
 
     // Test non-default branch names pass through unchanged
     assert_eq!(resolve_branch_name(&repo, "main").unwrap(), "main");

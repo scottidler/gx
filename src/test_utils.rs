@@ -116,6 +116,10 @@ pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
     run_git_command(&["config", "user.name", "Test User"], &repo_path);
     run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
+    // Add remote origin (required by new Repo struct)
+    let remote_url = format!("git@github.com:testorg/{}.git", repo_name);
+    run_git_command(&["remote", "add", "origin", &remote_url], &repo_path);
+
     // Create one commit (minimal)
     let readme_path = repo_path.join("README.md");
     fs::write(&readme_path, format!("# {repo_name}")).expect("Failed to write README");

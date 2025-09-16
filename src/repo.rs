@@ -1,14 +1,35 @@
 use eyre::{Context, Result};
 use log::debug;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
 pub struct Repo {
     pub path: PathBuf,
     pub name: String,
-    pub slug: Option<String>,
+    pub slug: String, // Always determinable from git config or panic
+    #[allow(dead_code)]
+    pub user_org: UserOrg, // Per-repo user/org (always present or panic)
+    #[allow(dead_code)]
+    pub remote_info: RemoteInfo, // Enhanced remote information
+}
+
+#[derive(Debug, Clone)]
+pub struct UserOrg {
+    pub user: String, // GitHub account (user or org)
+    #[allow(dead_code)]
+    pub org: Option<String>, // Reserved for future enterprise GitHub distinction
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteInfo {
+    pub origin_url: String, // Always present (panic if missing)
+    #[allow(dead_code)]
+    pub upstream_url: Option<String>, // Optional upstream remote
+    #[allow(dead_code)]
+    pub ssh_url: Option<String>, // Derived SSH URL if applicable
+    #[allow(dead_code)]
+    pub https_url: Option<String>, // Derived HTTPS URL if applicable
 }
 
 impl Repo {
@@ -19,13 +40,48 @@ impl Repo {
             .unwrap_or("unknown")
             .to_string();
 
-        let slug = extract_repo_slug(&path);
+        // Extract git config information
+        let remote_info = extract_remote_info(&path);
+        let user_org = extract_user_org_from_remote(&remote_info.origin_url);
+        let slug = format!("{}/{}", user_org.user, name);
 
-        Self { path, name, slug }
+        Self {
+            path,
+            name,
+            slug,
+            user_org,
+            remote_info,
+        }
+    }
+
+    /// Create a fake repo from slug for filtering purposes (used in clone command)
+    pub fn from_slug(slug: String) -> Self {
+        let parts: Vec<&str> = slug.split('/').collect();
+        let (user, name) = if parts.len() == 2 {
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            ("unknown".to_string(), slug.clone())
+        };
+
+        let user_org = UserOrg { user, org: None };
+        let remote_info = RemoteInfo {
+            origin_url: format!("git@github.com:{slug}"),
+            upstream_url: None,
+            ssh_url: Some(format!("git@github.com:{slug}")),
+            https_url: Some(format!("https://github.com/{slug}")),
+        };
+
+        Self {
+            path: PathBuf::from(&name),
+            name,
+            slug,
+            user_org,
+            remote_info,
+        }
     }
 }
 
-/// Discover git repositories starting from the given directory
+/// Discover git repositories starting from the given directory with workspace awareness
 pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
     debug!(
         "Discovering repos from {} with max depth {}",
@@ -33,9 +89,13 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
         max_depth
     );
 
+    // Find the actual search root - this is the key to fixing Stephen's issue
+    let search_root = find_workspace_root(start_dir, max_depth)?;
+    debug!("Using search root: {}", search_root.display());
+
     let mut repos = Vec::new();
 
-    for entry in WalkDir::new(start_dir)
+    for entry in WalkDir::new(&search_root)
         .max_depth(max_depth)
         .into_iter()
         .filter_entry(|e| !is_ignored_directory(e.path()))
@@ -45,9 +105,16 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
 
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
-                let repo = Repo::new(repo_root.to_path_buf());
-                debug!("Found repo: {} at {}", repo.name, repo.path.display());
-                repos.push(repo);
+                // Try to create repo, skip if it fails (e.g., invalid git config)
+                match std::panic::catch_unwind(|| Repo::new(repo_root.to_path_buf())) {
+                    Ok(repo) => {
+                        debug!("Found repo: {} at {}", repo.name, repo.path.display());
+                        repos.push(repo);
+                    }
+                    Err(_) => {
+                        debug!("Skipping invalid repository at {}", repo_root.display());
+                    }
+                }
             }
         }
     }
@@ -59,43 +126,190 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
     Ok(repos)
 }
 
-/// Extract repository slug (org/repo) from git remote origin if available
-fn extract_repo_slug(repo_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("remote")
-        .arg("get-url")
-        .arg("origin")
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
+/// Find the appropriate workspace root for consistent discovery
+fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
+    // If start_dir itself is a git repository, search from its parent
+    if start_dir.join(".git").exists() {
+        if let Some(parent) = start_dir.parent() {
+            debug!(
+                "Start dir is a git repo, using parent: {}",
+                parent.display()
+            );
+            return Ok(parent.to_path_buf());
+        }
     }
 
-    let url = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    parse_repo_slug_from_url(&url)
+    // Walk up to find a directory that contains multiple git repos or is a good workspace root
+    let mut current = start_dir.to_path_buf();
+
+    for _ in 0..max_depth {
+        debug!("Checking potential workspace root: {}", current.display());
+
+        // Count git repositories at this level
+        let git_repos = count_git_repos_at_level(&current)?;
+        debug!(
+            "Found {} git repos at level {}",
+            git_repos,
+            current.display()
+        );
+
+        // If we find multiple repos, this is likely a workspace root
+        if git_repos >= 2 {
+            debug!(
+                "Found workspace root with {} repos: {}",
+                git_repos,
+                current.display()
+            );
+            return Ok(current);
+        }
+
+        // If we find exactly 1 repo and we're not in that repo's directory, use this level
+        if git_repos == 1 && !current.join(".git").exists() {
+            debug!("Found workspace root with 1 repo: {}", current.display());
+            return Ok(current);
+        }
+
+        // Move up one level
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+
+    // Fallback: use the original start_dir
+    debug!("Using fallback workspace root: {}", start_dir.display());
+    Ok(start_dir.to_path_buf())
 }
 
-/// Parse repository slug from git URL
-fn parse_repo_slug_from_url(url: &str) -> Option<String> {
-    // Handle GitHub SSH URLs: git@github.com:org/repo.git
-    if let Some(ssh_part) = url.strip_prefix("git@github.com:") {
-        return Some(ssh_part.trim_end_matches(".git").to_string());
+/// Count git repositories directly at the given directory level (non-recursive)
+fn count_git_repos_at_level(dir: &Path) -> Result<usize> {
+    let mut count = 0;
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                count += 1;
+            }
+        }
     }
 
-    // Handle GitHub SSH URLs with ssh:// prefix: ssh://git@github.com/org/repo.git
-    if let Some(ssh_part) = url.strip_prefix("ssh://git@github.com/") {
-        return Some(ssh_part.trim_end_matches(".git").to_string());
-    }
+    Ok(count)
+}
 
-    // Handle GitHub HTTPS URLs: https://github.com/org/repo.git
-    if let Some(https_part) = url.strip_prefix("https://github.com/") {
-        return Some(https_part.trim_end_matches(".git").to_string());
+/// Extract complete remote information from git config
+fn extract_remote_info(repo_path: &Path) -> RemoteInfo {
+    let config_path = repo_path.join(".git").join("config");
+
+    // Try to read git config
+    let config_content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(_) => panic!(
+            "Repository at {} has no .git/config file",
+            repo_path.display()
+        ),
+    };
+
+    // Extract origin URL (required)
+    let origin_url =
+        extract_remote_url_from_config(&config_content, "origin").unwrap_or_else(|| {
+            panic!(
+                "Repository at {} has no remote origin configured",
+                repo_path.display()
+            )
+        });
+
+    // Extract upstream URL (optional)
+    let upstream_url = extract_remote_url_from_config(&config_content, "upstream");
+
+    // Derive SSH and HTTPS URLs from origin
+    let (ssh_url, https_url) = derive_alternate_urls(&origin_url);
+
+    RemoteInfo {
+        origin_url,
+        upstream_url,
+        ssh_url,
+        https_url,
+    }
+}
+
+/// Extract user/org from remote URL (panics if unable to parse)
+fn extract_user_org_from_remote(remote_url: &str) -> UserOrg {
+    parse_user_org_from_url(remote_url)
+        .unwrap_or_else(|_| panic!("Cannot parse user/org from remote URL: {remote_url}"))
+}
+
+/// Parse git config to extract remote URL
+fn extract_remote_url_from_config(config_content: &str, remote_name: &str) -> Option<String> {
+    let section_header = format!("[remote \"{remote_name}\"]");
+    let mut in_remote_section = false;
+
+    for line in config_content.lines() {
+        let line = line.trim();
+
+        if line == section_header {
+            in_remote_section = true;
+            continue;
+        }
+
+        if in_remote_section {
+            if line.starts_with('[') {
+                // Entered a new section, stop looking
+                break;
+            }
+
+            if let Some(stripped) = line.strip_prefix("url = ") {
+                return Some(stripped.trim().to_string());
+            }
+        }
     }
 
     None
+}
+
+/// Parse user/org from various git remote URL formats
+fn parse_user_org_from_url(url: &str) -> Result<UserOrg> {
+    // Handle SSH format: git@github.com:user/repo.git
+    if let Some(ssh_match) = url.strip_prefix("git@") {
+        if let Some(colon_pos) = ssh_match.find(':') {
+            let path_part = &ssh_match[colon_pos + 1..];
+            if let Some(slash_pos) = path_part.find('/') {
+                let user = path_part[..slash_pos].to_string();
+                return Ok(UserOrg { user, org: None });
+            }
+        }
+    }
+
+    // Handle HTTPS format: https://github.com/user/repo.git
+    if url.starts_with("https://github.com/") {
+        if let Some(path_part) = url.strip_prefix("https://github.com/") {
+            if let Some(slash_pos) = path_part.find('/') {
+                let user = path_part[..slash_pos].to_string();
+                return Ok(UserOrg { user, org: None });
+            }
+        }
+    }
+
+    Err(eyre::eyre!("Unsupported remote URL format: {url}"))
+}
+
+/// Derive SSH and HTTPS URLs from the origin URL
+fn derive_alternate_urls(origin_url: &str) -> (Option<String>, Option<String>) {
+    // If origin is SSH, derive HTTPS
+    if let Some(path_part) = origin_url.strip_prefix("git@github.com:") {
+        let https_url = format!("https://github.com/{path_part}");
+        return (Some(origin_url.to_string()), Some(https_url));
+    }
+
+    // If origin is HTTPS, derive SSH
+    if let Some(path_part) = origin_url.strip_prefix("https://github.com/") {
+        let ssh_url = format!("git@github.com:{path_part}");
+        return (Some(ssh_url), Some(origin_url.to_string()));
+    }
+
+    // For other formats, just return the origin as-is
+    (None, None)
 }
 
 /// Check if directory should be ignored during discovery
@@ -150,11 +364,8 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
     let level3: Vec<Repo> = repos
         .iter()
         .filter(|r| {
-            if let Some(slug) = &r.slug {
-                patterns.iter().any(|pattern| slug == pattern)
-            } else {
-                false
-            }
+            let slug = &r.slug;
+            patterns.iter().any(|pattern| slug == pattern)
         })
         .cloned()
         .collect();
@@ -168,11 +379,8 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
     let level4: Vec<Repo> = repos
         .iter()
         .filter(|r| {
-            if let Some(slug) = &r.slug {
-                patterns.iter().any(|pattern| slug.starts_with(pattern))
-            } else {
-                false
-            }
+            let slug = &r.slug;
+            patterns.iter().any(|pattern| slug.starts_with(pattern))
         })
         .cloned()
         .collect();
@@ -186,46 +394,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_repo_slug_from_url() {
-        assert_eq!(
-            parse_repo_slug_from_url("git@github.com:tatari-tv/frontend.git"),
-            Some("tatari-tv/frontend".to_string())
-        );
+    fn test_parse_user_org_from_url() {
+        // Test SSH format
+        let result = parse_user_org_from_url("git@github.com:tatari-tv/frontend.git").unwrap();
+        assert_eq!(result.user, "tatari-tv");
+        assert_eq!(result.org, None);
 
-        assert_eq!(
-            parse_repo_slug_from_url("https://github.com/tatari-tv/api.git"),
-            Some("tatari-tv/api".to_string())
-        );
+        // Test HTTPS format
+        let result = parse_user_org_from_url("https://github.com/scottidler/gx.git").unwrap();
+        assert_eq!(result.user, "scottidler");
+        assert_eq!(result.org, None);
 
-        assert_eq!(
-            parse_repo_slug_from_url("https://github.com/scottidler/gx"),
-            Some("scottidler/gx".to_string())
-        );
-
-        assert_eq!(
-            parse_repo_slug_from_url("https://gitlab.com/org/repo.git"),
-            None
-        );
+        // Test unsupported format should return error
+        let result = parse_user_org_from_url("https://gitlab.com/org/repo.git");
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_filter_repos() {
         let repos = vec![
-            Repo {
-                path: PathBuf::from("/path/frontend"),
-                name: "frontend".to_string(),
-                slug: Some("tatari-tv/frontend".to_string()),
-            },
-            Repo {
-                path: PathBuf::from("/path/api"),
-                name: "api".to_string(),
-                slug: Some("tatari-tv/api".to_string()),
-            },
-            Repo {
-                path: PathBuf::from("/path/frontend-utils"),
-                name: "frontend-utils".to_string(),
-                slug: Some("tatari-tv/frontend-utils".to_string()),
-            },
+            Repo::from_slug("tatari-tv/frontend".to_string()),
+            Repo::from_slug("tatari-tv/api".to_string()),
+            Repo::from_slug("tatari-tv/frontend-utils".to_string()),
         ];
 
         // Level 1: Exact name match

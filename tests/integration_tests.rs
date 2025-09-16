@@ -54,7 +54,7 @@ fn test_invalid_command() {
 #[test]
 fn test_global_verbose_flag() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    create_test_repo(temp_dir.path(), "test-repo", false);
+    create_test_repo(temp_dir.path(), "test-repo", true);
 
     let output = run_gx_command(&["--verbose", "status"], temp_dir.path());
 
@@ -68,7 +68,7 @@ fn test_global_verbose_flag() {
 #[test]
 fn test_global_parallel_option() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    create_test_repo(temp_dir.path(), "test-repo", false);
+    create_test_repo(temp_dir.path(), "test-repo", true);
 
     let output = run_gx_command(&["--jobs", "1", "status"], temp_dir.path());
 
@@ -86,8 +86,8 @@ fn test_global_max_depth_option() {
     // Create nested structure
     let nested_dir = temp_dir.path().join("level1").join("level2");
     std::fs::create_dir_all(&nested_dir).unwrap();
-    create_test_repo(&nested_dir, "deep-repo", false);
-    create_test_repo(temp_dir.path(), "shallow-repo", false);
+    create_test_repo(&nested_dir, "deep-repo", true);
+    create_test_repo(temp_dir.path(), "shallow-repo", true);
 
     // Test max-depth 2 should find shallow but not deep
     let output = run_gx_command(&["--depth", "2", "status"], temp_dir.path());
@@ -109,7 +109,7 @@ fn test_global_max_depth_option() {
 #[test]
 fn test_config_file_option() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    create_test_repo(temp_dir.path(), "test-repo", false);
+    create_test_repo(temp_dir.path(), "test-repo", true);
 
     // Create a config file
     let config_content = r#"
@@ -131,7 +131,7 @@ max_depth: 5
 #[test]
 fn test_workflow_status_then_checkout() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let repo_path = create_test_repo(temp_dir.path(), "workflow-repo", false);
+    let repo_path = create_test_repo(temp_dir.path(), "workflow-repo", true);
 
     // First run status
     let status_output = run_gx_command(&["status"], temp_dir.path());
@@ -209,8 +209,8 @@ fn test_error_handling_and_exit_codes() {
         let exit_code = output.status.code().unwrap_or(1);
         assert!(exit_code > 0);
     } else {
-        // If it succeeds, should show error in summary
-        assert!(stdout.contains("error") || stdout.contains("📊"));
+        // If it succeeds, should show error in summary or no repos found message
+        assert!(stdout.contains("error") || stdout.contains("📊") || stdout.contains("🔍 No repositories found"));
     }
 }
 
@@ -220,7 +220,7 @@ fn test_concurrent_operations() {
 
     // Create multiple repositories
     for i in 1..=5 {
-        create_test_repo(temp_dir.path(), &format!("repo{i}"), false);
+        create_test_repo(temp_dir.path(), &format!("repo{i}"), true);
     }
 
     let output = run_gx_command(&["--jobs", "3", "status"], temp_dir.path());
@@ -243,10 +243,10 @@ fn test_repository_filtering_edge_cases() {
     let temp_dir = tempfile::TempDir::new().unwrap();
 
     // Create repos with similar names
-    create_test_repo(temp_dir.path(), "frontend", false);
-    create_test_repo(temp_dir.path(), "frontend-api", false);
-    create_test_repo(temp_dir.path(), "backend", false);
-    create_test_repo(temp_dir.path(), "api", false);
+    create_test_repo(temp_dir.path(), "frontend", true);
+    create_test_repo(temp_dir.path(), "frontend-api", true);
+    create_test_repo(temp_dir.path(), "backend", true);
+    create_test_repo(temp_dir.path(), "api", true);
 
     // Test exact match
     let output = run_gx_command(&["status", "-p", "frontend"], temp_dir.path());
@@ -261,7 +261,7 @@ fn test_repository_filtering_edge_cases() {
 #[test]
 fn test_logging_functionality() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    create_test_repo(temp_dir.path(), "test-repo", false);
+    create_test_repo(temp_dir.path(), "test-repo", true);
 
     // Run with verbose flag
     let output = run_gx_command(&["--verbose", "status"], temp_dir.path());

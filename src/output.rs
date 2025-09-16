@@ -746,7 +746,7 @@ pub fn display_unified_format<T: UnifiedDisplay>(
 
     // Repository path/slug
     let repo = item.get_repo();
-    let repo_slug = repo.slug.as_ref().unwrap_or(&repo.name);
+    let repo_slug = &repo.slug;
     let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
 
     // Final format: <branch> <sha> <emoji> <repo>
@@ -794,7 +794,7 @@ pub fn display_review_result(
 
     // Repository path/slug
     let repo = &result.repo;
-    let repo_slug = repo.slug.as_ref().unwrap_or(&repo.name);
+    let repo_slug = &repo.slug;
     let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
 
     // Final format: <change_id> <PR#> <emoji> <repo>

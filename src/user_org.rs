@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::repo::Repo;
 use eyre::Result;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// User/Org detection result
 #[derive(Debug, Clone)]
@@ -55,45 +55,17 @@ pub fn determine_user_orgs(
     Err(eyre::eyre!("Unable to determine user/org: not specified explicitly, cannot auto-detect from directory structure, and no default configured"))
 }
 
-/// Auto-detect user/org(s) from repository directory structure
+/// Auto-detect user/org(s) from repository user_org field
 fn auto_detect_from_repos(repos: &[Repo]) -> Result<Vec<String>> {
     let user_orgs: HashSet<String> = repos
         .iter()
-        .filter_map(|repo| extract_user_org_from_path(&repo.path))
+        .map(|repo| repo.user_org.user.clone())
         .collect();
 
     match user_orgs.len() {
-        0 => Err(eyre::eyre!("No user/org detected from repository paths")),
+        0 => Err(eyre::eyre!("No user/org detected from repositories")),
         _ => Ok(user_orgs.into_iter().collect()),
     }
-}
-
-/// Extract user/org from repository path
-/// Examples (working from parent directory):
-///   ./tatari-tv/philo -> Some("tatari-tv")
-///   ./scottidler/gx -> Some("scottidler")
-///   ./standalone-repo -> None (only 2 components)
-fn extract_user_org_from_path(repo_path: &Path) -> Option<String> {
-    let path_components: Vec<_> = repo_path.components().collect();
-
-    // Look for pattern: ./user_or_org/repo_name
-    // When running from parent directory, repo paths look like:
-    // - ./tatari-tv/philo (3 components: ".", "tatari-tv", "philo")
-    // - ./scottidler/gx (3 components: ".", "scottidler", "gx")
-    // - ./standalone-repo (2 components: ".", "standalone-repo") - NOT a user/org pattern
-    if path_components.len() == 3 {
-        // Get the first directory component after "./" (user/org)
-        if let Some(user_org_component) = path_components.get(1) {
-            if let Some(user_org) = user_org_component.as_os_str().to_str() {
-                // Skip common non-user-org directory names
-                if !["src", "projects", "workspace", "repos", "git"].contains(&user_org) {
-                    return Some(user_org.to_string());
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// Build token path from template and user/org
@@ -114,34 +86,6 @@ pub fn build_token_path(template: &str, user_or_org: &str) -> PathBuf {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn test_extract_user_org_from_path() {
-        // Valid cases - 3 components: ./user_or_org/repo_name
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./tatari-tv/philo")),
-            Some("tatari-tv".to_string())
-        );
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./scottidler/gx")),
-            Some("scottidler".to_string())
-        );
-
-        // Invalid cases - not 3 components or excluded names
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./standalone-repo")),
-            None
-        );
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./src/main")),
-            None
-        );
-        assert_eq!(extract_user_org_from_path(&PathBuf::from(".")), None);
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./projects/test")),
-            None
-        );
-    }
 
     #[test]
     fn test_build_token_path() {
@@ -165,16 +109,8 @@ mod tests {
     #[test]
     fn test_auto_detect_from_repos() {
         let repos = vec![
-            Repo {
-                path: PathBuf::from("./tatari-tv/philo"),
-                name: "philo".to_string(),
-                slug: Some("tatari-tv/philo".to_string()),
-            },
-            Repo {
-                path: PathBuf::from("./tatari-tv/frontend"),
-                name: "frontend".to_string(),
-                slug: Some("tatari-tv/frontend".to_string()),
-            },
+            Repo::from_slug("tatari-tv/philo".to_string()),
+            Repo::from_slug("tatari-tv/frontend".to_string()),
         ];
 
         let result = auto_detect_from_repos(&repos).unwrap();
@@ -185,16 +121,8 @@ mod tests {
     #[test]
     fn test_auto_detect_multiple_orgs() {
         let repos = vec![
-            Repo {
-                path: PathBuf::from("./tatari-tv/philo"),
-                name: "philo".to_string(),
-                slug: Some("tatari-tv/philo".to_string()),
-            },
-            Repo {
-                path: PathBuf::from("./scottidler/gx"),
-                name: "gx".to_string(),
-                slug: Some("scottidler/gx".to_string()),
-            },
+            Repo::from_slug("tatari-tv/philo".to_string()),
+            Repo::from_slug("scottidler/gx".to_string()),
         ];
 
         let result = auto_detect_from_repos(&repos).unwrap();
