@@ -8,11 +8,7 @@ pub fn generate_diff(original: &str, updated: &str, buffer: usize) -> String {
     if updated.is_empty() {
         let mut result = String::new();
         for (i, line) in original.lines().enumerate() {
-            result.push_str(&format!(
-                "{} | {}\n",
-                format!("-{:4}", i + 1).red(),
-                line.red()
-            ));
+            result.push_str(&format!("{} | {}\n", format!("-{:4}", i + 1).red(), line.red()));
         }
         return result;
     }
@@ -52,8 +48,6 @@ pub fn generate_diff(original: &str, updated: &str, buffer: usize) -> String {
     result
 }
 
-
-
 /// Apply a string substitution to content and return diff if changed
 pub fn apply_substitution(content: &str, pattern: &str, replacement: &str, buffer: usize) -> Option<(String, String)> {
     if !content.contains(pattern) {
@@ -68,7 +62,12 @@ pub fn apply_substitution(content: &str, pattern: &str, replacement: &str, buffe
 }
 
 /// Apply a regex substitution to content and return diff if changed
-pub fn apply_regex_substitution(content: &str, pattern: &str, replacement: &str, buffer: usize) -> Result<Option<(String, String)>> {
+pub fn apply_regex_substitution(
+    content: &str,
+    pattern: &str,
+    replacement: &str,
+    buffer: usize,
+) -> Result<Option<(String, String)>> {
     let regex = Regex::new(pattern)?;
     if !regex.is_match(content) {
         return Ok(None);
@@ -96,11 +95,7 @@ pub fn reconstruct_files_from_unified_diff(diff_text: &str) -> Vec<(String, Stri
     for line in diff_text.lines() {
         if line.starts_with("diff --git ") {
             if !current_filename.is_empty() {
-                results.push((
-                    current_filename.clone(),
-                    orig_lines.join("\n"),
-                    upd_lines.join("\n"),
-                ));
+                results.push((current_filename.clone(), orig_lines.join("\n"), upd_lines.join("\n")));
             }
             current_filename.clear();
             orig_lines.clear();
@@ -133,8 +128,8 @@ pub fn reconstruct_files_from_unified_diff(diff_text: &str) -> Vec<(String, Stri
                 }
                 next_upd_line = hunk_upd_start;
             }
-        } else if line.starts_with(" ") {
-            let content = line[1..].to_string();
+        } else if let Some(stripped) = line.strip_prefix(" ") {
+            let content = stripped.to_string();
             orig_lines.push(content.clone());
             upd_lines.push(content);
             next_orig_line += 1;
@@ -150,32 +145,24 @@ pub fn reconstruct_files_from_unified_diff(diff_text: &str) -> Vec<(String, Stri
         }
     }
     if !current_filename.is_empty() {
-        results.push((
-            current_filename,
-            orig_lines.join("\n"),
-            upd_lines.join("\n"),
-        ));
+        results.push((current_filename, orig_lines.join("\n"), upd_lines.join("\n")));
     }
     results
 }
 
 /// Generate a summary of changes for display
 #[allow(dead_code)]
-pub fn generate_change_summary(
-    files_modified: usize,
-    files_added: usize,
-    files_deleted: usize,
-) -> String {
+pub fn generate_change_summary(files_modified: usize, files_added: usize, files_deleted: usize) -> String {
     let mut parts = Vec::new();
 
     if files_modified > 0 {
-        parts.push(format!("{} modified", files_modified));
+        parts.push(format!("{files_modified} modified"));
     }
     if files_added > 0 {
-        parts.push(format!("{} added", files_added));
+        parts.push(format!("{files_added} added"));
     }
     if files_deleted > 0 {
-        parts.push(format!("{} deleted", files_deleted));
+        parts.push(format!("{files_deleted} deleted"));
     }
 
     if parts.is_empty() {

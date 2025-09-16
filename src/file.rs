@@ -10,7 +10,7 @@ pub fn find_files_in_repo(repo_path: &Path, pattern: &str) -> Result<Vec<PathBuf
     let search_pattern = repo_path.join(pattern).to_string_lossy().to_string();
     let mut matches = Vec::new();
 
-    debug!("Searching for files with pattern: {}", search_pattern);
+    debug!("Searching for files with pattern: {search_pattern}");
 
     for entry in glob::glob(&search_pattern).context("Failed to create glob pattern")? {
         match entry {
@@ -23,7 +23,7 @@ pub fn find_files_in_repo(repo_path: &Path, pattern: &str) -> Result<Vec<PathBuf
                 }
             }
             Err(e) => {
-                debug!("Error processing glob entry: {}", e);
+                debug!("Error processing glob entry: {e}");
             }
         }
     }
@@ -31,17 +31,15 @@ pub fn find_files_in_repo(repo_path: &Path, pattern: &str) -> Result<Vec<PathBuf
     Ok(matches)
 }
 
-
-
 /// Apply a string substitution to a file
 pub fn apply_substitution_to_file(
     file_path: &Path,
     pattern: &str,
     replacement: &str,
-    buffer: usize
+    buffer: usize,
 ) -> Result<Option<(String, String)>> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let content =
+        fs::read_to_string(file_path).with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
     Ok(diff::apply_substitution(&content, pattern, replacement, buffer))
 }
@@ -51,10 +49,10 @@ pub fn apply_regex_to_file(
     file_path: &Path,
     pattern: &str,
     replacement: &str,
-    buffer: usize
+    buffer: usize,
 ) -> Result<Option<(String, String)>> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let content =
+        fs::read_to_string(file_path).with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
     diff::apply_regex_substitution(&content, pattern, replacement, buffer)
 }
@@ -66,8 +64,7 @@ pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
             .with_context(|| format!("Failed to create parent directories for: {}", file_path.display()))?;
     }
 
-    fs::write(file_path, content)
-        .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
+    fs::write(file_path, content).with_context(|| format!("Failed to write file: {}", file_path.display()))?;
 
     debug!("Wrote content to file: {}", file_path.display());
     Ok(())
@@ -75,8 +72,7 @@ pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
 
 /// Delete a file
 pub fn delete_file(file_path: &Path) -> Result<()> {
-    fs::remove_file(file_path)
-        .with_context(|| format!("Failed to delete file: {}", file_path.display()))?;
+    fs::remove_file(file_path).with_context(|| format!("Failed to delete file: {}", file_path.display()))?;
 
     debug!("Deleted file: {}", file_path.display());
     Ok(())
@@ -99,21 +95,20 @@ pub fn create_file_with_content(file_path: &Path, content: &str, buffer: usize) 
     Ok((file_content, diff_output))
 }
 
-
-
 /// Backup a file by creating a .backup copy
 pub fn backup_file(file_path: &Path) -> Result<PathBuf> {
-    let backup_path = file_path.with_extension(
-        format!("{}.backup",
-            file_path.extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        )
-    );
+    let backup_path = file_path.with_extension(format!(
+        "{}.backup",
+        file_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+    ));
 
-    fs::copy(file_path, &backup_path)
-        .with_context(|| format!("Failed to backup file {} to {}",
-            file_path.display(), backup_path.display()))?;
+    fs::copy(file_path, &backup_path).with_context(|| {
+        format!(
+            "Failed to backup file {} to {}",
+            file_path.display(),
+            backup_path.display()
+        )
+    })?;
 
     debug!("Created backup: {} -> {}", file_path.display(), backup_path.display());
     Ok(backup_path)
@@ -121,15 +116,22 @@ pub fn backup_file(file_path: &Path) -> Result<PathBuf> {
 
 /// Restore a file from its backup
 pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<()> {
-    fs::copy(backup_path, original_path)
-        .with_context(|| format!("Failed to restore from backup {} to {}",
-            backup_path.display(), original_path.display()))?;
+    fs::copy(backup_path, original_path).with_context(|| {
+        format!(
+            "Failed to restore from backup {} to {}",
+            backup_path.display(),
+            original_path.display()
+        )
+    })?;
 
     // Remove backup file
-    fs::remove_file(backup_path)
-        .with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
+    fs::remove_file(backup_path).with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
 
-    debug!("Restored from backup: {} -> {}", backup_path.display(), original_path.display());
+    debug!(
+        "Restored from backup: {} -> {}",
+        backup_path.display(),
+        original_path.display()
+    );
     Ok(())
 }
 
@@ -140,15 +142,15 @@ pub fn filter_files_by_patterns(files: &[PathBuf], patterns: &[String]) -> Vec<P
         return files.to_vec();
     }
 
-    files.iter()
+    files
+        .iter()
         .filter(|file| {
             let file_str = file.to_string_lossy();
             patterns.iter().any(|pattern| {
                 if pattern.contains('*') {
                     // Simple glob matching for *.extension
-                    if pattern.starts_with("*.") {
-                        let ext = &pattern[2..];
-                        file_str.ends_with(&format!(".{}", ext))
+                    if let Some(ext) = pattern.strip_prefix("*.") {
+                        file_str.ends_with(&format!(".{ext}"))
                     } else {
                         file_str.contains(&pattern.replace('*', ""))
                     }
@@ -170,8 +172,8 @@ pub fn is_file_accessible(file_path: &Path) -> bool {
 /// Get file size in bytes
 #[allow(dead_code)]
 pub fn get_file_size(file_path: &Path) -> Result<u64> {
-    let metadata = fs::metadata(file_path)
-        .with_context(|| format!("Failed to get metadata for: {}", file_path.display()))?;
+    let metadata =
+        fs::metadata(file_path).with_context(|| format!("Failed to get metadata for: {}", file_path.display()))?;
     Ok(metadata.len())
 }
 

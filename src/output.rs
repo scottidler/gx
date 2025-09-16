@@ -1,12 +1,12 @@
-use crate::git::{RepoStatus, RemoteStatus, CheckoutResult, CheckoutAction, CloneResult, CloneAction};
-use crate::create::{CreateResult, CreateAction};
-use crate::review::{ReviewResult, ReviewAction};
 use crate::config::OutputVerbosity;
+use crate::create::{CreateAction, CreateResult};
+use crate::git::{CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus};
+use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
+use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use std::env;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug)]
@@ -50,37 +50,97 @@ impl UnifiedDisplay for RepoStatus {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else if !self.is_clean {
             // File change status logic
             if self.changes.untracked > 0 {
-                if opts.use_emoji { "❓".to_string() } else { "?".to_string() }
+                if opts.use_emoji {
+                    "❓".to_string()
+                } else {
+                    "?".to_string()
+                }
             } else if self.changes.modified > 0 {
-                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+                if opts.use_emoji {
+                    "📝".to_string()
+                } else {
+                    "M".to_string()
+                }
             } else if self.changes.added > 0 {
-                if opts.use_emoji { "➕".to_string() } else { "A".to_string() }
+                if opts.use_emoji {
+                    "➕".to_string()
+                } else {
+                    "A".to_string()
+                }
             } else if self.changes.deleted > 0 {
-                if opts.use_emoji { "❌".to_string() } else { "D".to_string() }
+                if opts.use_emoji {
+                    "❌".to_string()
+                } else {
+                    "D".to_string()
+                }
             } else if self.changes.staged > 0 {
-                if opts.use_emoji { "🎯".to_string() } else { "S".to_string() }
+                if opts.use_emoji {
+                    "🎯".to_string()
+                } else {
+                    "S".to_string()
+                }
+            } else if opts.use_emoji {
+                "📝".to_string()
             } else {
-                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+                "M".to_string()
             }
         } else {
             // Remote status logic for clean repos
             match &self.remote_status {
-                RemoteStatus::UpToDate => if opts.use_emoji { "🟢".to_string() } else { "=".to_string() },
-                RemoteStatus::Ahead(n) => if opts.use_emoji { format!("⬆️{}", n) } else { format!("↑{}", n) },
-                RemoteStatus::Behind(n) => if opts.use_emoji { format!("⬇️{}", n) } else { format!("↓{}", n) },
-                RemoteStatus::Diverged(ahead, behind) => if opts.use_emoji { format!("🔀{}↑{}↓", ahead, behind) } else { format!("±{}↑{}↓", ahead, behind) },
-                RemoteStatus::NoRemote => if opts.use_emoji { "📍".to_string() } else { "~".to_string() },
-                RemoteStatus::Error(e) => if opts.use_emoji { format!("⚠️{}", e.chars().take(3).collect::<String>()) } else { format!("!{}", e.chars().take(3).collect::<String>()) },
+                RemoteStatus::UpToDate => {
+                    if opts.use_emoji {
+                        "🟢".to_string()
+                    } else {
+                        "=".to_string()
+                    }
+                }
+                RemoteStatus::Ahead(n) => {
+                    if opts.use_emoji {
+                        format!("⬆️{n}")
+                    } else {
+                        format!("↑{n}")
+                    }
+                }
+                RemoteStatus::Behind(n) => {
+                    if opts.use_emoji {
+                        format!("⬇️{n}")
+                    } else {
+                        format!("↓{n}")
+                    }
+                }
+                RemoteStatus::Diverged(ahead, behind) => {
+                    if opts.use_emoji {
+                        format!("🔀{ahead}↑{behind}↓")
+                    } else {
+                        format!("±{ahead}↑{behind}↓")
+                    }
+                }
+                RemoteStatus::NoRemote => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
+                RemoteStatus::Error(e) => {
+                    if opts.use_emoji {
+                        format!("⚠️{}", e.chars().take(3).collect::<String>())
+                    } else {
+                        format!("!{}", e.chars().take(3).collect::<String>())
+                    }
+                }
             }
         }
     }
-
-
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -102,19 +162,45 @@ impl UnifiedDisplay for CheckoutResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                CheckoutAction::CheckedOutSynced => if opts.use_emoji { "📥".to_string() } else { "OK".to_string() },
-                CheckoutAction::CreatedFromRemote => if opts.use_emoji { "✨".to_string() } else { "NEW".to_string() },
-                CheckoutAction::Stashed => if opts.use_emoji { "📦".to_string() } else { "STASH".to_string() },
-                CheckoutAction::HasUntracked => if opts.use_emoji { "⚠️".to_string() } else { "WARN".to_string() },
+                CheckoutAction::CheckedOutSynced => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "OK".to_string()
+                    }
+                }
+                CheckoutAction::CreatedFromRemote => {
+                    if opts.use_emoji {
+                        "✨".to_string()
+                    } else {
+                        "NEW".to_string()
+                    }
+                }
+                CheckoutAction::Stashed => {
+                    if opts.use_emoji {
+                        "📦".to_string()
+                    } else {
+                        "STASH".to_string()
+                    }
+                }
+                CheckoutAction::HasUntracked => {
+                    if opts.use_emoji {
+                        "⚠️".to_string()
+                    } else {
+                        "WARN".to_string()
+                    }
+                }
             }
         }
     }
-
-
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -136,37 +222,97 @@ impl UnifiedDisplay for &RepoStatus {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else if !self.is_clean {
             // File change status logic
             if self.changes.untracked > 0 {
-                if opts.use_emoji { "❓".to_string() } else { "?".to_string() }
+                if opts.use_emoji {
+                    "❓".to_string()
+                } else {
+                    "?".to_string()
+                }
             } else if self.changes.modified > 0 {
-                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+                if opts.use_emoji {
+                    "📝".to_string()
+                } else {
+                    "M".to_string()
+                }
             } else if self.changes.added > 0 {
-                if opts.use_emoji { "➕".to_string() } else { "A".to_string() }
+                if opts.use_emoji {
+                    "➕".to_string()
+                } else {
+                    "A".to_string()
+                }
             } else if self.changes.deleted > 0 {
-                if opts.use_emoji { "❌".to_string() } else { "D".to_string() }
+                if opts.use_emoji {
+                    "❌".to_string()
+                } else {
+                    "D".to_string()
+                }
             } else if self.changes.staged > 0 {
-                if opts.use_emoji { "🎯".to_string() } else { "S".to_string() }
+                if opts.use_emoji {
+                    "🎯".to_string()
+                } else {
+                    "S".to_string()
+                }
+            } else if opts.use_emoji {
+                "📝".to_string()
             } else {
-                if opts.use_emoji { "📝".to_string() } else { "M".to_string() }
+                "M".to_string()
             }
         } else {
             // Remote status logic for clean repos
             match &self.remote_status {
-                RemoteStatus::UpToDate => if opts.use_emoji { "🟢".to_string() } else { "=".to_string() },
-                RemoteStatus::Ahead(n) => if opts.use_emoji { format!("⬆️{}", n) } else { format!("↑{}", n) },
-                RemoteStatus::Behind(n) => if opts.use_emoji { format!("⬇️{}", n) } else { format!("↓{}", n) },
-                RemoteStatus::Diverged(ahead, behind) => if opts.use_emoji { format!("🔀{}↑{}↓", ahead, behind) } else { format!("±{}↑{}↓", ahead, behind) },
-                RemoteStatus::NoRemote => if opts.use_emoji { "📍".to_string() } else { "~".to_string() },
-                RemoteStatus::Error(e) => if opts.use_emoji { format!("⚠️{}", e.chars().take(3).collect::<String>()) } else { format!("!{}", e.chars().take(3).collect::<String>()) },
+                RemoteStatus::UpToDate => {
+                    if opts.use_emoji {
+                        "🟢".to_string()
+                    } else {
+                        "=".to_string()
+                    }
+                }
+                RemoteStatus::Ahead(n) => {
+                    if opts.use_emoji {
+                        format!("⬆️{n}")
+                    } else {
+                        format!("↑{n}")
+                    }
+                }
+                RemoteStatus::Behind(n) => {
+                    if opts.use_emoji {
+                        format!("⬇️{n}")
+                    } else {
+                        format!("↓{n}")
+                    }
+                }
+                RemoteStatus::Diverged(ahead, behind) => {
+                    if opts.use_emoji {
+                        format!("🔀{ahead}↑{behind}↓")
+                    } else {
+                        format!("±{ahead}↑{behind}↓")
+                    }
+                }
+                RemoteStatus::NoRemote => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
+                RemoteStatus::Error(e) => {
+                    if opts.use_emoji {
+                        format!("⚠️{}", e.chars().take(3).collect::<String>())
+                    } else {
+                        format!("!{}", e.chars().take(3).collect::<String>())
+                    }
+                }
             }
         }
     }
-
-
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -188,19 +334,45 @@ impl UnifiedDisplay for &CheckoutResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                CheckoutAction::CheckedOutSynced => if opts.use_emoji { "📥".to_string() } else { "OK".to_string() },
-                CheckoutAction::CreatedFromRemote => if opts.use_emoji { "✨".to_string() } else { "NEW".to_string() },
-                CheckoutAction::Stashed => if opts.use_emoji { "📦".to_string() } else { "STASH".to_string() },
-                CheckoutAction::HasUntracked => if opts.use_emoji { "⚠️".to_string() } else { "WARN".to_string() },
+                CheckoutAction::CheckedOutSynced => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "OK".to_string()
+                    }
+                }
+                CheckoutAction::CreatedFromRemote => {
+                    if opts.use_emoji {
+                        "✨".to_string()
+                    } else {
+                        "NEW".to_string()
+                    }
+                }
+                CheckoutAction::Stashed => {
+                    if opts.use_emoji {
+                        "📦".to_string()
+                    } else {
+                        "STASH".to_string()
+                    }
+                }
+                CheckoutAction::HasUntracked => {
+                    if opts.use_emoji {
+                        "⚠️".to_string()
+                    } else {
+                        "WARN".to_string()
+                    }
+                }
             }
         }
     }
-
-
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -222,14 +394,36 @@ impl UnifiedDisplay for CreateResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                CreateAction::DryRun => if opts.use_emoji { "👁️".to_string() } else { "DRY".to_string() },
+                CreateAction::DryRun => {
+                    if opts.use_emoji {
+                        "👁️".to_string()
+                    } else {
+                        "DRY".to_string()
+                    }
+                }
 
-                CreateAction::Committed => if opts.use_emoji { "💾".to_string() } else { "COMMIT".to_string() },
-                CreateAction::PrCreated => if opts.use_emoji { "📥".to_string() } else { "PR".to_string() },
+                CreateAction::Committed => {
+                    if opts.use_emoji {
+                        "💾".to_string()
+                    } else {
+                        "COMMIT".to_string()
+                    }
+                }
+                CreateAction::PrCreated => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "PR".to_string()
+                    }
+                }
             }
         }
     }
@@ -254,14 +448,36 @@ impl UnifiedDisplay for &CreateResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                CreateAction::DryRun => if opts.use_emoji { "👁️".to_string() } else { "DRY".to_string() },
+                CreateAction::DryRun => {
+                    if opts.use_emoji {
+                        "👁️".to_string()
+                    } else {
+                        "DRY".to_string()
+                    }
+                }
 
-                CreateAction::Committed => if opts.use_emoji { "💾".to_string() } else { "COMMIT".to_string() },
-                CreateAction::PrCreated => if opts.use_emoji { "📥".to_string() } else { "PR".to_string() },
+                CreateAction::Committed => {
+                    if opts.use_emoji {
+                        "💾".to_string()
+                    } else {
+                        "COMMIT".to_string()
+                    }
+                }
+                CreateAction::PrCreated => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "PR".to_string()
+                    }
+                }
             }
         }
     }
@@ -286,15 +502,49 @@ impl UnifiedDisplay for ReviewResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                ReviewAction::Listed => if opts.use_emoji { "📋".to_string() } else { "LIST".to_string() },
-                ReviewAction::Cloned => if opts.use_emoji { "📥".to_string() } else { "CLONE".to_string() },
-                ReviewAction::Approved => if opts.use_emoji { "✅".to_string() } else { "APPROVE".to_string() },
-                ReviewAction::Deleted => if opts.use_emoji { "❌".to_string() } else { "DELETE".to_string() },
-                ReviewAction::Purged => if opts.use_emoji { "🧹".to_string() } else { "PURGE".to_string() },
+                ReviewAction::Listed => {
+                    if opts.use_emoji {
+                        "📋".to_string()
+                    } else {
+                        "LIST".to_string()
+                    }
+                }
+                ReviewAction::Cloned => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "CLONE".to_string()
+                    }
+                }
+                ReviewAction::Approved => {
+                    if opts.use_emoji {
+                        "✅".to_string()
+                    } else {
+                        "APPROVE".to_string()
+                    }
+                }
+                ReviewAction::Deleted => {
+                    if opts.use_emoji {
+                        "❌".to_string()
+                    } else {
+                        "DELETE".to_string()
+                    }
+                }
+                ReviewAction::Purged => {
+                    if opts.use_emoji {
+                        "🧹".to_string()
+                    } else {
+                        "PURGE".to_string()
+                    }
+                }
             }
         }
     }
@@ -319,15 +569,49 @@ impl UnifiedDisplay for &ReviewResult {
     }
 
     fn get_emoji(&self, opts: &StatusOptions) -> String {
-        if let Some(_) = &self.error {
-            if opts.use_emoji { "❌".to_string() } else { "ERROR".to_string() }
+        if self.error.is_some() {
+            if opts.use_emoji {
+                "❌".to_string()
+            } else {
+                "ERROR".to_string()
+            }
         } else {
             match self.action {
-                ReviewAction::Listed => if opts.use_emoji { "📋".to_string() } else { "LIST".to_string() },
-                ReviewAction::Cloned => if opts.use_emoji { "📥".to_string() } else { "CLONE".to_string() },
-                ReviewAction::Approved => if opts.use_emoji { "✅".to_string() } else { "APPROVE".to_string() },
-                ReviewAction::Deleted => if opts.use_emoji { "❌".to_string() } else { "DELETE".to_string() },
-                ReviewAction::Purged => if opts.use_emoji { "🧹".to_string() } else { "PURGE".to_string() },
+                ReviewAction::Listed => {
+                    if opts.use_emoji {
+                        "📋".to_string()
+                    } else {
+                        "LIST".to_string()
+                    }
+                }
+                ReviewAction::Cloned => {
+                    if opts.use_emoji {
+                        "📥".to_string()
+                    } else {
+                        "CLONE".to_string()
+                    }
+                }
+                ReviewAction::Approved => {
+                    if opts.use_emoji {
+                        "✅".to_string()
+                    } else {
+                        "APPROVE".to_string()
+                    }
+                }
+                ReviewAction::Deleted => {
+                    if opts.use_emoji {
+                        "❌".to_string()
+                    } else {
+                        "DELETE".to_string()
+                    }
+                }
+                ReviewAction::Purged => {
+                    if opts.use_emoji {
+                        "🧹".to_string()
+                    } else {
+                        "PURGE".to_string()
+                    }
+                }
             }
         }
     }
@@ -348,7 +632,8 @@ pub struct AlignmentWidths {
 impl AlignmentWidths {
     /// Calculate alignment widths for a collection of UnifiedDisplay items
     pub fn calculate<T: UnifiedDisplay>(items: &[T]) -> Self {
-        let branch_width = items.iter()
+        let branch_width = items
+            .iter()
             .filter_map(|item| item.get_branch())
             .map(|branch| branch.len())
             .max()
@@ -358,7 +643,8 @@ impl AlignmentWidths {
         let sha_width = 7; // Always 7 characters for SHA
 
         // Calculate actual emoji width by measuring all emoji combinations
-        let emoji_width = items.iter()
+        let emoji_width = items
+            .iter()
             .map(|item| {
                 let opts = StatusOptions::default();
                 let emoji = item.get_emoji(&opts);
@@ -384,13 +670,12 @@ fn get_relative_repo_path(repo_path: &Path) -> String {
         }
     }
     // Fallback to just the repo name if relative path calculation fails
-    repo_path.file_name()
+    repo_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string()
 }
-
-
 
 /// Format repository path with separate colors for path and repo slug
 fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, use_colors: bool) -> String {
@@ -427,11 +712,7 @@ fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, use_colors: b
 }
 
 /// Display a single item using unified formatting
-pub fn display_unified_format<T: UnifiedDisplay>(
-    item: &T,
-    opts: &StatusOptions,
-    widths: &AlignmentWidths,
-) {
+pub fn display_unified_format<T: UnifiedDisplay>(item: &T, opts: &StatusOptions, widths: &AlignmentWidths) {
     // Branch (right-justified)
     let branch = item.get_branch().unwrap_or("unknown");
     let branch_display = if opts.use_colors {
@@ -455,31 +736,24 @@ pub fn display_unified_format<T: UnifiedDisplay>(
     // Repository path/slug
     let repo = item.get_repo();
     let repo_slug = repo.slug.as_ref().unwrap_or(&repo.name);
-    let repo_display = format_repo_path_with_colors(
-        &repo.path,
-        repo_slug,
-        opts.use_colors
-    );
+    let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
 
     // Final format: <branch> <sha> <emoji> <repo>
-    println!("{} {} {} {}", branch_display, sha_display, emoji_display, repo_display);
+    println!("{branch_display} {sha_display} {emoji_display} {repo_display}");
 
     // Handle error display
     if let Some(error) = item.get_error() {
         let error_msg = if opts.use_colors {
             format!("  Error: {}", error.red())
         } else {
-            format!("  Error: {}", error)
+            format!("  Error: {error}")
         };
-        println!("{}", error_msg);
+        println!("{error_msg}");
     }
 }
 
 /// Display multiple items using unified formatting
-pub fn display_unified_results<T: UnifiedDisplay>(
-    items: &[T],
-    opts: &StatusOptions,
-) {
+pub fn display_unified_results<T: UnifiedDisplay>(items: &[T], opts: &StatusOptions) {
     if items.is_empty() {
         return;
     }
@@ -501,31 +775,31 @@ pub fn display_unified_summary(clean_count: usize, dirty_count: usize, error_cou
         } else {
             "No repositories found"
         };
-        println!("\n{}", msg);
+        println!("\n{msg}");
         return;
     }
 
     let summary = if opts.use_emoji {
-        format!("\n📊 {} clean, {} dirty, {} errors", clean_count, dirty_count, error_count)
+        format!(
+            "\n📊 {clean_count} clean, {dirty_count} dirty, {error_count} errors"
+        )
     } else {
-        format!("\nSummary: {} clean, {} dirty, {} errors", clean_count, dirty_count, error_count)
+        format!(
+            "\nSummary: {clean_count} clean, {dirty_count} dirty, {error_count} errors"
+        )
     };
 
     if opts.use_colors {
-        println!("\n📊 {} clean, {} dirty, {} errors",
-                 clean_count.to_string().green(),
-                 dirty_count.to_string().yellow(),
-                 error_count.to_string().red());
+        println!(
+            "\n📊 {} clean, {} dirty, {} errors",
+            clean_count.to_string().green(),
+            dirty_count.to_string().yellow(),
+            error_count.to_string().red()
+        );
     } else {
-        println!("{}", summary);
+        println!("{summary}");
     }
 }
-
-
-
-
-
-
 
 /// Display a single clone result immediately (for streaming output like slam)
 pub fn display_clone_result_immediate(result: &CloneResult) -> Result<()> {
@@ -580,7 +854,8 @@ pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> Alignment
     use rayon::prelude::*;
 
     // Branch width: Fast git command, no network calls
-    let branch_width = repos.par_iter()
+    let branch_width = repos
+        .par_iter()
         .map(|repo| get_current_branch_name_fast(repo).len())
         .max()
         .unwrap_or(7)
@@ -596,7 +871,7 @@ pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> Alignment
     AlignmentWidths {
         branch_width,
         sha_width,
-        emoji_width
+        emoji_width,
     }
 }
 
@@ -608,10 +883,10 @@ pub fn display_status_result_immediate(
 ) -> Result<()> {
     // Apply verbosity filtering (same logic as batch display)
     let should_display = match (&result.error, result.is_clean, opts.verbosity) {
-        (Some(_), _, _) => true, // Always show errors
+        (Some(_), _, _) => true,                         // Always show errors
         (None, true, OutputVerbosity::Compact) => false, // Skip clean in compact
-        (None, true, _) => true, // Show clean in other modes
-        (None, false, _) => true, // Always show dirty
+        (None, true, _) => true,                         // Show clean in other modes
+        (None, false, _) => true,                        // Always show dirty
     };
 
     if should_display {

@@ -1,6 +1,6 @@
-use gx::git::{RepoStatus, CheckoutResult, CheckoutAction};
-use gx::output::{UnifiedDisplay, AlignmentWidths, StatusOptions};
 use gx::config::OutputVerbosity;
+use gx::git::{CheckoutAction, CheckoutResult, RepoStatus};
+use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 use gx::repo::Repo;
 use std::path::PathBuf;
 
@@ -221,7 +221,7 @@ fn test_no_emoji_mode() {
     };
 
     // Should use text instead of emojis
-    assert_eq!(status.get_emoji(&opts), "=".to_string());  // Up to date
+    assert_eq!(status.get_emoji(&opts), "=".to_string()); // Up to date
     assert_eq!(checkout.get_emoji(&opts), "OK".to_string()); // Checked out synced
 }
 
@@ -279,7 +279,11 @@ fn test_emoji_width_calculation_with_complex_combinations() {
 
     // The emoji width should be calculated based on the widest emoji combination
     // 🔀5↑3↓ should be the widest at 6 characters
-    assert!(widths.emoji_width >= 6, "Emoji width should be at least 6 for complex combinations, got {}", widths.emoji_width);
+    assert!(
+        widths.emoji_width >= 6,
+        "Emoji width should be at least 6 for complex combinations, got {}",
+        widths.emoji_width
+    );
 
     // Verify individual emoji widths
     let opts = StatusOptions::default();

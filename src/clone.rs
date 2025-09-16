@@ -4,9 +4,9 @@
 
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::{git, github, output, repo};
 use crate::output::StatusOptions;
 use crate::utils::{get_jobs_from_config, get_nproc};
+use crate::{git, github, output, repo};
 use eyre::{Context, Result};
 use log::{debug, info};
 use rayon::prelude::*;
@@ -21,14 +21,19 @@ pub fn process_clone_command(
     include_archived: bool,
     patterns: &[String],
 ) -> Result<()> {
-    info!("Processing clone command for user/org '{}' with {} patterns", user_or_org, patterns.len());
+    info!(
+        "Processing clone command for user/org '{}' with {} patterns",
+        user_or_org,
+        patterns.len()
+    );
 
     // Determine jobs
-    let jobs = cli.parallel
+    let jobs = cli
+        .parallel
         .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using jobs: {}", jobs);
+    debug!("Using jobs: {jobs}");
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
@@ -43,7 +48,7 @@ pub fn process_clone_command(
     info!("Found {} repositories for {}", all_repos.len(), user_or_org);
 
     if all_repos.is_empty() {
-        println!("🔍 No repositories found for {}", user_or_org);
+        println!("🔍 No repositories found for {user_or_org}");
         return Ok(());
     }
 
@@ -58,8 +63,7 @@ pub fn process_clone_command(
     }
 
     // 3. Read GitHub token
-    let token = github::read_token(user_or_org, config)
-        .context("Failed to read GitHub token")?;
+    let token = github::read_token(user_or_org, config).context("Failed to read GitHub token")?;
 
     // 4. Process repositories in parallel with streaming output
     let results = Mutex::new(Vec::new());
@@ -72,7 +76,7 @@ pub fn process_clone_command(
             results_vec.push(result.clone());
         }
         if let Err(e) = output::display_clone_result_immediate(&result) {
-            log::error!("Failed to display clone result: {}", e);
+            log::error!("Failed to display clone result: {e}");
         }
     });
 
@@ -108,10 +112,7 @@ fn filter_repository_slugs(all_repos: &[String], patterns: &[String]) -> Vec<Str
         .collect();
 
     let filtered_repos = repo::filter_repos(fake_repos, patterns);
-    filtered_repos
-        .iter()
-        .filter_map(|r| r.slug.clone())
-        .collect()
+    filtered_repos.iter().filter_map(|r| r.slug.clone()).collect()
 }
 
 /// Categorize clone results into clean/dirty/error counts
@@ -127,9 +128,9 @@ fn categorize_clone_results(results: &[git::CloneResult]) -> (usize, usize, usiz
             match result.action {
                 git::CloneAction::Cloned => clean_count += 1,
                 git::CloneAction::Updated => clean_count += 1,
-                git::CloneAction::Stashed => dirty_count += 1,  // Had uncommitted changes during update
-                git::CloneAction::DirectoryNotGitRepo => error_count += 1,  // Directory exists but not git
-                git::CloneAction::DifferentRemote => dirty_count += 1,  // Different remote URL detected
+                git::CloneAction::Stashed => dirty_count += 1, // Had uncommitted changes during update
+                git::CloneAction::DirectoryNotGitRepo => error_count += 1, // Directory exists but not git
+                git::CloneAction::DifferentRemote => dirty_count += 1, // Different remote URL detected
             }
         }
     }

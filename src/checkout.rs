@@ -4,9 +4,9 @@
 
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::{git, output, repo};
 use crate::output::StatusOptions;
 use crate::utils::{get_jobs_from_config, get_max_depth_from_config, get_nproc};
+use crate::{git, output, repo};
 use eyre::{Context, Result};
 use log::{debug, info};
 use rayon::prelude::*;
@@ -23,14 +23,19 @@ pub fn process_checkout_command(
     stash: bool,
     patterns: &[String],
 ) -> Result<()> {
-    info!("Processing checkout command for branch '{}' with {} patterns", branch_name, patterns.len());
+    info!(
+        "Processing checkout command for branch '{}' with {} patterns",
+        branch_name,
+        patterns.len()
+    );
 
     // Determine jobs
-    let jobs = cli.parallel
+    let jobs = cli
+        .parallel
         .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using jobs: {}", jobs);
+    debug!("Using jobs: {jobs}");
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
@@ -39,16 +44,13 @@ pub fn process_checkout_command(
         .context("Failed to initialize thread pool")?;
 
     // Determine max depth
-    let max_depth = cli.max_depth
-        .or_else(|| get_max_depth_from_config(config))
-        .unwrap_or(3);
+    let max_depth = cli.max_depth.or_else(|| get_max_depth_from_config(config)).unwrap_or(3);
 
-    debug!("Using max depth: {}", max_depth);
+    debug!("Using max depth: {max_depth}");
 
     // 1. Discover repositories
     let start_dir = env::current_dir().context("Failed to get current directory")?;
-    let repos = repo::discover_repos(&start_dir, max_depth)
-        .context("Failed to discover repositories")?;
+    let repos = repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
@@ -75,7 +77,7 @@ pub fn process_checkout_command(
                     branch_name: branch_name.to_string(),
                     commit_sha: None,
                     action: git::CheckoutAction::CheckedOutSynced,
-                    error: Some(format!("Failed to resolve branch name: {}", e)),
+                    error: Some(format!("Failed to resolve branch name: {e}")),
                 };
 
                 // Store result and display immediately
@@ -83,7 +85,7 @@ pub fn process_checkout_command(
                     results_vec.push(result.clone());
                 }
                 if let Err(e) = output::display_checkout_result_immediate(&result) {
-                    log::error!("Failed to display checkout result: {}", e);
+                    log::error!("Failed to display checkout result: {e}");
                 }
                 return;
             }
@@ -100,7 +102,7 @@ pub fn process_checkout_command(
                         branch_name: branch_name.to_string(),
                         commit_sha: None,
                         action: git::CheckoutAction::CheckedOutSynced,
-                        error: Some(format!("Failed to resolve from branch '{}': {}", from, e)),
+                        error: Some(format!("Failed to resolve from branch '{from}': {e}")),
                     };
 
                     // Store result and display immediately
@@ -108,7 +110,7 @@ pub fn process_checkout_command(
                         results_vec.push(result.clone());
                     }
                     if let Err(e) = output::display_checkout_result_immediate(&result) {
-                        log::error!("Failed to display checkout result: {}", e);
+                        log::error!("Failed to display checkout result: {e}");
                     }
                     return;
                 }
@@ -117,14 +119,20 @@ pub fn process_checkout_command(
             None
         };
 
-        let result = git::checkout_branch(repo, &resolved_branch, create_branch, resolved_from_branch.as_deref(), stash);
+        let result = git::checkout_branch(
+            repo,
+            &resolved_branch,
+            create_branch,
+            resolved_from_branch.as_deref(),
+            stash,
+        );
 
         // Store result and display immediately
         if let Ok(mut results_vec) = results.lock() {
             results_vec.push(result.clone());
         }
         if let Err(e) = output::display_checkout_result_immediate(&result) {
-            log::error!("Failed to display checkout result: {}", e);
+            log::error!("Failed to display checkout result: {e}");
         }
     });
 
@@ -156,8 +164,8 @@ fn categorize_checkout_results(results: &[git::CheckoutResult]) -> (usize, usize
             match result.action {
                 git::CheckoutAction::CheckedOutSynced => clean_count += 1,
                 git::CheckoutAction::CreatedFromRemote => clean_count += 1,
-                git::CheckoutAction::Stashed => dirty_count += 1,  // Had uncommitted changes
-                git::CheckoutAction::HasUntracked => dirty_count += 1,  // Has untracked files
+                git::CheckoutAction::Stashed => dirty_count += 1, // Had uncommitted changes
+                git::CheckoutAction::HasUntracked => dirty_count += 1, // Has untracked files
             }
         }
     }

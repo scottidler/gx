@@ -1,5 +1,4 @@
 use gx::test_utils::*;
-use tempfile;
 
 #[test]
 fn test_main_help_output() {
@@ -215,7 +214,7 @@ fn test_concurrent_operations() {
 
     // Create multiple repositories
     for i in 1..=5 {
-        create_test_repo(temp_dir.path(), &format!("repo{}", i), false);
+        create_test_repo(temp_dir.path(), &format!("repo{i}"), false);
     }
 
     let output = run_gx_command(&["--jobs", "3", "status"], temp_dir.path());
@@ -226,7 +225,7 @@ fn test_concurrent_operations() {
 
     // Should process all repositories
     for i in 1..=5 {
-        assert!(stdout.contains(&format!("repo{}", i)));
+        assert!(stdout.contains(&format!("repo{i}")));
     }
 
     // Should show summary with all repos

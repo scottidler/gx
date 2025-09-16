@@ -1,5 +1,5 @@
 use crate::repo::Repo;
-use crate::ssh::{SshUrlBuilder, SshCommandDetector};
+use crate::ssh::{SshCommandDetector, SshUrlBuilder};
 use eyre::{Context, Result};
 use log::debug;
 use std::process::Command;
@@ -28,12 +28,12 @@ pub struct StatusChanges {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum RemoteStatus {
-    UpToDate,      // ✅ Local and remote are in sync
-    Ahead(u32),    // ⬆️  Local is ahead by N commits
-    Behind(u32),   // ⬇️  Local is behind by N commits
+    UpToDate,           // ✅ Local and remote are in sync
+    Ahead(u32),         // ⬆️  Local is ahead by N commits
+    Behind(u32),        // ⬇️  Local is behind by N commits
     Diverged(u32, u32), // 🔀 Local ahead by N, behind by M
-    NoRemote,      // 📍 No remote tracking branch
-    Error(String), // ❌ Error checking remote status
+    NoRemote,           // 📍 No remote tracking branch
+    Error(String),      // ❌ Error checking remote status
 }
 
 #[derive(Debug, Clone)]
@@ -49,24 +49,24 @@ pub struct CheckoutResult {
 pub enum CheckoutAction {
     CheckedOutSynced,  // Checked out and synced with remote
     CreatedFromRemote, // Created new branch from remote
-    Stashed,          // Stashed uncommitted changes
-    HasUntracked,     // Has untracked files after checkout
+    Stashed,           // Stashed uncommitted changes
+    HasUntracked,      // Has untracked files after checkout
 }
 
 #[derive(Debug, Clone)]
 pub struct CloneResult {
-    pub repo_slug: String,  // "user/repo"
+    pub repo_slug: String, // "user/repo"
     pub action: CloneAction,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum CloneAction {
-    Cloned,                    // 📥 Successfully cloned new repo
-    Updated,                   // 🔄 Updated existing repo (checkout + pull)
-    Stashed,                   // 📦 Stashed changes during update
-    DirectoryNotGitRepo,       // 🏠 Directory exists but not git
-    DifferentRemote,           // 🔗 Different remote URL
+    Cloned,              // 📥 Successfully cloned new repo
+    Updated,             // 🔄 Updated existing repo (checkout + pull)
+    Stashed,             // 📦 Stashed changes during update
+    DirectoryNotGitRepo, // 🏠 Directory exists but not git
+    DifferentRemote,     // 🔗 Different remote URL
 }
 
 impl StatusChanges {
@@ -101,17 +101,15 @@ pub fn get_repo_status(repo: &Repo) -> RepoStatus {
                 error: None,
             }
         }
-        Err(e) => {
-            RepoStatus {
-                repo: repo.clone(),
-                branch,
-                commit_sha,
-                is_clean: false,
-                changes: StatusChanges::default(),
-                remote_status,
-                error: Some(e.to_string()),
-            }
-        }
+        Err(e) => RepoStatus {
+            repo: repo.clone(),
+            branch,
+            commit_sha,
+            is_clean: false,
+            changes: StatusChanges::default(),
+            remote_status,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -156,10 +154,7 @@ fn get_current_branch(repo: &Repo) -> Option<String> {
         .ok()?;
 
     if output.status.success() {
-        let branch = String::from_utf8(output.stdout)
-            .ok()?
-            .trim()
-            .to_string();
+        let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
 
         if !branch.is_empty() {
             Some(branch)
@@ -184,11 +179,8 @@ fn get_detached_head_info(repo: &Repo) -> Option<String> {
         .ok()?;
 
     if output.status.success() {
-        let commit = String::from_utf8(output.stdout)
-            .ok()?
-            .trim()
-            .to_string();
-        Some(format!("HEAD@{}", commit))
+        let commit = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        Some(format!("HEAD@{commit}"))
     } else {
         None
     }
@@ -209,8 +201,7 @@ fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
         return Err(eyre::eyre!("git status failed: {}", stderr));
     }
 
-    let status_output = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in git status output")?;
+    let status_output = String::from_utf8(output.stdout).context("Invalid UTF-8 in git status output")?;
 
     let mut changes = StatusChanges::default();
 
@@ -219,7 +210,7 @@ fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
             continue;
         }
 
-        let index_status = line.chars().nth(0).unwrap_or(' ');
+        let index_status = line.chars().next().unwrap_or(' ');
         let worktree_status = line.chars().nth(1).unwrap_or(' ');
 
         // Parse index (staged) changes
@@ -272,7 +263,12 @@ fn get_remote_status(repo: &Repo, branch: &Option<String>) -> RemoteStatus {
         Err(e) => return RemoteStatus::Error(e.to_string()),
     };
 
-    debug!("Remote status for {}: local={}, remote={}", repo.name, &local_sha[..7], &remote_sha[..7]);
+    debug!(
+        "Remote status for {}: local={}, remote={}",
+        repo.name,
+        &local_sha[..7],
+        &remote_sha[..7]
+    );
 
     // Quick comparison first
     if local_sha == remote_sha {
@@ -283,12 +279,18 @@ fn get_remote_status(repo: &Repo, branch: &Option<String>) -> RemoteStatus {
     // When remote SHA doesn't exist locally, we can't count commits accurately
     // This indicates the repo needs to be fetched/synced
     let behind = count_commits_between(&local_sha, &remote_sha, repo).unwrap_or_else(|_| {
-        debug!("Cannot count commits behind for {} - remote SHA not in local repo", repo.name);
+        debug!(
+            "Cannot count commits behind for {} - remote SHA not in local repo",
+            repo.name
+        );
         1 // Indicate that we're behind, but can't count exactly
     });
 
     let ahead = count_commits_between(&remote_sha, &local_sha, repo).unwrap_or_else(|_| {
-        debug!("Cannot count commits ahead for {} - remote SHA not in local repo", repo.name);
+        debug!(
+            "Cannot count commits ahead for {} - remote SHA not in local repo",
+            repo.name
+        );
         0 // If we can't count, assume we're not ahead
     });
 
@@ -315,8 +317,7 @@ fn get_remote_sha_ls_remote(repo: &Repo, branch: &str) -> Result<String> {
         return Err(eyre::eyre!("git ls-remote failed: {}", stderr));
     }
 
-    let output_str = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in ls-remote output")?;
+    let output_str = String::from_utf8(output.stdout).context("Invalid UTF-8 in ls-remote output")?;
 
     // Parse: "SHA\trefs/heads/branch"
     if let Some(line) = output_str.lines().next() {
@@ -332,17 +333,20 @@ fn get_remote_sha_ls_remote(repo: &Repo, branch: &str) -> Result<String> {
 fn count_commits_between(from_sha: &str, to_sha: &str, repo: &Repo) -> Result<u32> {
     let output = Command::new("git")
         .args([
-            "-C", &repo.path.to_string_lossy(),
-            "rev-list", "--count",
-            &format!("{}..{}", from_sha, to_sha)
+            "-C",
+            &repo.path.to_string_lossy(),
+            "rev-list",
+            "--count",
+            &format!("{from_sha}..{to_sha}"),
         ])
         .output()
         .context("Failed to count commits")?;
 
     if output.status.success() {
-        let count_str = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in rev-list output")?;
-        let count = count_str.trim().parse::<u32>()
+        let count_str = String::from_utf8(output.stdout).context("Invalid UTF-8 in rev-list output")?;
+        let count = count_str
+            .trim()
+            .parse::<u32>()
             .context("Failed to parse commit count")?;
         Ok(count)
     } else {
@@ -350,48 +354,13 @@ fn count_commits_between(from_sha: &str, to_sha: &str, repo: &Repo) -> Result<u3
         // If the SHA doesn't exist locally, we can't count commits
         // This happens when remote has commits we haven't fetched
         if stderr.contains("unknown revision") || stderr.contains("ambiguous argument") {
-            debug!("Cannot count commits between {} and {} - remote SHA not in local repo", from_sha, to_sha);
+            debug!(
+                "Cannot count commits between {from_sha} and {to_sha} - remote SHA not in local repo"
+            );
             Err(eyre::eyre!("Remote SHA not found in local repository"))
         } else {
             Err(eyre::eyre!("git rev-list failed: {}", stderr))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-
-
-    #[test]
-    fn test_status_changes_is_empty() {
-        let empty = StatusChanges::default();
-        assert!(empty.is_empty());
-
-        let not_empty = StatusChanges {
-            modified: 1,
-            ..Default::default()
-        };
-        assert!(!not_empty.is_empty());
-    }
-
-    #[test]
-    fn test_parse_porcelain_output() {
-        // This would require mocking git commands or using a real git repo
-        // We'd need to refactor get_status_changes to accept string input for testing
-        // This is a placeholder for the actual test implementation
-
-        // For now, just test that StatusChanges works correctly
-        let mut changes = StatusChanges::default();
-        changes.modified = 1;
-        changes.untracked = 1;
-        changes.added = 1;
-
-        assert!(!changes.is_empty());
-        assert_eq!(changes.modified, 1);
-        assert_eq!(changes.untracked, 1);
-        assert_eq!(changes.added, 1);
     }
 }
 
@@ -414,7 +383,14 @@ pub fn checkout_branch(
             if !status.is_empty() {
                 // Stash changes (excluding untracked files)
                 let stash_result = Command::new("git")
-                    .args(["-C", &repo.path.to_string_lossy(), "stash", "push", "-m", &format!("gx auto-stash for {}", branch_name)])
+                    .args([
+                        "-C",
+                        &repo.path.to_string_lossy(),
+                        "stash",
+                        "push",
+                        "-m",
+                        &format!("gx auto-stash for {branch_name}"),
+                    ])
                     .output();
 
                 if let Ok(output) = stash_result {
@@ -516,13 +492,17 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
 
     // Try to get the default branch from remote HEAD
     let output = Command::new("git")
-        .args(["-C", &repo.path.to_string_lossy(), "symbolic-ref", "refs/remotes/origin/HEAD"])
+        .args([
+            "-C",
+            &repo.path.to_string_lossy(),
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+        ])
         .output();
 
     if let Ok(output) = output {
         if output.status.success() {
-            let head_ref = String::from_utf8(output.stdout)
-                .context("Invalid UTF-8 in git symbolic-ref output")?;
+            let head_ref = String::from_utf8(output.stdout).context("Invalid UTF-8 in git symbolic-ref output")?;
 
             // Extract branch name from refs/remotes/origin/branch-name
             if let Some(branch) = head_ref.trim().strip_prefix("refs/remotes/origin/") {
@@ -534,7 +514,13 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
     // Fallback: try common default branch names (check if they exist locally)
     for branch in &["main", "master"] {
         let output = Command::new("git")
-            .args(["-C", &repo.path.to_string_lossy(), "rev-parse", "--verify", &format!("refs/heads/{}", branch)])
+            .args([
+                "-C",
+                &repo.path.to_string_lossy(),
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{branch}"),
+            ])
             .output();
 
         if let Ok(output) = output {
@@ -551,8 +537,7 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
 
     if let Ok(output) = output {
         if output.status.success() {
-            let branches = String::from_utf8(output.stdout)
-                .context("Invalid UTF-8 in git branch output")?;
+            let branches = String::from_utf8(output.stdout).context("Invalid UTF-8 in git branch output")?;
 
             // Look for main or master first
             for line in branches.lines() {
@@ -577,7 +562,7 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
 
 /// Clone or update a repository
 pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> CloneResult {
-    debug!("Processing repo: {}", repo_slug);
+    debug!("Processing repo: {repo_slug}");
 
     let parts: Vec<&str> = repo_slug.split('/').collect();
     if parts.len() != 2 {
@@ -610,12 +595,14 @@ pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> 
     match get_remote_origin(&target_dir) {
         Ok(origin) if is_same_repo(&origin, repo_slug) => {
             // Update existing repo: get default branch, checkout, pull
-            debug!("Updating existing repo: {}", repo_slug);
+            debug!("Updating existing repo: {repo_slug}");
             update_existing_repo(&target_dir, repo_slug, token)
         }
         Ok(origin) => {
             // Different remote URL
-            debug!("Different remote URL detected. Expected: {}, Found: {}", repo_slug, origin);
+            debug!(
+                "Different remote URL detected. Expected: {repo_slug}, Found: {origin}"
+            );
             CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::DifferentRemote,
@@ -625,8 +612,8 @@ pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> 
         Err(e) => CloneResult {
             repo_slug: repo_slug.to_string(),
             action: CloneAction::Updated,
-            error: Some(format!("Failed to check remote: {}", e)),
-        }
+            error: Some(format!("Failed to check remote: {e}")),
+        },
     }
 }
 
@@ -636,12 +623,12 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
 
     // Pre-flight SSH connectivity check
     match SshCommandDetector::test_github_ssh_connection() {
-        Ok(username) => debug!("SSH authenticated as: {}", username),
+        Ok(username) => debug!("SSH authenticated as: {username}"),
         Err(e) => {
             return CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::Cloned,
-                error: Some(format!("SSH connectivity test failed: {}", e)),
+                error: Some(format!("SSH connectivity test failed: {e}")),
             };
         }
     }
@@ -652,7 +639,7 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
             return CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::Cloned,
-                error: Some(format!("Failed to create parent directory: {}", e)),
+                error: Some(format!("Failed to create parent directory: {e}")),
             };
         }
     }
@@ -665,16 +652,16 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
                 return CloneResult {
                     repo_slug: repo_slug.to_string(),
                     action: CloneAction::Cloned,
-                    error: Some(format!("Generated invalid SSH URL: {}", e)),
+                    error: Some(format!("Generated invalid SSH URL: {e}")),
                 };
             }
             url
-        },
+        }
         Err(e) => {
             return CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::Cloned,
-                error: Some(format!("Invalid repository slug: {}", e)),
+                error: Some(format!("Invalid repository slug: {e}")),
             };
         }
     };
@@ -685,7 +672,7 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
             return CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::Cloned,
-                error: Some(format!("Failed to get SSH command: {}", e)),
+                error: Some(format!("Failed to get SSH command: {e}")),
             };
         }
     };
@@ -697,7 +684,7 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
 
     match output {
         Ok(result) if result.status.success() => {
-            debug!("Successfully cloned: {}", repo_slug);
+            debug!("Successfully cloned: {repo_slug}");
             CloneResult {
                 repo_slug: repo_slug.to_string(),
                 action: CloneAction::Cloned,
@@ -716,7 +703,7 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
             repo_slug: repo_slug.to_string(),
             action: CloneAction::Cloned,
             error: Some(e.to_string()),
-        }
+        },
     }
 }
 
@@ -727,14 +714,16 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
     // Get default branch from GitHub
     let default_branch = match crate::github::get_default_branch(repo_slug, token) {
         Ok(branch) => branch,
-        Err(e) => return CloneResult {
-            repo_slug: repo_slug.to_string(),
-            action: CloneAction::Updated,
-            error: Some(format!("Failed to get default branch: {}", e)),
+        Err(e) => {
+            return CloneResult {
+                repo_slug: repo_slug.to_string(),
+                action: CloneAction::Updated,
+                error: Some(format!("Failed to get default branch: {e}")),
+            }
         }
     };
 
-    debug!("Default branch for {}: {}", repo_slug, default_branch);
+    debug!("Default branch for {repo_slug}: {default_branch}");
 
     let mut stashed = false;
 
@@ -750,7 +739,7 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
                     "stash",
                     "push",
                     "-m",
-                    "gx auto-stash for clone update"
+                    "gx auto-stash for clone update",
                 ])
                 .output();
 
@@ -772,7 +761,7 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
         return CloneResult {
             repo_slug: repo_slug.to_string(),
             action: CloneAction::Updated,
-            error: Some(format!("Failed to fetch from remote: {}", e)),
+            error: Some(format!("Failed to fetch from remote: {e}")),
         };
     }
 
@@ -785,7 +774,7 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
         return CloneResult {
             repo_slug: repo_slug.to_string(),
             action: CloneAction::Updated,
-            error: Some(format!("Failed to checkout default branch: {}", e)),
+            error: Some(format!("Failed to checkout default branch: {e}")),
         };
     }
 
@@ -798,17 +787,13 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
         return CloneResult {
             repo_slug: repo_slug.to_string(),
             action: CloneAction::Updated,
-            error: Some(format!("Failed to pull latest changes: {}", e)),
+            error: Some(format!("Failed to pull latest changes: {e}")),
         };
     }
 
-    let action = if stashed {
-        CloneAction::Stashed
-    } else {
-        CloneAction::Updated
-    };
+    let action = if stashed { CloneAction::Stashed } else { CloneAction::Updated };
 
-    debug!("Successfully updated repo: {}", repo_slug);
+    debug!("Successfully updated repo: {repo_slug}");
     CloneResult {
         repo_slug: repo_slug.to_string(),
         action,
@@ -860,8 +845,7 @@ fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChan
         return Err(eyre::eyre!("git status failed: {}", stderr));
     }
 
-    let status_output = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8 in git status output")?;
+    let status_output = String::from_utf8(output.stdout).context("Invalid UTF-8 in git status output")?;
 
     let mut changes = StatusChanges::default();
 
@@ -939,7 +923,11 @@ pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Re
         Ok(())
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
-        Err(eyre::eyre!("Failed to delete local branch '{}': {}", branch_name, error))
+        Err(eyre::eyre!(
+            "Failed to delete local branch '{}': {}",
+            branch_name,
+            error
+        ))
     }
 }
 
@@ -984,7 +972,11 @@ pub fn commit_changes(repo_path: &std::path::Path, message: &str) -> Result<()> 
         .context("Failed to execute git commit")?;
 
     if output.status.success() {
-        debug!("Committed changes in '{}' with message: {}", repo_path.display(), message);
+        debug!(
+            "Committed changes in '{}' with message: {}",
+            repo_path.display(),
+            message
+        );
         Ok(())
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -994,17 +986,27 @@ pub fn commit_changes(repo_path: &std::path::Path, message: &str) -> Result<()> 
 
 /// Push branch to remote
 pub fn push_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
-    let ssh_command = SshCommandDetector::get_ssh_command()
-        .context("Failed to get SSH command for push")?;
+    let ssh_command = SshCommandDetector::get_ssh_command().context("Failed to get SSH command for push")?;
 
     let output = Command::new("git")
         .env("GIT_SSH_COMMAND", ssh_command)
-        .args(["-C", &repo_path.to_string_lossy(), "push", "--set-upstream", "origin", branch_name])
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch_name,
+        ])
         .output()
         .context("Failed to execute git push")?;
 
     if output.status.success() {
-        debug!("Pushed branch '{}' to remote from '{}'", branch_name, repo_path.display());
+        debug!(
+            "Pushed branch '{}' to remote from '{}'",
+            branch_name,
+            repo_path.display()
+        );
         Ok(())
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -1020,8 +1022,7 @@ pub fn has_uncommitted_changes(repo_path: &std::path::Path) -> Result<bool> {
         .context("Failed to execute git status")?;
 
     if output.status.success() {
-        let status_output = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in git status output")?;
+        let status_output = String::from_utf8(output.stdout).context("Invalid UTF-8 in git status output")?;
         Ok(!status_output.trim().is_empty())
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -1052,7 +1053,13 @@ pub fn get_current_branch_name(repo_path: &std::path::Path) -> Result<String> {
 #[allow(dead_code)]
 pub fn branch_exists_locally(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
     let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "rev-parse", "--verify", &format!("refs/heads/{}", branch_name)])
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch_name}"),
+        ])
         .output()
         .context("Failed to execute git rev-parse")?;
 
@@ -1111,5 +1118,40 @@ pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
         Err(eyre::eyre!("Failed to clone repository: {}", error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_changes_is_empty() {
+        let empty = StatusChanges::default();
+        assert!(empty.is_empty());
+
+        let not_empty = StatusChanges {
+            modified: 1,
+            ..Default::default()
+        };
+        assert!(!not_empty.is_empty());
+    }
+
+    #[test]
+    fn test_parse_porcelain_output() {
+        // This would require mocking git commands or using a real git repo
+        // We'd need to refactor get_status_changes to accept string input for testing
+        // This is a placeholder for the actual test implementation
+
+        // For now, just test that StatusChanges works correctly
+        let mut changes = StatusChanges::default();
+        changes.modified = 1;
+        changes.untracked = 1;
+        changes.added = 1;
+
+        assert!(!changes.is_empty());
+        assert_eq!(changes.modified, 1);
+        assert_eq!(changes.untracked, 1);
+        assert_eq!(changes.added, 1);
     }
 }

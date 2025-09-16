@@ -1,8 +1,8 @@
+use crate::config::Config;
+use crate::repo::Repo;
 use eyre::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use crate::repo::Repo;
-use crate::config::Config;
 
 /// User/Org detection result
 #[derive(Debug, Clone)]
@@ -13,9 +13,9 @@ pub struct UserOrgContext {
 
 #[derive(Debug, Clone)]
 pub enum DetectionMethod {
-    Explicit,           // From CLI parameter
-    AutoDetected,       // From directory structure
-    Configuration,      // From config file default
+    Explicit,      // From CLI parameter
+    AutoDetected,  // From directory structure
+    Configuration, // From config file default
 }
 
 /// Determine user/org(s) from various sources with precedence
@@ -35,10 +35,13 @@ pub fn determine_user_orgs(
 
     // 2. Auto-detect from repository paths - potentially multiple orgs
     if let Ok(detected_orgs) = auto_detect_from_repos(discovered_repos) {
-        return Ok(detected_orgs.into_iter().map(|org| UserOrgContext {
-            user_or_org: org,
-            detection_method: DetectionMethod::AutoDetected,
-        }).collect());
+        return Ok(detected_orgs
+            .into_iter()
+            .map(|org| UserOrgContext {
+                user_or_org: org,
+                detection_method: DetectionMethod::AutoDetected,
+            })
+            .collect());
     }
 
     // 3. Configuration file default - single org
@@ -98,9 +101,9 @@ pub fn build_token_path(template: &str, user_or_org: &str) -> PathBuf {
     let expanded = template.replace("{user_or_org}", user_or_org);
 
     // Handle tilde expansion
-    if expanded.starts_with("~/") {
+    if let Some(stripped) = expanded.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&expanded[2..]);
+            return home.join(stripped);
         }
     }
 
@@ -125,22 +128,10 @@ mod tests {
         );
 
         // Invalid cases - not 3 components or excluded names
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./standalone-repo")),
-            None
-        );
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./src/main")),
-            None
-        );
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from(".")),
-            None
-        );
-        assert_eq!(
-            extract_user_org_from_path(&PathBuf::from("./projects/test")),
-            None
-        );
+        assert_eq!(extract_user_org_from_path(&PathBuf::from("./standalone-repo")), None);
+        assert_eq!(extract_user_org_from_path(&PathBuf::from("./src/main")), None);
+        assert_eq!(extract_user_org_from_path(&PathBuf::from(".")), None);
+        assert_eq!(extract_user_org_from_path(&PathBuf::from("./projects/test")), None);
     }
 
     #[test]
@@ -212,7 +203,7 @@ mod tests {
         ];
 
         for method in methods {
-            assert!(!format!("{:?}", method).is_empty());
+            assert!(!format!("{method:?}").is_empty());
         }
     }
 
@@ -223,7 +214,7 @@ mod tests {
             detection_method: DetectionMethod::AutoDetected,
         };
 
-        let debug_str = format!("{:?}", context);
+        let debug_str = format!("{context:?}");
         assert!(debug_str.contains("test-org"));
         assert!(debug_str.contains("AutoDetected"));
     }

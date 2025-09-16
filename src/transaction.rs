@@ -35,10 +35,13 @@ impl Transaction {
             return;
         }
 
-        error!("An error occurred; initiating rollback of {} actions", self.rollbacks.len());
+        error!(
+            "An error occurred; initiating rollback of {} actions",
+            self.rollbacks.len()
+        );
         while let Some(action) = self.rollbacks.pop() {
             if let Err(e) = action() {
-                error!("Rollback action failed: {:?}", e);
+                error!("Rollback action failed: {e:?}");
             } else {
                 debug!("Rollback action succeeded");
             }
@@ -152,9 +155,7 @@ mod tests {
         });
 
         // Add a failing rollback action
-        transaction.add_rollback(|| {
-            Err(eyre::eyre!("Rollback failed"))
-        });
+        transaction.add_rollback(|| Err(eyre::eyre!("Rollback failed")));
 
         // Add another successful rollback action
         let counter_clone2 = Arc::clone(&counter);

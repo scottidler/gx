@@ -4,9 +4,9 @@
 
 use crate::cli::Cli;
 use crate::config::{Config, OutputVerbosity};
-use crate::{git, output, repo};
 use crate::output::StatusOptions;
 use crate::utils::{get_jobs_from_config, get_max_depth_from_config, get_nproc};
+use crate::{git, output, repo};
 use eyre::{Context, Result};
 use log::{debug, info};
 use rayon::prelude::*;
@@ -25,11 +25,12 @@ pub fn process_status_command(
     info!("Processing status command with {} patterns", patterns.len());
 
     // Determine jobs
-    let jobs = cli.parallel
+    let jobs = cli
+        .parallel
         .or_else(|| get_jobs_from_config(config))
         .unwrap_or_else(|| get_nproc().unwrap_or(4));
 
-    debug!("Using jobs: {}", jobs);
+    debug!("Using jobs: {jobs}");
 
     // Set rayon thread pool size
     rayon::ThreadPoolBuilder::new()
@@ -38,16 +39,13 @@ pub fn process_status_command(
         .context("Failed to initialize thread pool")?;
 
     // Determine max depth
-    let max_depth = cli.max_depth
-        .or_else(|| get_max_depth_from_config(config))
-        .unwrap_or(2);
+    let max_depth = cli.max_depth.or_else(|| get_max_depth_from_config(config)).unwrap_or(2);
 
-    debug!("Using max depth: {}", max_depth);
+    debug!("Using max depth: {max_depth}");
 
     // 1. Discover repositories
     let start_dir = env::current_dir().context("Failed to get current directory")?;
-    let repos = repo::discover_repos(&start_dir, max_depth)
-        .context("Failed to discover repositories")?;
+    let repos = repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
@@ -69,10 +67,7 @@ pub fn process_status_command(
         OutputVerbosity::Detailed
     } else {
         // Use config verbosity or default
-        config.output
-            .as_ref()
-            .and_then(|o| o.verbosity)
-            .unwrap_or_default()
+        config.output.as_ref().and_then(|o| o.verbosity).unwrap_or_default()
     };
 
     let status_opts = StatusOptions {
@@ -94,7 +89,7 @@ pub fn process_status_command(
 
         // Display immediately with pre-calculated alignment
         if let Err(e) = output::display_status_result_immediate(&result, &status_opts, &widths) {
-            log::error!("Failed to display status result: {}", e);
+            log::error!("Failed to display status result: {e}");
         }
     });
 

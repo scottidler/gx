@@ -32,7 +32,7 @@ fn test_status_shows_commit_hash() {
     let status_line = lines.iter().find(|line| line.contains("frontend"));
 
     if status_line.is_none() {
-        panic!("Could not find frontend in output. Full stdout:\n{}", stdout);
+        panic!("Could not find frontend in output. Full stdout:\n{stdout}");
     }
 
     let status_line = status_line.unwrap();
@@ -41,14 +41,26 @@ fn test_status_shows_commit_hash() {
     let parts: Vec<&str> = status_line.split_whitespace().collect();
 
     if parts.len() < 4 {
-        panic!("Expected at least 4 parts in status line, got {} parts: {:?}\nFull line: '{}'\nFull output:\n{}",
-               parts.len(), parts, status_line, stdout);
+        panic!(
+            "Expected at least 4 parts in status line, got {} parts: {:?}\nFull line: '{}'\nFull output:\n{}",
+            parts.len(),
+            parts,
+            status_line,
+            stdout
+        );
     }
 
     // Second part should be 7-character commit hash
     let commit_hash = parts[1];
-    assert_eq!(commit_hash.len(), 7, "Commit hash should be 7 characters, got: '{}'", commit_hash);
-    assert!(commit_hash.chars().all(|c| c.is_ascii_hexdigit()), "Commit hash should be hex digits, got: '{}'", commit_hash);
+    assert_eq!(
+        commit_hash.len(),
+        7,
+        "Commit hash should be 7 characters, got: '{commit_hash}'"
+    );
+    assert!(
+        commit_hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "Commit hash should be hex digits, got: '{commit_hash}'"
+    );
 }
 
 #[test]

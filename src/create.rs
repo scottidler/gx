@@ -1,3 +1,4 @@
+use crate::cli::Cli;
 use crate::config::Config;
 use crate::diff;
 use crate::file;
@@ -6,7 +7,6 @@ use crate::github;
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::transaction::Transaction;
-use crate::cli::Cli;
 use chrono::Local;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
@@ -14,23 +14,16 @@ use rayon::prelude::*;
 use std::path::Path;
 
 /// Show matched repositories and files without performing any actions (dry-run mode)
-pub fn show_matches(
-    cli: &Cli,
-    config: &Config,
-    files: &[String],
-    patterns: &[String],
-) -> Result<()> {
+pub fn show_matches(cli: &Cli, config: &Config, files: &[String], patterns: &[String]) -> Result<()> {
     let current_dir = std::env::current_dir()?;
     let start_dir = cli.cwd.as_ref().unwrap_or(&current_dir);
-    let max_depth = cli.max_depth.or_else(|| {
-        config.repo_discovery
-            .as_ref()
-            .and_then(|rd| rd.max_depth)
-    }).unwrap_or(3);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
 
     // Discover repositories
-    let repos = discover_repos(start_dir, max_depth)
-        .context("Failed to discover repositories")?;
+    let repos = discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
 
     // Filter repositories by patterns
     let filtered_repos = filter_repos(repos, patterns);
@@ -74,7 +67,7 @@ pub fn show_matches(
     }
 
     if !files.is_empty() {
-        status.push(format!("{}{}", total_files, files_emoji));
+        status.push(format!("{total_files}{files_emoji}"));
     }
 
     // Display results exactly like SLAM
@@ -85,11 +78,11 @@ pub fn show_matches(
         for (repo, matched_files) in &matched_repos {
             // Show repo slug if available, otherwise repo name
             let display_name = repo.slug.as_ref().unwrap_or(&repo.name);
-            println!("  {}", display_name);
+            println!("  {display_name}");
 
             if !files.is_empty() {
                 for file in matched_files {
-                    println!("    {}", file);
+                    println!("    {file}");
                 }
             }
         }
@@ -103,10 +96,10 @@ pub fn show_matches(
 
 #[derive(Debug, Clone)]
 pub enum Change {
-    Add(String, String),    // path, content
-    Delete,                 // delete matched files
-    Sub(String, String),    // pattern, replacement
-    Regex(String, String),  // regex pattern, replacement
+    Add(String, String),   // path, content
+    Delete,                // delete matched files
+    Sub(String, String),   // pattern, replacement
+    Regex(String, String), // regex pattern, replacement
 }
 
 #[derive(Debug, Clone)]
@@ -121,20 +114,21 @@ pub struct CreateResult {
 
 #[derive(Debug, Clone)]
 pub enum CreateAction {
-    DryRun,           // No changes made (preview)
+    DryRun, // No changes made (preview)
 
-    Committed,        // Changes committed to branch
-    PrCreated,        // PR created successfully
+    Committed, // Changes committed to branch
+    PrCreated, // PR created successfully
 }
 
 /// Generate a default change ID based on current timestamp
 pub fn generate_change_id() -> String {
     let now = Local::now();
     let timestamp = now.format("%Y-%m-%dT%H-%M-%S").to_string();
-    format!("GX-{}", timestamp)
+    format!("GX-{timestamp}")
 }
 
 /// Process create command across multiple repositories
+#[allow(clippy::too_many_arguments)]
 pub fn process_create_command(
     cli: &Cli,
     config: &Config,
@@ -145,18 +139,18 @@ pub fn process_create_command(
     create_pr: bool,
     change: Change,
 ) -> Result<()> {
-    info!("Starting create command with change: {:?}", change);
+    info!("Starting create command with change: {change:?}");
 
     let change_id = change_id.unwrap_or_else(generate_change_id);
     let current_dir = std::env::current_dir()?;
     let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
-    let max_depth = cli.max_depth
+    let max_depth = cli
+        .max_depth
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
     // Discover and filter repositories
-    let repos = discover_repos(start_dir, max_depth)
-        .context("Failed to discover repositories")?;
+    let repos = discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
@@ -169,7 +163,8 @@ pub fn process_create_command(
     }
 
     // Determine parallelism
-    let parallel_jobs = cli.parallel
+    let parallel_jobs = cli
+        .parallel
         .or_else(|| crate::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
@@ -183,16 +178,7 @@ pub fn process_create_command(
     let results: Vec<CreateResult> = pool.install(|| {
         filtered_repos
             .par_iter()
-            .map(|repo| {
-                process_single_repo(
-                    repo,
-                    &change_id,
-                    files,
-                    &change,
-                    commit_message.as_deref(),
-                    create_pr,
-                )
-            })
+            .map(|repo| process_single_repo(repo, &change_id, files, &change, commit_message.as_deref(), create_pr))
             .collect()
     });
 
@@ -249,7 +235,7 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
 
-                error: Some(format!("Failed to check repository status: {}", e)),
+                error: Some(format!("Failed to check repository status: {e}")),
             };
         }
     }
@@ -264,25 +250,46 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
 
-                error: Some(format!("Failed to get current branch: {}", e)),
+                error: Some(format!("Failed to get current branch: {e}")),
             };
         }
     };
 
     // Apply changes based on change type
     let change_result = match change {
-        Change::Add(path, content) => {
-            apply_add_change(repo_path, path, content, &mut transaction, &mut files_affected, &mut diff_parts)
-        }
-        Change::Delete => {
-            apply_delete_change(repo_path, file_patterns, &mut transaction, &mut files_affected, &mut diff_parts)
-        }
-        Change::Sub(pattern, replacement) => {
-            apply_substitution_change(repo_path, file_patterns, pattern, replacement, &mut transaction, &mut files_affected, &mut diff_parts)
-        }
-        Change::Regex(pattern, replacement) => {
-            apply_regex_change(repo_path, file_patterns, pattern, replacement, &mut transaction, &mut files_affected, &mut diff_parts)
-        }
+        Change::Add(path, content) => apply_add_change(
+            repo_path,
+            path,
+            content,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        ),
+        Change::Delete => apply_delete_change(
+            repo_path,
+            file_patterns,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        ),
+        Change::Sub(pattern, replacement) => apply_substitution_change(
+            repo_path,
+            file_patterns,
+            pattern,
+            replacement,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        ),
+        Change::Regex(pattern, replacement) => apply_regex_change(
+            repo_path,
+            file_patterns,
+            pattern,
+            replacement,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        ),
     };
 
     if let Err(e) = change_result {
@@ -293,7 +300,7 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
 
-            error: Some(format!("Failed to apply changes: {}", e)),
+            error: Some(format!("Failed to apply changes: {e}")),
         };
     }
 
@@ -308,8 +315,6 @@ fn process_single_repo(
             error: None,
         };
     }
-
-
 
     // If no commit message, this is a dry run
     if commit_message.is_none() {
@@ -365,7 +370,7 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected,
 
-                error: Some(format!("Failed to commit changes: {}", e)),
+                error: Some(format!("Failed to commit changes: {e}")),
             }
         }
     }
@@ -445,14 +450,16 @@ fn apply_delete_change(
 
         let diff = diff::generate_diff(&content, "", 3);
         files_affected.push(file_path.to_string_lossy().to_string());
-        diff_parts.push(format!("  D {}\n{}", file_path.display(), crate::utils::indent(&diff, 4)));
+        diff_parts.push(format!(
+            "  D {}\n{}",
+            file_path.display(),
+            crate::utils::indent(&diff, 4)
+        ));
 
         // Add rollback action
         let backup_path_clone = backup_path.clone();
         let full_path_clone = full_path.clone();
-        transaction.add_rollback(move || {
-            file::restore_from_backup(&backup_path_clone, &full_path_clone)
-        });
+        transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
     }
 
     Ok(())
@@ -496,14 +503,16 @@ fn apply_substitution_change(
             file::write_file_content(&full_path, &updated_content)?;
 
             files_affected.push(file_path.to_string_lossy().to_string());
-            diff_parts.push(format!("  M {}\n{}", file_path.display(), crate::utils::indent(&diff, 4)));
+            diff_parts.push(format!(
+                "  M {}\n{}",
+                file_path.display(),
+                crate::utils::indent(&diff, 4)
+            ));
 
             // Add rollback action
             let backup_path_clone = backup_path.clone();
             let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || {
-                file::restore_from_backup(&backup_path_clone, &full_path_clone)
-            });
+            transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
         }
     }
 
@@ -548,14 +557,16 @@ fn apply_regex_change(
             file::write_file_content(&full_path, &updated_content)?;
 
             files_affected.push(file_path.to_string_lossy().to_string());
-            diff_parts.push(format!("  M {}\n{}", file_path.display(), crate::utils::indent(&diff, 4)));
+            diff_parts.push(format!(
+                "  M {}\n{}",
+                file_path.display(),
+                crate::utils::indent(&diff, 4)
+            ));
 
             // Add rollback action
             let backup_path_clone = backup_path.clone();
             let full_path_clone = full_path.clone();
-            transaction.add_rollback(move || {
-                file::restore_from_backup(&backup_path_clone, &full_path_clone)
-            });
+            transaction.add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
         }
     }
 
@@ -571,8 +582,7 @@ fn commit_changes(
     transaction: &mut Transaction,
 ) -> Result<()> {
     // Create and switch to new branch
-    git::create_branch(repo_path, change_id)
-        .with_context(|| format!("Failed to create branch: {}", change_id))?;
+    git::create_branch(repo_path, change_id).with_context(|| format!("Failed to create branch: {change_id}"))?;
 
     // Add rollback to switch back to original branch
     let original_branch = original_branch.to_string();
@@ -581,28 +591,25 @@ fn commit_changes(
     transaction.add_rollback(move || {
         // Switch back to original branch
         if let Err(e) = git::switch_branch(&repo_path_clone, &original_branch) {
-            warn!("Failed to switch back to original branch {}: {}", original_branch, e);
+            warn!("Failed to switch back to original branch {original_branch}: {e}");
         }
 
         // Delete the created branch
         if let Err(e) = git::delete_local_branch(&repo_path_clone, &change_id_clone) {
-            warn!("Failed to delete branch {}: {}", change_id_clone, e);
+            warn!("Failed to delete branch {change_id_clone}: {e}");
         }
 
         Ok(())
     });
 
     // Stage all changes
-    git::add_all_changes(repo_path)
-        .context("Failed to stage changes")?;
+    git::add_all_changes(repo_path).context("Failed to stage changes")?;
 
     // Commit changes
-    git::commit_changes(repo_path, commit_message)
-        .context("Failed to commit changes")?;
+    git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
     // Push branch to remote
-    git::push_branch(repo_path, change_id)
-        .context("Failed to push branch")?;
+    git::push_branch(repo_path, change_id).context("Failed to push branch")?;
 
     Ok(())
 }
@@ -611,8 +618,8 @@ fn commit_changes(
 fn create_pull_request(repo: &Repo, change_id: &str, commit_message: &str) -> Result<()> {
     if let Some(repo_slug) = &repo.slug {
         github::create_pr(repo_slug, change_id, commit_message)
-            .with_context(|| format!("Failed to create PR for {}", repo_slug))?;
-        info!("Created PR for repository: {}", repo_slug);
+            .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
+        info!("Created PR for repository: {repo_slug}");
     } else {
         return Err(eyre::eyre!("Repository {} has no slug, cannot create PR", repo.name));
     }
@@ -625,29 +632,38 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
     let successful = results.iter().filter(|r| r.error.is_none()).count();
     let errors = total - successful;
 
-    let dry_runs = results.iter().filter(|r| matches!(r.action, CreateAction::DryRun)).count();
-    let committed = results.iter().filter(|r| matches!(r.action, CreateAction::Committed)).count();
-    let prs_created = results.iter().filter(|r| matches!(r.action, CreateAction::PrCreated)).count();
+    let dry_runs = results
+        .iter()
+        .filter(|r| matches!(r.action, CreateAction::DryRun))
+        .count();
+    let committed = results
+        .iter()
+        .filter(|r| matches!(r.action, CreateAction::Committed))
+        .count();
+    let prs_created = results
+        .iter()
+        .filter(|r| matches!(r.action, CreateAction::PrCreated))
+        .count();
 
     let total_files: usize = results.iter().map(|r| r.files_affected.len()).sum();
 
     if opts.use_emoji {
-        println!("\n📊 {} repositories processed:", total);
-        println!("   👁️  {} dry runs", dry_runs);
-        println!("   💾 {} committed", committed);
-        println!("   📥 {} PRs created", prs_created);
-        println!("   📄 {} files affected", total_files);
+        println!("\n📊 {total} repositories processed:");
+        println!("   👁️  {dry_runs} dry runs");
+        println!("   💾 {committed} committed");
+        println!("   📥 {prs_created} PRs created");
+        println!("   📄 {total_files} files affected");
         if errors > 0 {
-            println!("   ❌ {} errors", errors);
+            println!("   ❌ {errors} errors");
         }
     } else {
-        println!("\nSummary: {} repositories processed:", total);
-        println!("   {} dry runs", dry_runs);
-        println!("   {} committed", committed);
-        println!("   {} PRs created", prs_created);
-        println!("   {} files affected", total_files);
+        println!("\nSummary: {total} repositories processed:");
+        println!("   {dry_runs} dry runs");
+        println!("   {committed} committed");
+        println!("   {prs_created} PRs created");
+        println!("   {total_files} files affected");
         if errors > 0 {
-            println!("   {} errors", errors);
+            println!("   {errors} errors");
         }
     }
 }
@@ -655,8 +671,8 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_generate_change_id() {
@@ -673,10 +689,10 @@ mod tests {
         let regex = Change::Regex(r"\d+".to_string(), "X".to_string());
 
         // Ensure Debug is implemented
-        assert!(!format!("{:?}", add).is_empty());
-        assert!(!format!("{:?}", delete).is_empty());
-        assert!(!format!("{:?}", sub).is_empty());
-        assert!(!format!("{:?}", regex).is_empty());
+        assert!(!format!("{add:?}").is_empty());
+        assert!(!format!("{delete:?}").is_empty());
+        assert!(!format!("{sub:?}").is_empty());
+        assert!(!format!("{regex:?}").is_empty());
     }
 
     #[test]
@@ -693,7 +709,7 @@ mod tests {
             error: None,
         };
 
-        let debug_str = format!("{:?}", result);
+        let debug_str = format!("{result:?}");
         assert!(debug_str.contains("test-change"));
         assert!(debug_str.contains("DryRun"));
     }
@@ -708,7 +724,7 @@ mod tests {
         ];
 
         for action in actions {
-            assert!(!format!("{:?}", action).is_empty());
+            assert!(!format!("{action:?}").is_empty());
         }
     }
 

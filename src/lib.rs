@@ -1,7 +1,8 @@
 //! gx library crate for testing support
 
-pub mod test_utils;
+pub mod checkout;
 pub mod cli;
+pub mod clone;
 pub mod config;
 pub mod create;
 pub mod diff;
@@ -13,8 +14,7 @@ pub mod repo;
 pub mod review;
 pub mod ssh;
 pub mod status;
-pub mod checkout;
-pub mod clone;
+pub mod test_utils;
 pub mod transaction;
 pub mod user_org;
 pub mod utils;

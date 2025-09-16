@@ -64,7 +64,10 @@ fn test_checkout_with_stash() {
     // Verify we have changes to stash
     let status_output = run_git_command(&["status", "--porcelain"], &frontend_path);
     let status_text = String::from_utf8(status_output.stdout).unwrap();
-    assert!(!status_text.trim().is_empty(), "Should have uncommitted changes to stash");
+    assert!(
+        !status_text.trim().is_empty(),
+        "Should have uncommitted changes to stash"
+    );
 
     // Test checkout with stash flag
     let output = run_gx_command(&["checkout", "feature", "-s", "-p", "frontend"], workspace.path());
@@ -223,8 +226,12 @@ fn test_checkout_specific_branch_all_repos() {
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("Command failed with exit code: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}",
-               output.status.code(), stdout, stderr);
+        panic!(
+            "Command failed with exit code: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
     }
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("📥"));
@@ -253,13 +260,20 @@ fn test_checkout_with_multiple_patterns() {
     run_git_command(&["checkout", "main"], &backend_path);
 
     // Test checkout with multiple patterns
-    let output = run_gx_command(&["checkout", "feature", "-p", "frontend", "-p", "backend"], workspace.path());
+    let output = run_gx_command(
+        &["checkout", "feature", "-p", "frontend", "-p", "backend"],
+        workspace.path(),
+    );
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("Command failed with exit code: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}",
-               output.status.code(), stdout, stderr);
+        panic!(
+            "Command failed with exit code: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
     }
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("📥"));
@@ -335,7 +349,18 @@ fn test_checkout_create_branch_with_explicit_from() {
     run_git_command(&["checkout", "main"], &frontend_path);
 
     // Test creating branch from explicit branch
-    let output = run_gx_command(&["checkout", "-b", "feature-from-develop", "-f", "develop", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &[
+            "checkout",
+            "-b",
+            "feature-from-develop",
+            "-f",
+            "develop",
+            "-p",
+            "frontend",
+        ],
+        workspace.path(),
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -351,7 +376,18 @@ fn test_checkout_create_branch_with_default_from_keyword() {
     let frontend_path = workspace.path().join("frontend");
 
     // Test creating branch with explicit 'default' from branch
-    let output = run_gx_command(&["checkout", "-b", "feature-from-default", "-f", "default", "-p", "frontend"], workspace.path());
+    let output = run_gx_command(
+        &[
+            "checkout",
+            "-b",
+            "feature-from-default",
+            "-f",
+            "default",
+            "-p",
+            "frontend",
+        ],
+        workspace.path(),
+    );
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -416,7 +452,7 @@ fn test_checkout_help_shows_new_syntax() {
 
 #[test]
 fn test_resolve_branch_name_unit_test() {
-    use gx::git::{resolve_branch_name};
+    use gx::git::resolve_branch_name;
     use gx::repo::Repo;
     use std::path::PathBuf;
 
@@ -448,7 +484,7 @@ fn test_checkout_mixed_success_and_failure() {
     run_git_command(&["checkout", "-b", "feature"], &frontend_path);
     run_git_command(&["checkout", "main"], &frontend_path);
 
-        // Try to checkout feature branch in all repos (should succeed in frontend, fail in others)
+    // Try to checkout feature branch in all repos (should succeed in frontend, fail in others)
     let output = run_gx_command(&["checkout", "feature"], workspace.path());
 
     // Should fail because some repos don't have the feature branch

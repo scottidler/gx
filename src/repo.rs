@@ -27,7 +27,11 @@ impl Repo {
 
 /// Discover git repositories starting from the given directory
 pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
-    debug!("Discovering repos from {} with max depth {}", start_dir.display(), max_depth);
+    debug!(
+        "Discovering repos from {} with max depth {}",
+        start_dir.display(),
+        max_depth
+    );
 
     let mut repos = Vec::new();
 
@@ -114,7 +118,7 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
     // Level 1: Exact match on repository name
     let level1: Vec<Repo> = repos
         .iter()
-        .filter(|r| patterns.iter().any(|pattern| r.name == *pattern))
+        .filter(|r| patterns.contains(&r.name))
         .cloned()
         .collect();
 
@@ -170,8 +174,6 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
     level4
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +195,8 @@ mod tests {
             Some("scottidler/gx".to_string())
         );
 
-        assert_eq!(
-            parse_repo_slug_from_url("https://gitlab.com/org/repo.git"),
-            None
-        );
+        assert_eq!(parse_repo_slug_from_url("https://gitlab.com/org/repo.git"), None);
     }
-
-
 
     #[test]
     fn test_filter_repos() {

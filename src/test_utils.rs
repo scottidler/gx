@@ -1,7 +1,7 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use std::fs;
 
 /// Get the path to the compiled gx binary for testing
 pub fn get_gx_binary_path() -> PathBuf {
@@ -54,15 +54,14 @@ pub fn create_test_repo(base_path: &Path, repo_name: &str, with_remote: bool) ->
 
     // Create initial commit
     let readme_path = repo_path.join("README.md");
-    fs::write(&readme_path, format!("# {}\n\nTest repository", repo_name))
-        .expect("Failed to write README");
+    fs::write(&readme_path, format!("# {repo_name}\n\nTest repository")).expect("Failed to write README");
 
     run_git_command(&["add", "README.md"], &repo_path);
     run_git_command(&["commit", "-m", "Initial commit"], &repo_path);
 
     if with_remote {
         // Add a fake remote URL
-        let remote_url = format!("git@github.com:testuser/{}.git", repo_name);
+        let remote_url = format!("git@github.com:testuser/{repo_name}.git");
         run_git_command(&["remote", "add", "origin", &remote_url], &repo_path);
     }
 
@@ -118,7 +117,7 @@ pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
 
     // Create one commit (minimal)
     let readme_path = repo_path.join("README.md");
-    fs::write(&readme_path, format!("# {}", repo_name)).expect("Failed to write README");
+    fs::write(&readme_path, format!("# {repo_name}")).expect("Failed to write README");
     run_git_command(&["add", "README.md"], &repo_path);
     run_git_command(&["commit", "--quiet", "-m", "Initial commit"], &repo_path);
 
@@ -134,23 +133,19 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
         temp_dir.path(),
         "frontend",
         "gx-testing/frontend",
-        &["main", "develop", "feature/auth"]
+        &["main", "develop", "feature/auth"],
     );
 
     // 2. Backend repo - API service with different commit history
-    let _backend_path = create_test_repo_with_branches(
-        temp_dir.path(),
-        "backend",
-        "gx-testing/backend",
-        &["main", "staging"]
-    );
+    let _backend_path =
+        create_test_repo_with_branches(temp_dir.path(), "backend", "gx-testing/backend", &["main", "staging"]);
 
     // 3. Mobile app repo - with untracked files
     let mobile_path = create_test_repo_with_branches(
         temp_dir.path(),
         "mobile-app",
         "gx-testing/mobile-app",
-        &["main", "ios-fixes", "android-fixes"]
+        &["main", "ios-fixes", "android-fixes"],
     );
     // Add untracked files
     fs::write(mobile_path.join("temp.log"), "temporary log file").expect("Failed to create temp file");
@@ -161,7 +156,7 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
         temp_dir.path(),
         "infrastructure",
         "gx-testing/infrastructure",
-        &["main", "production", "development"]
+        &["main", "production", "development"],
     );
     // Add staged changes
     fs::write(infra_path.join("terraform.tf"), "# Updated terraform config").expect("Failed to write terraform file");
@@ -176,14 +171,19 @@ pub fn create_comprehensive_test_workspace() -> TempDir {
             ("Initial docs", "README.md", "# Project Documentation"),
             ("Add API docs", "api.md", "# API Documentation"),
             ("Update installation guide", "install.md", "# Installation Guide"),
-        ]
+        ],
     );
 
     temp_dir
 }
 
 /// Create a test repository with multiple branches
-pub fn create_test_repo_with_branches(base_path: &Path, repo_name: &str, remote_slug: &str, branches: &[&str]) -> PathBuf {
+pub fn create_test_repo_with_branches(
+    base_path: &Path,
+    repo_name: &str,
+    remote_slug: &str,
+    branches: &[&str],
+) -> PathBuf {
     let repo_path = base_path.join(repo_name);
     fs::create_dir_all(&repo_path).expect("Failed to create repo directory");
 
@@ -195,27 +195,37 @@ pub fn create_test_repo_with_branches(base_path: &Path, repo_name: &str, remote_
 
     // Create initial commit on main
     let readme_path = repo_path.join("README.md");
-    fs::write(&readme_path, format!("# {}\n\nTest repository for {}", repo_name, remote_slug))
-        .expect("Failed to write README");
+    fs::write(
+        &readme_path,
+        format!("# {repo_name}\n\nTest repository for {remote_slug}"),
+    )
+    .expect("Failed to write README");
 
     run_git_command(&["add", "README.md"], &repo_path);
     run_git_command(&["commit", "-m", "Initial commit"], &repo_path);
 
     // Add remote
-    let remote_url = format!("git@github.com:{}.git", remote_slug);
+    let remote_url = format!("git@github.com:{remote_slug}.git");
     run_git_command(&["remote", "add", "origin", &remote_url], &repo_path);
 
     // Create additional branches
-    for &branch in branches.iter().skip(1) { // Skip main/first branch
+    for &branch in branches.iter().skip(1) {
+        // Skip main/first branch
         run_git_command(&["checkout", "-b", branch], &repo_path);
 
         // Add a branch-specific file
         let branch_file = repo_path.join(format!("{}.md", branch.replace('/', "_")));
-        fs::write(&branch_file, format!("# {}\n\nBranch-specific content for {}", branch, branch))
-            .expect("Failed to write branch file");
+        fs::write(
+            &branch_file,
+            format!("# {branch}\n\nBranch-specific content for {branch}"),
+        )
+        .expect("Failed to write branch file");
 
         run_git_command(&["add", &format!("{}.md", branch.replace('/', "_"))], &repo_path);
-        run_git_command(&["commit", "-m", &format!("Add {} specific changes", branch)], &repo_path);
+        run_git_command(
+            &["commit", "-m", &format!("Add {branch} specific changes")],
+            &repo_path,
+        );
     }
 
     // Return to main branch
@@ -225,7 +235,12 @@ pub fn create_test_repo_with_branches(base_path: &Path, repo_name: &str, remote_
 }
 
 /// Create a test repository with multiple commits
-pub fn create_test_repo_with_commits(base_path: &Path, repo_name: &str, remote_slug: &str, commits: &[(&str, &str, &str)]) -> PathBuf {
+pub fn create_test_repo_with_commits(
+    base_path: &Path,
+    repo_name: &str,
+    remote_slug: &str,
+    commits: &[(&str, &str, &str)],
+) -> PathBuf {
     let repo_path = base_path.join(repo_name);
     fs::create_dir_all(&repo_path).expect("Failed to create repo directory");
 
@@ -236,7 +251,7 @@ pub fn create_test_repo_with_commits(base_path: &Path, repo_name: &str, remote_s
     run_git_command(&["config", "commit.gpgsign", "false"], &repo_path);
 
     // Add remote
-    let remote_url = format!("git@github.com:{}.git", remote_slug);
+    let remote_url = format!("git@github.com:{remote_slug}.git");
     run_git_command(&["remote", "add", "origin", &remote_url], &repo_path);
 
     // Create commits
@@ -279,7 +294,10 @@ pub fn create_gx_testing_workspace() -> TempDir {
         let repo_path = create_test_repo(temp_dir.path(), name, true);
 
         // Update remote to point to gx-testing org
-        run_git_command(&["remote", "set-url", "origin", &format!("git@github.com:{}.git", slug)], &repo_path);
+        run_git_command(
+            &["remote", "set-url", "origin", &format!("git@github.com:{slug}.git")],
+            &repo_path,
+        );
     }
 
     temp_dir

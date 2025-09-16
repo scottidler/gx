@@ -24,7 +24,7 @@ pub fn get_nproc() -> Option<usize> {
 pub fn indent(text: &str, spaces: usize) -> String {
     let padding = " ".repeat(spaces);
     text.lines()
-        .map(|line| format!("{}{}", padding, line))
+        .map(|line| format!("{padding}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
