@@ -701,9 +701,13 @@ fn commit_changes(
     commit_message: &str,
     transaction: &mut Transaction,
 ) -> Result<()> {
-    // Create and switch to new branch
+    // Check if branch existed before we try to create it
+    let branch_existed = git::branch_exists_locally(repo_path, change_id)
+        .unwrap_or(false);
+
+    // Create and switch to branch (or switch to existing)
     git::create_branch(repo_path, change_id)
-        .with_context(|| format!("Failed to create branch: {change_id}"))?;
+        .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
 
     // Add rollback to switch back to original branch
     let original_branch = original_branch.to_string();
@@ -715,9 +719,11 @@ fn commit_changes(
             warn!("Failed to switch back to original branch {original_branch}: {e}");
         }
 
-        // Delete the created branch
-        if let Err(e) = git::delete_local_branch(&repo_path_clone, &change_id_clone) {
-            warn!("Failed to delete branch {change_id_clone}: {e}");
+        // Only delete the branch if we created it (not if it existed before)
+        if !branch_existed {
+            if let Err(e) = git::delete_local_branch(&repo_path_clone, &change_id_clone) {
+                warn!("Failed to delete branch {change_id_clone}: {e}");
+            }
         }
 
         Ok(())

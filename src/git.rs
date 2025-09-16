@@ -944,8 +944,21 @@ fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChan
 
 // Enhanced git operations for create/review functionality
 
-/// Create a new branch from current HEAD
+/// Create a new branch from current HEAD or switch to existing branch
 pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    // Check if branch already exists locally
+    if branch_exists_locally(repo_path, branch_name)? {
+        debug!("Branch '{}' already exists locally, switching to it", branch_name);
+        return switch_branch(repo_path, branch_name);
+    }
+
+    // Check if branch exists on remote
+    if branch_exists_on_remote(repo_path, branch_name)? {
+        debug!("Branch '{}' exists on remote, checking out", branch_name);
+        return checkout_remote_branch(repo_path, branch_name);
+    }
+
+    // Create new branch from current HEAD
     let output = Command::new("git")
         .args([
             "-C",
@@ -959,7 +972,7 @@ pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
 
     if output.status.success() {
         debug!(
-            "Created branch '{}' in '{}'",
+            "Created new branch '{}' in '{}'",
             branch_name,
             repo_path.display()
         );
@@ -1169,7 +1182,6 @@ pub fn get_current_branch_name(repo_path: &std::path::Path) -> Result<String> {
 }
 
 /// Check if a branch exists locally
-#[allow(dead_code)]
 pub fn branch_exists_locally(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
     let output = Command::new("git")
         .args([
@@ -1183,6 +1195,53 @@ pub fn branch_exists_locally(repo_path: &std::path::Path, branch_name: &str) -> 
         .context("Failed to execute git rev-parse")?;
 
     Ok(output.status.success())
+}
+
+/// Check if a branch exists on remote
+pub fn branch_exists_on_remote(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/origin/{branch_name}"),
+        ])
+        .output()
+        .context("Failed to execute git rev-parse for remote branch")?;
+
+    Ok(output.status.success())
+}
+
+/// Checkout a branch that exists on remote (creates local tracking branch)
+pub fn checkout_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "checkout",
+            "-b",
+            branch_name,
+            &format!("origin/{branch_name}"),
+        ])
+        .output()
+        .context("Failed to execute git checkout for remote branch")?;
+
+    if output.status.success() {
+        debug!(
+            "Checked out remote branch '{}' in '{}'",
+            branch_name,
+            repo_path.display()
+        );
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!(
+            "Failed to checkout remote branch '{}': {}",
+            branch_name,
+            error
+        ))
+    }
 }
 
 /// Reset repository to HEAD (discard uncommitted changes)
