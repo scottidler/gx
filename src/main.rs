@@ -17,6 +17,7 @@ mod github;
 mod output;
 mod repo;
 mod review;
+mod rollback;
 mod ssh;
 mod status;
 mod transaction;
@@ -167,6 +168,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 review::process_review_purge_command(cli, config, org.as_deref(), patterns)
             }
         },
+        Commands::Rollback { action } => rollback::handle_rollback(action.clone()),
     }
 }
 

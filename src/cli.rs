@@ -302,6 +302,28 @@ EXAMPLES:
         #[command(subcommand)]
         action: ReviewAction,
     },
+
+    /// Rollback interrupted operations and recovery management
+    #[command(after_help = "ROLLBACK LEGEND:
+  🔄  Rollback executed         ✅  Recovery successful   ❌  Rollback failed
+  📋  Recovery states listed    🧹  Recovery state cleaned 📊  Summary stats
+
+RECOVERY OPERATIONS:
+  gx rollback list              # List available recovery states
+  gx rollback execute <id>      # Execute recovery for specific transaction
+  gx rollback validate <id>     # Validate recovery operations before execution
+  gx rollback cleanup           # Clean up old recovery states
+  gx rollback cleanup <id>      # Clean up specific recovery state
+
+EXAMPLES:
+  gx rollback list                          # Show all interrupted transactions
+  gx rollback execute gx-tx-1234567890      # Recover specific transaction
+  gx rollback validate gx-tx-1234567890     # Check if recovery is safe
+  gx rollback cleanup --older-than 7d       # Clean up states older than 7 days")]
+    Rollback {
+        #[command(subcommand)]
+        action: RollbackAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -332,6 +354,34 @@ pub enum ReviewAction {
     },
     /// Purge all GX branches and PRs
     Purge,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RollbackAction {
+    /// List available recovery states
+    List,
+    /// Execute recovery for a specific transaction
+    Execute {
+        #[arg(help = "Transaction ID to recover")]
+        transaction_id: String,
+        #[arg(short, long, help = "Skip validation before executing")]
+        force: bool,
+    },
+    /// Validate recovery operations without executing
+    Validate {
+        #[arg(help = "Transaction ID to validate")]
+        transaction_id: String,
+    },
+    /// Clean up recovery states
+    Cleanup {
+        #[arg(help = "Specific transaction ID to clean up (optional)")]
+        transaction_id: Option<String>,
+        #[arg(
+            long,
+            help = "Clean up states older than specified duration (e.g., 7d, 24h)"
+        )]
+        older_than: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -12,6 +12,7 @@ pub mod github;
 pub mod output;
 pub mod repo;
 pub mod review;
+pub mod rollback;
 pub mod ssh;
 pub mod status;
 pub mod test_utils;

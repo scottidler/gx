@@ -1408,6 +1408,23 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
     }
 }
 
+/// Check if a remote branch exists
+pub fn remote_branch_exists(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["ls-remote", "--heads", "origin", branch_name])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git ls-remote: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(!stdout.trim().is_empty())
+    } else {
+        // If remote check fails, assume branch doesn't exist
+        Ok(false)
+    }
+}
+
 /// Pull latest changes from the remote repository
 pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
     let output = Command::new("git")
