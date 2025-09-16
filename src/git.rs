@@ -26,7 +26,6 @@ pub struct StatusChanges {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum RemoteStatus {
     UpToDate,           // ✅ Local and remote are in sync
     Ahead(u32),         // ⬆️  Local is ahead by N commits
@@ -1041,33 +1040,6 @@ pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Re
     }
 }
 
-/// Stash uncommitted changes
-#[allow(dead_code)]
-pub fn stash_changes(repo_path: &std::path::Path, message: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "stash",
-            "push",
-            "-m",
-            message,
-        ])
-        .output()
-        .context("Failed to execute git stash push")?;
-
-    if output.status.success() {
-        debug!(
-            "Stashed changes in '{}' with message: {}",
-            repo_path.display(),
-            message
-        );
-        Ok(())
-    } else {
-        let error = String::from_utf8_lossy(&output.stderr);
-        Err(eyre::eyre!("Failed to stash changes: {}", error))
-    }
-}
 
 /// Add all changes to staging area
 pub fn add_all_changes(repo_path: &std::path::Path) -> Result<()> {
@@ -1244,28 +1216,6 @@ pub fn checkout_remote_branch(repo_path: &std::path::Path, branch_name: &str) ->
     }
 }
 
-/// Reset repository to HEAD (discard uncommitted changes)
-#[allow(dead_code)]
-pub fn reset_to_head(repo_path: &std::path::Path) -> Result<()> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "reset",
-            "--hard",
-            "HEAD",
-        ])
-        .output()
-        .context("Failed to execute git reset --hard")?;
-
-    if output.status.success() {
-        debug!("Reset repository to HEAD in '{}'", repo_path.display());
-        Ok(())
-    } else {
-        let error = String::from_utf8_lossy(&output.stderr);
-        Err(eyre::eyre!("Failed to reset repository: {}", error))
-    }
-}
 
 /// Pull latest changes from remote
 pub fn pull_latest(repo_path: &std::path::Path) -> Result<()> {

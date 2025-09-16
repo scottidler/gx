@@ -191,8 +191,6 @@ pub struct PrInfo {
 pub enum PrState {
     Open,
     Closed,
-    #[allow(dead_code)]
-    Merged,
 }
 
 /// List PRs by change ID pattern
@@ -334,24 +332,6 @@ pub fn delete_remote_branch(repo_slug: &str, branch_name: &str) -> Result<()> {
     }
 }
 
-/// Get PR diff content
-#[allow(dead_code)]
-pub fn get_pr_diff(repo_slug: &str, pr_number: u64) -> Result<String> {
-    debug!("Getting diff for PR #{pr_number} in {repo_slug}");
-
-    let output = Command::new("gh")
-        .args(["pr", "diff", &pr_number.to_string(), "--repo", repo_slug])
-        .output()
-        .context("Failed to execute gh pr diff")?;
-
-    if output.status.success() {
-        let diff = String::from_utf8(output.stdout).context("Invalid UTF-8 in pr diff output")?;
-        Ok(diff)
-    } else {
-        let error = String::from_utf8_lossy(&output.stderr);
-        Err(eyre::eyre!("Failed to get PR diff: {}", error))
-    }
-}
 
 /// List all branches with a specific prefix (for purge operations)
 pub fn list_branches_with_prefix(repo_slug: &str, prefix: &str) -> Result<Vec<String>> {

@@ -155,47 +155,8 @@ pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<(
     Ok(())
 }
 
-/// Filter files by multiple patterns
-#[allow(dead_code)]
-pub fn filter_files_by_patterns(files: &[PathBuf], patterns: &[String]) -> Vec<PathBuf> {
-    if patterns.is_empty() {
-        return files.to_vec();
-    }
 
-    files
-        .iter()
-        .filter(|file| {
-            let file_str = file.to_string_lossy();
-            patterns.iter().any(|pattern| {
-                if pattern.contains('*') {
-                    // Simple glob matching for *.extension
-                    if let Some(ext) = pattern.strip_prefix("*.") {
-                        file_str.ends_with(&format!(".{ext}"))
-                    } else {
-                        file_str.contains(&pattern.replace('*', ""))
-                    }
-                } else {
-                    file_str.contains(pattern)
-                }
-            })
-        })
-        .cloned()
-        .collect()
-}
 
-/// Check if a file exists and is readable
-#[allow(dead_code)]
-pub fn is_file_accessible(file_path: &Path) -> bool {
-    file_path.is_file() && fs::metadata(file_path).is_ok()
-}
-
-/// Get file size in bytes
-#[allow(dead_code)]
-pub fn get_file_size(file_path: &Path) -> Result<u64> {
-    let metadata = fs::metadata(file_path)
-        .with_context(|| format!("Failed to get metadata for: {}", file_path.display()))?;
-    Ok(metadata.len())
-}
 
 #[cfg(test)]
 mod tests {
@@ -251,30 +212,6 @@ mod tests {
             .any(|f| f.to_string_lossy().contains("helper.rs")));
     }
 
-    #[test]
-    fn test_filter_files_by_patterns() {
-        let files = vec![
-            PathBuf::from("src/main.rs"),
-            PathBuf::from("src/lib.rs"),
-            PathBuf::from("tests/test.rs"),
-            PathBuf::from("README.md"),
-            PathBuf::from("Cargo.toml"),
-        ];
-
-        // Test with patterns
-        let patterns = vec!["*.rs".to_string()];
-        let filtered = filter_files_by_patterns(&files, &patterns);
-        assert_eq!(filtered.len(), 3);
-
-        // Test with multiple patterns
-        let patterns = vec!["*.rs".to_string(), "*.md".to_string()];
-        let filtered = filter_files_by_patterns(&files, &patterns);
-        assert_eq!(filtered.len(), 4);
-
-        // Test with empty patterns
-        let filtered = filter_files_by_patterns(&files, &[]);
-        assert_eq!(filtered.len(), files.len());
-    }
 
     #[test]
     fn test_apply_substitution_to_file() {
@@ -355,29 +292,7 @@ mod tests {
         assert_eq!(content, "nested content");
     }
 
-    #[test]
-    fn test_is_file_accessible() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("accessible.txt");
-        let nonexistent_path = temp_dir.path().join("nonexistent.txt");
 
-        fs::write(&file_path, "content").unwrap();
-
-        assert!(is_file_accessible(&file_path));
-        assert!(!is_file_accessible(&nonexistent_path));
-    }
-
-    #[test]
-    fn test_get_file_size() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("sized.txt");
-        let content = "Hello, world!";
-        fs::write(&file_path, content).unwrap();
-
-        let result = get_file_size(&file_path);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), content.len() as u64);
-    }
 
     #[test]
     fn test_backup_and_restore() {

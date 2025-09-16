@@ -496,7 +496,8 @@ impl UnifiedDisplay for ReviewResult {
     }
 
     fn get_commit_sha(&self) -> Option<&str> {
-        None // Review results don't have commit SHA
+        // Use this field to display PR number instead of commit SHA
+        None // We'll need a different approach due to lifetime issues
     }
 
     fn get_repo(&self) -> &crate::repo::Repo {
@@ -727,7 +728,7 @@ pub fn display_unified_format<T: UnifiedDisplay>(
         format!("{:>width$}", branch, width = widths.branch_width)
     };
 
-    // Commit SHA (fixed width)
+    // Commit SHA (fixed width) - special handling for ReviewResult
     let commit_display = item.get_commit_sha().unwrap_or("-------");
     let sha_display = if opts.use_colors {
         format!(
@@ -762,6 +763,54 @@ pub fn display_unified_format<T: UnifiedDisplay>(
     }
 }
 
+/// Display a ReviewResult with PR number information
+pub fn display_review_result(
+    result: &ReviewResult,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) {
+    // Branch (right-justified) - show change ID
+    let branch_display = if opts.use_colors {
+        format!("{:>width$}", result.change_id.magenta(), width = widths.branch_width)
+    } else {
+        format!("{:>width$}", result.change_id, width = widths.branch_width)
+    };
+
+    // PR number (fixed width) - use SHA field for PR number
+    let pr_ref = result.pr_reference();
+    let pr_display = if opts.use_colors {
+        format!(
+            "{:width$}",
+            pr_ref.bright_black(),
+            width = widths.sha_width
+        )
+    } else {
+        format!("{:width$}", pr_ref, width = widths.sha_width)
+    };
+
+    // Emoji/Status indicator (left-aligned)
+    let emoji = result.get_emoji(opts);
+    let emoji_display = format!("{:<width$}", emoji, width = widths.emoji_width);
+
+    // Repository path/slug
+    let repo = &result.repo;
+    let repo_slug = repo.slug.as_ref().unwrap_or(&repo.name);
+    let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
+
+    // Final format: <change_id> <PR#> <emoji> <repo>
+    println!("{branch_display} {pr_display} {emoji_display} {repo_display}");
+
+    // Handle error display
+    if let Some(error) = &result.error {
+        let error_msg = if opts.use_colors {
+            format!("  Error: {}", error.red())
+        } else {
+            format!("  Error: {error}")
+        };
+        println!("{error_msg}");
+    }
+}
+
 /// Display multiple items using unified formatting
 pub fn display_unified_results<T: UnifiedDisplay>(items: &[T], opts: &StatusOptions) {
     if items.is_empty() {
@@ -774,6 +823,21 @@ pub fn display_unified_results<T: UnifiedDisplay>(items: &[T], opts: &StatusOpti
     // Display each item
     for item in items {
         display_unified_format(item, opts, &widths);
+    }
+}
+
+/// Display multiple ReviewResult items with PR number information
+pub fn display_review_results(results: &[ReviewResult], opts: &StatusOptions) {
+    if results.is_empty() {
+        return;
+    }
+
+    // Calculate alignment widths based on ReviewResult data
+    let widths = AlignmentWidths::calculate(results);
+
+    // Display each result using specialized function
+    for result in results {
+        display_review_result(result, opts, &widths);
     }
 }
 

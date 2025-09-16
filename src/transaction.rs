@@ -55,17 +55,6 @@ impl Transaction {
         debug!("Transaction committed successfully");
     }
 
-    /// Returns true if the transaction has been committed
-    #[allow(dead_code)]
-    pub fn is_committed(&self) -> bool {
-        self.committed
-    }
-
-    /// Returns the number of pending rollback actions
-    #[allow(dead_code)]
-    pub fn pending_actions(&self) -> usize {
-        self.rollbacks.len()
-    }
 }
 
 impl Default for Transaction {
@@ -84,8 +73,6 @@ mod tests {
         let transaction = Transaction::new();
         assert_eq!(transaction.rollbacks.len(), 0);
         assert!(!transaction.committed);
-        assert!(!transaction.is_committed());
-        assert_eq!(transaction.pending_actions(), 0);
     }
 
     #[test]
@@ -93,10 +80,10 @@ mod tests {
         let mut transaction = Transaction::new();
 
         transaction.add_rollback(|| Ok(()));
-        assert_eq!(transaction.pending_actions(), 1);
+        assert_eq!(transaction.rollbacks.len(), 1);
 
         transaction.add_rollback(|| Ok(()));
-        assert_eq!(transaction.pending_actions(), 2);
+        assert_eq!(transaction.rollbacks.len(), 2);
     }
 
     #[test]
@@ -105,12 +92,12 @@ mod tests {
 
         transaction.add_rollback(|| Ok(()));
         transaction.add_rollback(|| Ok(()));
-        assert_eq!(transaction.pending_actions(), 2);
-        assert!(!transaction.is_committed());
+        assert_eq!(transaction.rollbacks.len(), 2);
+        assert!(!transaction.committed);
 
         transaction.commit();
-        assert_eq!(transaction.pending_actions(), 0);
-        assert!(transaction.is_committed());
+        assert_eq!(transaction.rollbacks.len(), 0);
+        assert!(transaction.committed);
     }
 
     #[test]
@@ -138,7 +125,7 @@ mod tests {
         // Actions should be executed in reverse order: 10 first, then 1
         let final_count = *counter.lock().unwrap();
         assert_eq!(final_count, 11);
-        assert_eq!(transaction.pending_actions(), 0);
+        assert_eq!(transaction.rollbacks.len(), 0);
     }
 
     #[test]
@@ -171,7 +158,7 @@ mod tests {
         // Successful actions: 10 + 1 = 11
         let final_count = *counter.lock().unwrap();
         assert_eq!(final_count, 11);
-        assert_eq!(transaction.pending_actions(), 0);
+        assert_eq!(transaction.rollbacks.len(), 0);
     }
 
     #[test]
@@ -180,7 +167,7 @@ mod tests {
 
         // Should not panic on empty rollback
         transaction.rollback();
-        assert_eq!(transaction.pending_actions(), 0);
+        assert_eq!(transaction.rollbacks.len(), 0);
     }
 
     #[test]
@@ -198,7 +185,7 @@ mod tests {
         // First rollback
         transaction.rollback();
         assert_eq!(*counter.lock().unwrap(), 1);
-        assert_eq!(transaction.pending_actions(), 0);
+        assert_eq!(transaction.rollbacks.len(), 0);
 
         // Second rollback should do nothing
         transaction.rollback();
@@ -214,8 +201,8 @@ mod tests {
 
         // Commit after rollback should work but do nothing
         transaction.commit();
-        assert!(transaction.is_committed());
-        assert_eq!(transaction.pending_actions(), 0);
+        assert!(transaction.committed);
+        assert_eq!(transaction.rollbacks.len(), 0);
     }
 
     #[test]
@@ -234,13 +221,13 @@ mod tests {
         transaction.rollback(); // Should do nothing
 
         assert_eq!(*counter.lock().unwrap(), 0);
-        assert!(transaction.is_committed());
+        assert!(transaction.committed);
     }
 
     #[test]
     fn test_default() {
         let transaction = Transaction::default();
-        assert!(!transaction.is_committed());
-        assert_eq!(transaction.pending_actions(), 0);
+        assert!(!transaction.committed);
+        assert_eq!(transaction.rollbacks.len(), 0);
     }
 }

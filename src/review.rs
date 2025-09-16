@@ -2,7 +2,7 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::git;
 use crate::github::{self, PrInfo};
-use crate::output::{display_unified_results, StatusOptions};
+use crate::output::{display_review_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
 use eyre::{Context, Result};
@@ -14,7 +14,6 @@ use std::path::Path;
 pub struct ReviewResult {
     pub repo: Repo,
     pub change_id: String,
-    #[allow(dead_code)]
     pub pr_number: Option<u64>,
     pub action: ReviewAction,
     pub error: Option<String>,
@@ -128,7 +127,7 @@ pub fn process_review_ls_command(
         use_colors: true,
     };
 
-    display_unified_results(&all_results, &opts);
+    display_review_results(&all_results, &opts);
     display_review_summary(&all_results, &opts);
 
     Ok(())
@@ -243,7 +242,7 @@ pub fn process_review_clone_command(
         use_colors: true,
     };
 
-    display_unified_results(&results, &opts);
+    display_review_results(&results, &opts);
     display_review_summary(&results, &opts);
 
     Ok(())
@@ -317,7 +316,7 @@ pub fn process_review_approve_command(
         use_colors: true,
     };
 
-    display_unified_results(&results, &opts);
+    display_review_results(&results, &opts);
     display_review_summary(&results, &opts);
 
     Ok(())
@@ -390,7 +389,7 @@ pub fn process_review_delete_command(
         use_colors: true,
     };
 
-    display_unified_results(&results, &opts);
+    display_review_results(&results, &opts);
     display_review_summary(&results, &opts);
 
     Ok(())
@@ -449,7 +448,7 @@ pub fn process_review_purge_command(
         use_colors: true,
     };
 
-    display_unified_results(&results, &opts);
+    display_review_results(&results, &opts);
     display_review_summary(&results, &opts);
 
     Ok(())
@@ -765,7 +764,16 @@ impl PrInfo {
         match self.state {
             github::PrState::Open => "Open",
             github::PrState::Closed => "Closed",
-            github::PrState::Merged => "Merged",
+        }
+    }
+}
+
+impl ReviewResult {
+    /// Get a formatted PR reference for display
+    pub fn pr_reference(&self) -> String {
+        match self.pr_number {
+            Some(num) => format!("PR#{}", num),
+            None => "-------".to_string(),
         }
     }
 }
