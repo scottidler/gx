@@ -165,7 +165,6 @@ pub fn cleanup_backup_file(backup_path: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// Find all .backup files in a repository (recursive)
 pub fn find_backup_files_recursive(repo_path: &Path) -> Result<Vec<PathBuf>> {
     use walkdir::WalkDir;
@@ -248,7 +247,6 @@ mod tests {
         let result = cleanup_backup_file(&backup_path);
         assert!(result.is_ok());
     }
-
 
     #[test]
     fn test_find_backup_files_recursive() {
