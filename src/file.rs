@@ -155,6 +155,73 @@ pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<(
     Ok(())
 }
 
+/// Clean up a backup file without restoring (for successful operations)
+pub fn cleanup_backup_file(backup_path: &Path) -> Result<()> {
+    if backup_path.exists() {
+        fs::remove_file(backup_path)
+            .with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
+        debug!("Cleaned up backup file: {}", backup_path.display());
+    }
+    Ok(())
+}
+
+/// Find all .backup files in a directory (non-recursive)
+pub fn find_backup_files(dir_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut backup_files = Vec::new();
+
+    if !dir_path.exists() || !dir_path.is_dir() {
+        return Ok(backup_files);
+    }
+
+    for entry in fs::read_dir(dir_path)
+        .with_context(|| format!("Failed to read directory: {}", dir_path.display()))?
+    {
+        let entry = entry.with_context(|| "Failed to read directory entry")?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(extension) = path.extension() {
+                if extension == "backup" {
+                    backup_files.push(path);
+                }
+            }
+        }
+    }
+
+    backup_files.sort();
+    Ok(backup_files)
+}
+
+/// Find all .backup files in a repository (recursive)
+pub fn find_backup_files_recursive(repo_path: &Path) -> Result<Vec<PathBuf>> {
+    use walkdir::WalkDir;
+
+    let mut backup_files = Vec::new();
+
+    for entry in WalkDir::new(repo_path)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip .git directory and other hidden directories (but allow the root)
+            let file_name = e.file_name().to_str().unwrap_or("");
+            e.depth() == 0 || !file_name.starts_with('.')
+        })
+    {
+        let entry = entry.with_context(|| "Failed to read directory entry during backup scan")?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(extension) = path.extension() {
+                if extension == "backup" {
+                    backup_files.push(path.to_path_buf());
+                }
+            }
+        }
+    }
+
+    backup_files.sort();
+    Ok(backup_files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +247,85 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|f| f.to_string_lossy() == "file1.txt"));
         assert!(files.iter().any(|f| f.to_string_lossy() == "file2.txt"));
+    }
+
+    #[test]
+    fn test_cleanup_backup_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let backup_path = temp_dir.path().join("test.txt.backup");
+
+        // Create original file and backup
+        fs::write(&file_path, "original content").unwrap();
+        fs::write(&backup_path, "backup content").unwrap();
+
+        assert!(backup_path.exists());
+
+        // Test cleanup
+        let result = cleanup_backup_file(&backup_path);
+        assert!(result.is_ok());
+        assert!(!backup_path.exists()); // Backup should be removed
+        assert!(file_path.exists()); // Original should remain
+    }
+
+    #[test]
+    fn test_cleanup_backup_file_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let backup_path = temp_dir.path().join("nonexistent.backup");
+
+        // Test cleanup of non-existent file (should not error)
+        let result = cleanup_backup_file(&backup_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_find_backup_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path();
+
+        // Create test files including backup files
+        fs::write(dir_path.join("file1.txt"), "content1").unwrap();
+        fs::write(dir_path.join("file1.txt.backup"), "backup1").unwrap();
+        fs::write(dir_path.join("file2.js.backup"), "backup2").unwrap();
+        fs::write(dir_path.join("normal.md"), "normal").unwrap();
+
+        let backup_files = find_backup_files(dir_path).unwrap();
+        assert_eq!(backup_files.len(), 2);
+
+        let backup_names: Vec<_> = backup_files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(backup_names.contains(&"file1.txt.backup"));
+        assert!(backup_names.contains(&"file2.js.backup"));
+    }
+
+    #[test]
+    fn test_find_backup_files_recursive() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+
+        // Create nested structure with backup files
+        fs::create_dir_all(repo_path.join("src").join("utils")).unwrap();
+        fs::write(repo_path.join("file1.txt.backup"), "backup1").unwrap();
+        fs::write(repo_path.join("src").join("file2.rs.backup"), "backup2").unwrap();
+        fs::write(repo_path.join("src").join("utils").join("file3.ts.backup"), "backup3").unwrap();
+
+        // Create .git directory with backup files (should be ignored)
+        fs::create_dir_all(repo_path.join(".git")).unwrap();
+        fs::write(repo_path.join(".git").join("config.backup"), "git backup").unwrap();
+
+        let backup_files = find_backup_files_recursive(repo_path).unwrap();
+        assert_eq!(backup_files.len(), 3); // Should not include .git/config.backup
+
+        let backup_names: Vec<_> = backup_files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(backup_names.contains(&"file1.txt.backup"));
+        assert!(backup_names.contains(&"file2.rs.backup"));
+        assert!(backup_names.contains(&"file3.ts.backup"));
+        assert!(!backup_names.contains(&"config.backup"));
     }
 
     #[test]

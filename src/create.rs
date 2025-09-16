@@ -499,14 +499,30 @@ fn process_single_repo(
                 CreateAction::Committed
             };
 
-            transaction.commit();
-            CreateResult {
-                repo: repo.clone(),
-                change_id: change_id.to_string(),
-                action: final_action,
-                files_affected,
-                substitution_stats,
-                error: None,
+            // Use preflight check before committing
+            match transaction.commit_with_preflight_check(repo_path) {
+                Ok(()) => {
+                    CreateResult {
+                        repo: repo.clone(),
+                        change_id: change_id.to_string(),
+                        action: final_action,
+                        files_affected,
+                        substitution_stats,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    warn!("Preflight check failed, rolling back transaction: {e}");
+                    transaction.rollback();
+                    CreateResult {
+                        repo: repo.clone(),
+                        change_id: change_id.to_string(),
+                        action: CreateAction::DryRun,
+                        files_affected: Vec::new(),
+                        substitution_stats,
+                        error: Some(format!("Preflight check failed: {e}")),
+                    }
+                }
             }
         }
         Err(e) => {
@@ -617,6 +633,14 @@ fn apply_delete_change(
         let full_path_clone = full_path.clone();
         transaction
             .add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
+
+        // Add cleanup action for successful operations
+        let cleanup_backup_path = backup_path.clone();
+        transaction.add_rollback_with_type(
+            move || file::cleanup_backup_file(&cleanup_backup_path),
+            format!("Cleanup backup file: {}", backup_path.display()),
+            crate::transaction::RollbackType::FileOperation,
+        );
     }
 
     Ok(())
@@ -676,6 +700,14 @@ fn apply_substitution_change(
                 transaction.add_rollback(move || {
                     file::restore_from_backup(&backup_path_clone, &full_path_clone)
                 });
+
+                // Add cleanup action for successful operations
+                let cleanup_backup_path = backup_path.clone();
+                transaction.add_rollback_with_type(
+                    move || file::cleanup_backup_file(&cleanup_backup_path),
+                    format!("Cleanup backup file: {}", backup_path.display()),
+                    crate::transaction::RollbackType::FileOperation,
+                );
 
                 stats.files_changed += 1;
                 // Count matches in the original content
@@ -763,6 +795,14 @@ fn apply_regex_change(
                 transaction.add_rollback(move || {
                     file::restore_from_backup(&backup_path_clone, &full_path_clone)
                 });
+
+                // Add cleanup action for successful operations
+                let cleanup_backup_path = backup_path.clone();
+                transaction.add_rollback_with_type(
+                    move || file::cleanup_backup_file(&cleanup_backup_path),
+                    format!("Cleanup backup file: {}", backup_path.display()),
+                    crate::transaction::RollbackType::FileOperation,
+                );
 
                 stats.files_changed += 1;
                 // Count regex matches in the original content

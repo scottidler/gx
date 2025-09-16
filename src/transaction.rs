@@ -181,6 +181,12 @@ impl Transaction {
         let mut failed_rollbacks = 0;
 
         while let Some(rollback_action) = self.rollbacks.pop() {
+            // Skip cleanup actions during rollback - they should only run on commit
+            if rollback_action.description.contains("Cleanup backup file:") {
+                debug!("Skipping cleanup action during rollback: {}", rollback_action.description);
+                continue;
+            }
+
             debug!(
                 "Executing rollback: {} (type: {:?})",
                 rollback_action.description, rollback_action.operation_type
@@ -262,6 +268,9 @@ impl Transaction {
 
     /// Marks the transaction as committed and clears the rollback stack
     pub fn commit(&mut self) {
+        // Execute cleanup actions before marking as committed
+        self.execute_cleanup_actions();
+
         self.committed = true;
         let cleared_count = self.rollbacks.len();
         self.rollbacks.clear();
@@ -270,6 +279,93 @@ impl Transaction {
         // Clean up recovery state if it exists
         if self.recovery_enabled {
             let _ = self.cleanup_recovery_state();
+        }
+    }
+
+    /// Commit with preflight check for backup files
+    pub fn commit_with_preflight_check(&mut self, repo_path: &Path) -> Result<()> {
+        // Run preflight check for backup files
+        self.run_backup_preflight_check(repo_path)?;
+
+        // Proceed with normal commit
+        self.commit();
+        Ok(())
+    }
+
+    /// Run preflight check to detect and report backup files before commit
+    fn run_backup_preflight_check(&self, repo_path: &Path) -> Result<()> {
+        use crate::file::find_backup_files_recursive;
+
+        let backup_files = find_backup_files_recursive(repo_path)?;
+
+        if !backup_files.is_empty() {
+            debug!("Preflight check: Found {} backup files before commit", backup_files.len());
+
+            // Count how many of these backup files we're responsible for cleaning up
+            let cleanup_actions: Vec<_> = self.rollbacks
+                .iter()
+                .filter(|action| action.description.contains("Cleanup backup file:"))
+                .collect();
+
+            if backup_files.len() > cleanup_actions.len() {
+                // There are more backup files than we have cleanup actions for
+                warn!(
+                    "Preflight check: Found {} backup files, but only {} cleanup actions registered. Some backup files may not be cleaned up:",
+                    backup_files.len(),
+                    cleanup_actions.len()
+                );
+
+                for backup_file in &backup_files {
+                    let relative_path = backup_file.strip_prefix(repo_path)
+                        .unwrap_or(backup_file);
+                    warn!("  - {}", relative_path.display());
+                }
+            } else {
+                debug!(
+                    "Preflight check: {} backup files will be cleaned up by {} cleanup actions",
+                    backup_files.len(),
+                    cleanup_actions.len()
+                );
+
+                if log::log_enabled!(log::Level::Debug) {
+                    for backup_file in &backup_files {
+                        let relative_path = backup_file.strip_prefix(repo_path)
+                            .unwrap_or(backup_file);
+                        debug!("  Will clean up: {}", relative_path.display());
+                    }
+                }
+            }
+        } else {
+            debug!("Preflight check: No backup files found");
+        }
+
+        Ok(())
+    }
+
+    /// Execute cleanup actions (like removing backup files) on successful commit
+    fn execute_cleanup_actions(&mut self) {
+        let mut successful_cleanups = 0;
+        let mut failed_cleanups = 0;
+
+        // Look for backup cleanup actions and execute them
+        for rollback_action in &self.rollbacks {
+            if rollback_action.description.contains("Cleanup backup file:") {
+                debug!("Executing cleanup: {}", rollback_action.description);
+                match (rollback_action.action)() {
+                    Ok(()) => {
+                        debug!("✓ Cleanup succeeded: {}", rollback_action.description);
+                        successful_cleanups += 1;
+                    }
+                    Err(e) => {
+                        warn!("✗ Cleanup failed: {} - Error: {e:?}", rollback_action.description);
+                        failed_cleanups += 1;
+                    }
+                }
+            }
+        }
+
+        if successful_cleanups > 0 || failed_cleanups > 0 {
+            debug!("Cleanup completed: {successful_cleanups} successes, {failed_cleanups} failures");
         }
     }
 
