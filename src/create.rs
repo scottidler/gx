@@ -553,7 +553,7 @@ fn apply_substitution_change(
     // Remove duplicates
     all_files.sort();
     all_files.dedup();
-    
+
     stats.files_scanned = all_files.len();
 
     for file_path in all_files {
@@ -585,7 +585,7 @@ fn apply_substitution_change(
                 transaction.add_rollback(move || {
                     file::restore_from_backup(&backup_path_clone, &full_path_clone)
                 });
-                
+
                 stats.files_changed += 1;
                 // Count matches in the original content
                 let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
@@ -632,7 +632,7 @@ fn apply_regex_change(
     // Remove duplicates
     all_files.sort();
     all_files.dedup();
-    
+
     stats.files_scanned = all_files.len();
 
     for file_path in all_files {
@@ -664,7 +664,7 @@ fn apply_regex_change(
                 transaction.add_rollback(move || {
                     file::restore_from_backup(&backup_path_clone, &full_path_clone)
                 });
-                
+
                 stats.files_changed += 1;
                 // Count regex matches in the original content
                 let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
@@ -765,7 +765,7 @@ fn create_pull_request(
 fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
     // Check if any results have substitution stats (indicating substitution operations)
     let has_substitution_stats = results.iter().any(|r| r.substitution_stats.is_some());
-    
+
     if !has_substitution_stats {
         return; // No substitution operations, skip analysis
     }
@@ -776,25 +776,25 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
         .filter_map(|r| r.substitution_stats.as_ref())
         .map(|s| s.files_scanned)
         .sum::<usize>();
-    
+
     let files_changed = results
         .iter()
         .filter_map(|r| r.substitution_stats.as_ref())
         .map(|s| s.files_changed)
         .sum::<usize>();
-    
+
     let files_no_matches = results
         .iter()
         .filter_map(|r| r.substitution_stats.as_ref())
         .map(|s| s.files_no_matches)
         .sum::<usize>();
-    
+
     let files_no_change = results
         .iter()
         .filter_map(|r| r.substitution_stats.as_ref())
         .map(|s| s.files_no_change)
         .sum::<usize>();
-    
+
     let total_matches = results
         .iter()
         .filter_map(|r| r.substitution_stats.as_ref())
@@ -815,7 +815,7 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
             if files_no_change > 0 {
                 println!("   🔄 Files matched but unchanged: {files_no_change}");
             }
-            
+
             if files_changed == 0 && total_files_scanned > 0 {
                 println!("   ⚠️  No files were modified by the pattern");
             }
@@ -832,7 +832,7 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
             if files_no_change > 0 {
                 println!("   Files matched but unchanged: {files_no_change}");
             }
-            
+
             if files_changed == 0 && total_files_scanned > 0 {
                 println!("   Warning: No files were modified by the pattern");
             }

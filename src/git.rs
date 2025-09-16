@@ -948,13 +948,13 @@ fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChan
 pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
     // Check if branch already exists locally
     if branch_exists_locally(repo_path, branch_name)? {
-        debug!("Branch '{}' already exists locally, switching to it", branch_name);
+        debug!("Branch '{branch_name}' already exists locally, switching to it");
         return switch_branch(repo_path, branch_name);
     }
 
     // Check if branch exists on remote
     if branch_exists_on_remote(repo_path, branch_name)? {
-        debug!("Branch '{}' exists on remote, checking out", branch_name);
+        debug!("Branch '{branch_name}' exists on remote, checking out");
         return checkout_remote_branch(repo_path, branch_name);
     }
 
