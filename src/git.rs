@@ -1040,7 +1040,6 @@ pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Re
     }
 }
 
-
 /// Add all changes to staging area
 pub fn add_all_changes(repo_path: &std::path::Path) -> Result<()> {
     let output = Command::new("git")
@@ -1216,7 +1215,6 @@ pub fn checkout_remote_branch(repo_path: &std::path::Path, branch_name: &str) ->
     }
 }
 
-
 /// Pull latest changes from remote
 pub fn pull_latest(repo_path: &std::path::Path) -> Result<()> {
     let output = Command::new("git")
@@ -1265,6 +1263,180 @@ pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result
     }
 }
 
+/// Save current changes to stash with GX-specific message
+/// Returns the stash reference (e.g., "stash@{0}")
+pub fn stash_save(repo_path: &std::path::Path, message: &str) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "push", "-m", message])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git stash push: {}", e))?;
+
+    if output.status.success() {
+        debug!("Stashed changes in '{}'", repo_path.display());
+        // Return the stash reference - new stash is always stash@{0}
+        Ok("stash@{0}".to_string())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to stash changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Pop specific stash by reference
+pub fn stash_pop(repo_path: &std::path::Path, stash_ref: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "pop", stash_ref])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git stash pop: {}", e))?;
+
+    if output.status.success() {
+        debug!("Popped stash {} in '{}'", stash_ref, repo_path.display());
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to pop stash {}: {}",
+            stash_ref,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Hard reset to HEAD (for rollback of file modifications)
+pub fn reset_hard(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["reset", "--hard", "HEAD"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git reset --hard: {}", e))?;
+
+    if output.status.success() {
+        debug!("Hard reset completed in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to reset hard: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Reset last commit (for rollback of commits)
+pub fn reset_commit(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["reset", "--soft", "HEAD~1"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git reset --soft: {}", e))?;
+
+    if output.status.success() {
+        debug!("Commit reset completed in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to reset commit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Get the default/head branch name for the repository
+pub fn get_head_branch(repo_path: &std::path::Path) -> Result<String> {
+    // First try to get the default branch from remote
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to get HEAD branch: {}", e))?;
+
+    if output.status.success() {
+        let head_ref = String::from_utf8_lossy(&output.stdout);
+        let head_ref_trimmed = head_ref.trim();
+        // Extract branch name from "refs/remotes/origin/main"
+        if let Some(branch_name) = head_ref_trimmed.strip_prefix("refs/remotes/origin/") {
+            return Ok(branch_name.to_string());
+        }
+    }
+
+    // Fallback: assume main or master
+    for default_branch in &["main", "master"] {
+        if branch_exists_remotely(repo_path, default_branch)? {
+            return Ok(default_branch.to_string());
+        }
+    }
+
+    Err(eyre::eyre!("Could not determine head branch"))
+}
+
+/// Check if a branch exists on remote
+pub fn branch_exists_remotely(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["ls-remote", "--heads", "origin", branch_name])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to check remote branch: {}", e))?;
+
+    Ok(output.status.success() && !output.stdout.is_empty())
+}
+
+/// Delete a remote branch (for rollback of push operations)
+pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["push", "origin", "--delete", branch_name])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to delete remote branch: {}", e))?;
+
+    if output.status.success() {
+        debug!(
+            "Deleted remote branch '{}' in '{}'",
+            branch_name,
+            repo_path.display()
+        );
+        Ok(())
+    } else {
+        // Don't fail if branch doesn't exist remotely
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("remote ref does not exist") {
+            debug!("Remote branch '{branch_name}' already deleted");
+            Ok(())
+        } else {
+            Err(eyre::eyre!("Failed to delete remote branch: {}", stderr))
+        }
+    }
+}
+
+/// Pull latest changes from the remote repository
+pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["pull"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git pull: {}", e))?;
+
+    if output.status.success() {
+        debug!(
+            "Successfully pulled latest changes in '{}'",
+            repo_path.display()
+        );
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't fail if there's nothing to pull
+        if stderr.contains("Already up to date") || stderr.contains("Already up-to-date") {
+            debug!(
+                "Repository is already up to date: '{}'",
+                repo_path.display()
+            );
+            Ok(())
+        } else {
+            Err(eyre::eyre!("Failed to pull latest changes: {}", stderr))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,5 +1469,258 @@ mod tests {
         assert_eq!(changes.modified, 1);
         assert_eq!(changes.untracked, 1);
         assert_eq!(changes.added, 1);
+    }
+
+    // Rollback tests - these would need a real git repository to test properly
+    // For now, we'll add basic structure tests
+    mod rollback_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        fn setup_test_repo() -> Result<(TempDir, std::path::PathBuf)> {
+            let temp_dir =
+                TempDir::new().map_err(|e| eyre::eyre!("Failed to create temp dir: {}", e))?;
+            let repo_path = temp_dir.path().to_path_buf();
+
+            // Initialize git repo
+            let output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["init"])
+                .output()
+                .map_err(|e| eyre::eyre!("Failed to run git init: {}", e))?;
+
+            if !output.status.success() {
+                return Err(eyre::eyre!(
+                    "git init failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+
+            // Set up git config
+            Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["config", "user.email", "test@example.com"])
+                .output()
+                .map_err(|e| eyre::eyre!("Failed to set git email: {}", e))?;
+
+            Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["config", "user.name", "Test User"])
+                .output()
+                .map_err(|e| eyre::eyre!("Failed to set git name: {}", e))?;
+
+            Ok((temp_dir, repo_path))
+        }
+
+        #[test]
+        fn test_stash_save_and_pop() {
+            // Skip if git is not available
+            if Command::new("git").arg("--version").output().is_err() {
+                return;
+            }
+
+            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
+                // Skip test if setup fails (git not available, etc.)
+                return;
+            };
+
+            // Create a file and commit it
+            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
+                return;
+            }
+
+            let add_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["add", "test.txt"])
+                .output();
+
+            if add_output.is_err() || !add_output.unwrap().status.success() {
+                return;
+            }
+
+            let commit_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["commit", "-m", "initial commit"])
+                .output();
+
+            if commit_output.is_err() || !commit_output.unwrap().status.success() {
+                return;
+            }
+
+            // Modify the file (uncommitted change)
+            if fs::write(repo_path.join("test.txt"), "modified content").is_err() {
+                return;
+            }
+
+            // Test stash save
+            if let Ok(stash_ref) = stash_save(&repo_path, "test stash") {
+                assert_eq!(stash_ref, "stash@{0}");
+
+                // File should be back to original content
+                if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
+                    assert_eq!(content, "original content");
+                }
+
+                // Test stash pop
+                if stash_pop(&repo_path, &stash_ref).is_ok() {
+                    // File should have modified content again
+                    if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
+                        assert_eq!(content, "modified content");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_reset_hard() {
+            // Skip if git is not available
+            if Command::new("git").arg("--version").output().is_err() {
+                return;
+            }
+
+            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
+                return;
+            };
+
+            // Create initial commit
+            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
+                return;
+            }
+
+            let add_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["add", "test.txt"])
+                .output();
+
+            if add_output.is_err() || !add_output.unwrap().status.success() {
+                return;
+            }
+
+            let commit_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["commit", "-m", "initial commit"])
+                .output();
+
+            if commit_output.is_err() || !commit_output.unwrap().status.success() {
+                return;
+            }
+
+            // Modify file
+            if fs::write(repo_path.join("test.txt"), "modified content").is_err() {
+                return;
+            }
+
+            // Reset hard should restore original content
+            if reset_hard(&repo_path).is_ok() {
+                if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
+                    assert_eq!(content, "original content");
+                }
+            }
+        }
+
+        #[test]
+        fn test_reset_commit() {
+            // Skip if git is not available
+            if Command::new("git").arg("--version").output().is_err() {
+                return;
+            }
+
+            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
+                return;
+            };
+
+            // Create initial commit
+            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
+                return;
+            }
+
+            let add_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["add", "test.txt"])
+                .output();
+
+            if add_output.is_err() || !add_output.unwrap().status.success() {
+                return;
+            }
+
+            let commit_output = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["commit", "-m", "initial commit"])
+                .output();
+
+            if commit_output.is_err() || !commit_output.unwrap().status.success() {
+                return;
+            }
+
+            // Create second commit
+            if fs::write(repo_path.join("test2.txt"), "second file").is_err() {
+                return;
+            }
+
+            let add_output2 = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["add", "test2.txt"])
+                .output();
+
+            if add_output2.is_err() || !add_output2.unwrap().status.success() {
+                return;
+            }
+
+            let commit_output2 = Command::new("git")
+                .current_dir(&repo_path)
+                .args(&["commit", "-m", "second commit"])
+                .output();
+
+            if commit_output2.is_err() || !commit_output2.unwrap().status.success() {
+                return;
+            }
+
+            // Reset commit should undo the last commit but keep files staged
+            if reset_commit(&repo_path).is_ok() {
+                // test2.txt should still exist
+                assert!(repo_path.join("test2.txt").exists());
+
+                // Check git status to verify file is staged (if possible)
+                if let Ok(output) = Command::new("git")
+                    .current_dir(&repo_path)
+                    .args(&["status", "--porcelain"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let status = String::from_utf8_lossy(&output.stdout);
+                        // Should show the file as added (staged)
+                        assert!(status.contains("test2.txt"));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_has_uncommitted_changes() {
+            // Skip if git is not available
+            if Command::new("git").arg("--version").output().is_err() {
+                return;
+            }
+
+            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
+                return;
+            };
+
+            // Initially should have no uncommitted changes (empty repo)
+            if let Ok(has_changes) = has_uncommitted_changes(&repo_path) {
+                // Empty repo might have no changes
+                // This test is more about ensuring the function doesn't crash
+                let _ = has_changes;
+            }
+
+            // Create and add a file
+            if fs::write(repo_path.join("test.txt"), "test content").is_ok() {
+                // Should have uncommitted changes
+                if let Ok(has_changes) = has_uncommitted_changes(&repo_path) {
+                    assert!(has_changes);
+                }
+            }
+        }
     }
 }

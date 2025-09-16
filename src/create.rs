@@ -227,7 +227,7 @@ pub fn process_create_command(
     Ok(())
 }
 
-/// Process create command for a single repository
+/// Process create command for a single repository with comprehensive rollback
 fn process_single_repo(
     repo: &Repo,
     change_id: &str,
@@ -242,24 +242,36 @@ fn process_single_repo(
     let repo_path = &repo.path;
     let mut files_affected = Vec::new();
     let mut diff_parts = Vec::new();
-
-    // Check if repository has uncommitted changes
+    let mut _stash_ref: Option<String> = None;
+    // 1. Handle uncommitted changes with stash
     match git::has_uncommitted_changes(repo_path) {
         Ok(true) => {
-            return CreateResult {
-                repo: repo.clone(),
-                change_id: change_id.to_string(),
-                action: CreateAction::DryRun,
-                files_affected: Vec::new(),
-                substitution_stats: None,
-
-                error: Some(
-                    "Repository has uncommitted changes. Please commit or stash them first."
-                        .to_string(),
-                ),
-            };
+            debug!("Found uncommitted changes, stashing...");
+            match git::stash_save(repo_path, &format!("GX auto-stash for {change_id}")) {
+                Ok(stash) => {
+                    _stash_ref = Some(stash.clone());
+                    transaction.add_rollback({
+                        let repo_path = repo_path.clone();
+                        let stash_ref = stash.clone();
+                        move || {
+                            debug!("Rolling back: restoring stashed changes");
+                            git::stash_pop(&repo_path, &stash_ref)
+                        }
+                    });
+                }
+                Err(e) => {
+                    return CreateResult {
+                        repo: repo.clone(),
+                        change_id: change_id.to_string(),
+                        action: CreateAction::DryRun,
+                        files_affected: Vec::new(),
+                        substitution_stats: None,
+                        error: Some(format!("Failed to stash changes: {e}")),
+                    };
+                }
+            }
         }
-        Ok(false) => {} // Good, no uncommitted changes
+        Ok(false) => {} // No uncommitted changes
         Err(e) => {
             return CreateResult {
                 repo: repo.clone(),
@@ -267,29 +279,76 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
                 substitution_stats: None,
-
                 error: Some(format!("Failed to check repository status: {e}")),
             };
         }
     }
 
-    // Get current branch for rollback
+    // 2. Get current branch and switch to head branch if needed
     let original_branch = match git::get_current_branch_name(repo_path) {
-        Ok(branch) => branch,
+        Ok(branch) => Some(branch),
         Err(e) => {
+            transaction.rollback();
             return CreateResult {
                 repo: repo.clone(),
                 change_id: change_id.to_string(),
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
                 substitution_stats: None,
-
                 error: Some(format!("Failed to get current branch: {e}")),
             };
         }
     };
 
-    // Apply changes based on change type
+    // 3. Switch to head branch if not already on it
+    match git::get_head_branch(repo_path) {
+        Ok(head) => {
+            if let Some(ref current) = original_branch {
+                if current != &head {
+                    debug!("Switching from '{current}' to head branch '{head}'");
+                    if let Err(e) = git::switch_branch(repo_path, &head) {
+                        transaction.rollback();
+                        return CreateResult {
+                            repo: repo.clone(),
+                            change_id: change_id.to_string(),
+                            action: CreateAction::DryRun,
+                            files_affected: Vec::new(),
+                            substitution_stats: None,
+                            error: Some(format!("Failed to switch to head branch: {e}")),
+                        };
+                    }
+
+                    // Add rollback to switch back to original branch
+                    transaction.add_rollback({
+                        let repo_path = repo_path.clone();
+                        let original_branch = current.clone();
+                        move || {
+                            debug!("Rolling back: switching back to original branch '{original_branch}'");
+                            git::switch_branch(&repo_path, &original_branch)
+                        }
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            debug!("Could not determine head branch, continuing with current branch: {e}");
+        }
+    }
+
+    // 4. Pull latest changes
+    if let Err(e) = git::pull_latest_changes(repo_path) {
+        transaction.rollback();
+        return CreateResult {
+            repo: repo.clone(),
+            change_id: change_id.to_string(),
+            action: CreateAction::DryRun,
+            files_affected: Vec::new(),
+            substitution_stats: None,
+            error: Some(format!("Failed to pull latest changes: {e}")),
+        };
+    }
+
+    // 5. Apply changes based on change type
     let mut substitution_stats = None;
     let change_result = match change {
         Change::Add(path, content) => apply_add_change(
@@ -299,14 +358,16 @@ fn process_single_repo(
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
-        ).map(|_| ()),
+        )
+        .map(|_| ()),
         Change::Delete => apply_delete_change(
             repo_path,
             file_patterns,
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
-        ).map(|_| ()),
+        )
+        .map(|_| ()),
         Change::Sub(pattern, replacement) => {
             match apply_substitution_change(
                 repo_path,
@@ -343,6 +404,17 @@ fn process_single_repo(
         }
     };
 
+    // Add file modification rollback after changes are applied
+    if !files_affected.is_empty() {
+        transaction.add_rollback({
+            let repo_path = repo_path.clone();
+            move || {
+                debug!("Rolling back: resetting file modifications");
+                git::reset_hard(&repo_path)
+            }
+        });
+    }
+
     if let Err(e) = change_result {
         transaction.rollback();
         return CreateResult {
@@ -351,25 +423,24 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
             substitution_stats,
-
             error: Some(format!("Failed to apply changes: {e}")),
         };
     }
 
     // If no files were affected, return early
     if files_affected.is_empty() {
+        transaction.rollback();
         return CreateResult {
             repo: repo.clone(),
             change_id: change_id.to_string(),
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
             substitution_stats,
-
             error: None,
         };
     }
 
-    // If no commit message, this is a dry run
+    // If no commit message, this is a dry run - rollback and return
     if commit_message.is_none() {
         transaction.rollback();
         return CreateResult {
@@ -378,16 +449,15 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected,
             substitution_stats,
-
             error: None,
         };
     }
 
-    // Create branch and commit changes
-    let commit_result = commit_changes(
+    // 6. Create branch and commit changes with comprehensive rollback
+    let commit_result = commit_changes_with_rollback(
         repo_path,
         change_id,
-        &original_branch,
+        original_branch.as_deref().unwrap_or("main"),
         commit_message.unwrap(),
         &mut transaction,
     );
@@ -413,7 +483,6 @@ fn process_single_repo(
                 action: final_action,
                 files_affected,
                 substitution_stats,
-
                 error: None,
             }
         }
@@ -425,7 +494,6 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected,
                 substitution_stats,
-
                 error: Some(format!("Failed to commit changes: {e}")),
             }
         }
@@ -593,12 +661,20 @@ fn apply_substitution_change(
             }
             diff::SubstitutionResult::NoMatches => {
                 // Pattern didn't match anything in this file
-                debug!("No matches found for pattern '{}' in {}", pattern, file_path.display());
+                debug!(
+                    "No matches found for pattern '{}' in {}",
+                    pattern,
+                    file_path.display()
+                );
                 stats.files_no_matches += 1;
             }
             diff::SubstitutionResult::NoChange => {
                 // Pattern matched but replacement resulted in no changes
-                debug!("Pattern '{}' matched but no changes resulted in {}", pattern, file_path.display());
+                debug!(
+                    "Pattern '{}' matched but no changes resulted in {}",
+                    pattern,
+                    file_path.display()
+                );
                 stats.files_no_change += 1;
                 // Count matches even though no changes were made
                 let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
@@ -674,12 +750,20 @@ fn apply_regex_change(
             }
             diff::SubstitutionResult::NoMatches => {
                 // Pattern didn't match anything in this file
-                debug!("No matches found for regex pattern '{}' in {}", pattern, file_path.display());
+                debug!(
+                    "No matches found for regex pattern '{}' in {}",
+                    pattern,
+                    file_path.display()
+                );
                 stats.files_no_matches += 1;
             }
             diff::SubstitutionResult::NoChange => {
                 // Pattern matched but replacement resulted in no changes
-                debug!("Regex pattern '{}' matched but no changes resulted in {}", pattern, file_path.display());
+                debug!(
+                    "Regex pattern '{}' matched but no changes resulted in {}",
+                    pattern,
+                    file_path.display()
+                );
                 stats.files_no_change += 1;
                 // Count matches even though no changes were made
                 let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
@@ -693,8 +777,8 @@ fn apply_regex_change(
     Ok(stats)
 }
 
-/// Commit changes to a new branch
-fn commit_changes(
+/// Enhanced commit function with comprehensive rollback
+fn commit_changes_with_rollback(
     repo_path: &Path,
     change_id: &str,
     original_branch: &str,
@@ -702,31 +786,33 @@ fn commit_changes(
     transaction: &mut Transaction,
 ) -> Result<()> {
     // Check if branch existed before we try to create it
-    let branch_existed = git::branch_exists_locally(repo_path, change_id)
-        .unwrap_or(false);
+    let branch_existed = git::branch_exists_locally(repo_path, change_id).unwrap_or(false);
 
     // Create and switch to branch (or switch to existing)
     git::create_branch(repo_path, change_id)
         .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
 
-    // Add rollback to switch back to original branch
-    let original_branch = original_branch.to_string();
-    let repo_path_clone = repo_path.to_path_buf();
-    let change_id_clone = change_id.to_string();
-    transaction.add_rollback(move || {
-        // Switch back to original branch
-        if let Err(e) = git::switch_branch(&repo_path_clone, &original_branch) {
-            warn!("Failed to switch back to original branch {original_branch}: {e}");
-        }
-
-        // Only delete the branch if we created it (not if it existed before)
-        if !branch_existed {
-            if let Err(e) = git::delete_local_branch(&repo_path_clone, &change_id_clone) {
-                warn!("Failed to delete branch {change_id_clone}: {e}");
+    // Add branch rollback
+    transaction.add_rollback({
+        let repo_path = repo_path.to_path_buf();
+        let original_branch = original_branch.to_string();
+        let change_id = change_id.to_string();
+        move || {
+            debug!("Rolling back: switching back to original branch and cleaning up");
+            // Switch back to original branch
+            if let Err(e) = git::switch_branch(&repo_path, &original_branch) {
+                warn!("Failed to switch back to original branch {original_branch}: {e}");
             }
-        }
 
-        Ok(())
+            // Only delete the branch if we created it (not if it existed before)
+            if !branch_existed {
+                if let Err(e) = git::delete_local_branch(&repo_path, &change_id) {
+                    warn!("Failed to delete branch {change_id}: {e}");
+                }
+            }
+
+            Ok(())
+        }
     });
 
     // Stage all changes
@@ -735,8 +821,27 @@ fn commit_changes(
     // Commit changes
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
+    // Add commit rollback
+    transaction.add_rollback({
+        let repo_path = repo_path.to_path_buf();
+        move || {
+            debug!("Rolling back: resetting commit");
+            git::reset_commit(&repo_path)
+        }
+    });
+
     // Push branch to remote
     git::push_branch(repo_path, change_id).context("Failed to push branch")?;
+
+    // Add push rollback (delete remote branch)
+    transaction.add_rollback({
+        let repo_path = repo_path.to_path_buf();
+        let change_id = change_id.to_string();
+        move || {
+            debug!("Rolling back: deleting remote branch '{change_id}'");
+            git::delete_remote_branch(&repo_path, &change_id)
+        }
+    });
 
     Ok(())
 }

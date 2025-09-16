@@ -772,7 +772,7 @@ impl ReviewResult {
     /// Get a formatted PR reference for display
     pub fn pr_reference(&self) -> String {
         match self.pr_number {
-            Some(num) => format!("PR#{}", num),
+            Some(num) => format!("PR#{num}"),
             None => "-------".to_string(),
         }
     }

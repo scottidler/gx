@@ -100,8 +100,6 @@ pub fn apply_regex_substitution(
     Ok(SubstitutionResult::Changed(updated, diff))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,10 +154,6 @@ mod tests {
         assert!(result.contains("new_line1"));
         assert!(result.contains("new_line2"));
     }
-
-
-
-
 
     #[test]
     fn test_apply_substitution() {

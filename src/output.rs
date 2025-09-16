@@ -771,7 +771,11 @@ pub fn display_review_result(
 ) {
     // Branch (right-justified) - show change ID
     let branch_display = if opts.use_colors {
-        format!("{:>width$}", result.change_id.magenta(), width = widths.branch_width)
+        format!(
+            "{:>width$}",
+            result.change_id.magenta(),
+            width = widths.branch_width
+        )
     } else {
         format!("{:>width$}", result.change_id, width = widths.branch_width)
     };
@@ -779,11 +783,7 @@ pub fn display_review_result(
     // PR number (fixed width) - use SHA field for PR number
     let pr_ref = result.pr_reference();
     let pr_display = if opts.use_colors {
-        format!(
-            "{:width$}",
-            pr_ref.bright_black(),
-            width = widths.sha_width
-        )
+        format!("{:width$}", pr_ref.bright_black(), width = widths.sha_width)
     } else {
         format!("{:width$}", pr_ref, width = widths.sha_width)
     };

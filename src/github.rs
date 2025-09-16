@@ -332,7 +332,6 @@ pub fn delete_remote_branch(repo_slug: &str, branch_name: &str) -> Result<()> {
     }
 }
 
-
 /// List all branches with a specific prefix (for purge operations)
 pub fn list_branches_with_prefix(repo_slug: &str, prefix: &str) -> Result<Vec<String>> {
     debug!("Listing branches with prefix '{prefix}' in {repo_slug}");

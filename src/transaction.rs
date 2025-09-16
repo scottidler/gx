@@ -54,7 +54,6 @@ impl Transaction {
         self.rollbacks.clear();
         debug!("Transaction committed successfully");
     }
-
 }
 
 impl Default for Transaction {

@@ -155,9 +155,6 @@ pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<(
     Ok(())
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +209,6 @@ mod tests {
             .any(|f| f.to_string_lossy().contains("helper.rs")));
     }
 
-
     #[test]
     fn test_apply_substitution_to_file() {
         let temp_dir = TempDir::new().unwrap();
@@ -223,7 +219,10 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert!(matches!(result, crate::diff::SubstitutionResult::Changed(_, _)));
+        assert!(matches!(
+            result,
+            crate::diff::SubstitutionResult::Changed(_, _)
+        ));
 
         if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
             assert_eq!(updated, "Hi world\nThis is a test\nHi again");
@@ -241,7 +240,10 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert!(matches!(result, crate::diff::SubstitutionResult::Changed(_, _)));
+        assert!(matches!(
+            result,
+            crate::diff::SubstitutionResult::Changed(_, _)
+        ));
 
         if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
             assert_eq!(updated, "version X.X.X\nother line\nversion X.X.X");
@@ -291,8 +293,6 @@ mod tests {
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "nested content");
     }
-
-
 
     #[test]
     fn test_backup_and_restore() {
