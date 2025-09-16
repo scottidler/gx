@@ -62,7 +62,7 @@ impl Transaction {
     pub fn new() -> Self {
         let counter = TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = chrono::Utc::now().timestamp();
-        let transaction_id = format!("gx-tx-{}-{}", timestamp, counter);
+        let transaction_id = format!("gx-tx-{timestamp}-{counter}");
         Transaction {
             rollbacks: Vec::new(),
             committed: false,
@@ -183,7 +183,10 @@ impl Transaction {
         while let Some(rollback_action) = self.rollbacks.pop() {
             // Skip cleanup actions during rollback - they should only run on commit
             if rollback_action.description.contains("Cleanup backup file:") {
-                debug!("Skipping cleanup action during rollback: {}", rollback_action.description);
+                debug!(
+                    "Skipping cleanup action during rollback: {}",
+                    rollback_action.description
+                );
                 continue;
             }
 
@@ -299,10 +302,14 @@ impl Transaction {
         let backup_files = find_backup_files_recursive(repo_path)?;
 
         if !backup_files.is_empty() {
-            debug!("Preflight check: Found {} backup files before commit", backup_files.len());
+            debug!(
+                "Preflight check: Found {} backup files before commit",
+                backup_files.len()
+            );
 
             // Count how many of these backup files we're responsible for cleaning up
-            let cleanup_actions: Vec<_> = self.rollbacks
+            let cleanup_actions: Vec<_> = self
+                .rollbacks
                 .iter()
                 .filter(|action| action.description.contains("Cleanup backup file:"))
                 .collect();
@@ -316,8 +323,7 @@ impl Transaction {
                 );
 
                 for backup_file in &backup_files {
-                    let relative_path = backup_file.strip_prefix(repo_path)
-                        .unwrap_or(backup_file);
+                    let relative_path = backup_file.strip_prefix(repo_path).unwrap_or(backup_file);
                     warn!("  - {}", relative_path.display());
                 }
             } else {
@@ -329,8 +335,8 @@ impl Transaction {
 
                 if log::log_enabled!(log::Level::Debug) {
                     for backup_file in &backup_files {
-                        let relative_path = backup_file.strip_prefix(repo_path)
-                            .unwrap_or(backup_file);
+                        let relative_path =
+                            backup_file.strip_prefix(repo_path).unwrap_or(backup_file);
                         debug!("  Will clean up: {}", relative_path.display());
                     }
                 }
@@ -357,7 +363,10 @@ impl Transaction {
                         successful_cleanups += 1;
                     }
                     Err(e) => {
-                        warn!("✗ Cleanup failed: {} - Error: {e:?}", rollback_action.description);
+                        warn!(
+                            "✗ Cleanup failed: {} - Error: {e:?}",
+                            rollback_action.description
+                        );
                         failed_cleanups += 1;
                     }
                 }
@@ -365,7 +374,9 @@ impl Transaction {
         }
 
         if successful_cleanups > 0 || failed_cleanups > 0 {
-            debug!("Cleanup completed: {successful_cleanups} successes, {failed_cleanups} failures");
+            debug!(
+                "Cleanup completed: {successful_cleanups} successes, {failed_cleanups} failures"
+            );
         }
     }
 
@@ -751,9 +762,7 @@ fn validate_branch_operation(action: &SerializableRollbackAction, result: &mut V
         // Check if we're not trying to delete the current branch
         match crate::git::get_current_branch_name(repo_path) {
             Ok(current_branch) if current_branch == *branch_to_delete => {
-                result.add_error(format!(
-                    "Cannot delete current branch: {branch_to_delete}"
-                ));
+                result.add_error(format!("Cannot delete current branch: {branch_to_delete}"));
             }
             Err(e) => {
                 result.add_warning(format!("Could not determine current branch: {e}"));

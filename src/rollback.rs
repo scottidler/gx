@@ -1,7 +1,5 @@
 use crate::cli::RollbackAction;
-use crate::transaction::{
-    validate_rollback_operations, Transaction,
-};
+use crate::transaction::{validate_rollback_operations, Transaction};
 use chrono::{DateTime, Duration, Utc};
 use colored::*;
 use eyre::Result;
@@ -198,10 +196,7 @@ fn cleanup_recovery_states(
 ) -> Result<()> {
     if let Some(id) = transaction_id {
         // Clean up specific transaction
-        println!(
-            "{}",
-            format!("🧹 Cleaning up recovery state: {id}").blue()
-        );
+        println!("{}", format!("🧹 Cleaning up recovery state: {id}").blue());
         Transaction::cleanup_recovery_state_by_id(&id)?;
         println!("{}", "✅ Recovery state cleaned up successfully".green());
         return Ok(());
@@ -283,15 +278,15 @@ fn cleanup_recovery_states(
         println!(
             "{}",
             format!("✅ Successfully cleaned up {cleaned_count} recovery states")
-            .green()
-            .bold()
+                .green()
+                .bold()
         );
     } else {
         println!(
             "{}",
             format!("⚠️  Cleaned up {cleaned_count} recovery states, {failed_count} failed")
-            .yellow()
-            .bold()
+                .yellow()
+                .bold()
         );
     }
 

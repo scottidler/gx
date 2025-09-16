@@ -501,16 +501,14 @@ fn process_single_repo(
 
             // Use preflight check before committing
             match transaction.commit_with_preflight_check(repo_path) {
-                Ok(()) => {
-                    CreateResult {
-                        repo: repo.clone(),
-                        change_id: change_id.to_string(),
-                        action: final_action,
-                        files_affected,
-                        substitution_stats,
-                        error: None,
-                    }
-                }
+                Ok(()) => CreateResult {
+                    repo: repo.clone(),
+                    change_id: change_id.to_string(),
+                    action: final_action,
+                    files_affected,
+                    substitution_stats,
+                    error: None,
+                },
                 Err(e) => {
                     warn!("Preflight check failed, rolling back transaction: {e}");
                     transaction.rollback();
