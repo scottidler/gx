@@ -1,1 +1,1 @@
-test content for successive commands
+TEST content for successive commands
