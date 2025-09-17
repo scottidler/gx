@@ -6,7 +6,6 @@ use crate::git::{
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
-use std::env;
 use std::io::{self, Write};
 use std::path::Path;
 use unicode_display_width::width as display_width;
@@ -682,21 +681,6 @@ impl AlignmentWidths {
             emoji_width,
         }
     }
-}
-
-/// Calculate relative path from current directory to repository
-fn get_relative_repo_path(repo_path: &Path) -> String {
-    if let Ok(current_dir) = env::current_dir() {
-        if let Ok(relative) = repo_path.strip_prefix(&current_dir) {
-            return relative.to_string_lossy().to_string();
-        }
-    }
-    // Fallback to just the repo name if relative path calculation fails
-    repo_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// Format repository path with separate colors for path and repo slug
