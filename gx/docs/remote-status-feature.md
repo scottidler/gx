@@ -32,9 +32,10 @@ The `gx status` command now displays the remote tracking status for each reposit
 - **No-emoji**: `~`
 
 ### ⚠️ Error
-- **Meaning**: Error checking remote status
-- **Example**: `repo ⚠️ (main)`
-- **No-emoji**: `!`
+- **Meaning**: Error checking remote status (git command failed)
+- **Example**: `repo ⚠️git (main)` - git ls-remote command failed
+- **No-emoji**: `!git`
+- **Common causes**: Network issues, invalid remote URL, authentication problems
 
 ## Usage Examples
 

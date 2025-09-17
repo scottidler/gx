@@ -11,6 +11,27 @@ use std::io::{self, Write};
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
+/// Calculate display width for emoji strings, handling terminal display quirks
+fn calculate_display_width(s: &str) -> usize {
+    // For emoji-heavy strings, use a more conservative approach
+    // Many terminals display emojis as 2 characters wide, but some are 1
+    let unicode_width = s.width();
+
+    // Count actual emoji characters (anything above basic ASCII)
+    let emoji_count = s.chars().filter(|c| *c as u32 > 127).count();
+
+    if emoji_count > 0 {
+        // For strings with emojis, use a heuristic:
+        // - Each emoji is typically 2 display columns
+        // - ASCII characters are 1 column each
+        let ascii_count = s.chars().filter(|c| *c as u32 <= 127).count();
+        emoji_count * 2 + ascii_count
+    } else {
+        // For ASCII-only strings, use unicode width
+        unicode_width
+    }
+}
+
 #[derive(Debug)]
 pub struct StatusOptions {
     pub verbosity: OutputVerbosity,
@@ -646,12 +667,14 @@ impl AlignmentWidths {
         let sha_width = 7; // Always 7 characters for SHA
 
         // Calculate actual emoji width by measuring all emoji combinations
+        // We need to account for the fact that some emojis have zero width in terminals
         let emoji_width = items
             .iter()
             .map(|item| {
                 let opts = StatusOptions::default();
                 let emoji = item.get_emoji(&opts);
-                emoji.width()
+                // Use a more accurate width calculation for emojis
+                calculate_display_width(&emoji)
             })
             .max()
             .unwrap_or(2) // Fallback to 2 if no items
@@ -950,7 +973,8 @@ pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> Alignment
 
     // Emoji width: Set to maximum possible width to handle all cases
     // Covers: 🟢 (2), ⬇️1 (3), ⬆️12 (4), ⚠️abc (5), 🔀2↑3↓ (6)
-    let emoji_width = 6; // Maximum width for diverged case
+    // Use a more conservative estimate for emoji display width
+    let emoji_width = 8; // Increased to handle wider emoji combinations
 
     AlignmentWidths {
         branch_width,

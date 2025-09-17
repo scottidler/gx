@@ -19,9 +19,31 @@ impl Repo {
             .to_string();
 
         // Extract git config information to determine slug
-        let origin_url = extract_origin_url(&path)?;
-        let user = extract_user_from_remote(&origin_url)?;
-        let slug = format!("{user}/{name}");
+        // If we can't determine the user/org, fall back to a reasonable default
+        let slug = match extract_origin_url(&path).and_then(|url| extract_user_from_remote(&url)) {
+            Ok(user) => format!("{user}/{name}"),
+            Err(_) => {
+                // Fallback: try to infer from parent directory structure
+                // If repo is at /path/to/user/repo, use user/repo
+                // Otherwise use unknown/repo
+                if let Some(parent) = path.parent() {
+                    if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
+                        // Skip common directory names that aren't user/org names
+                        if !["repos", "src", "code", "projects", "workspace", "git"]
+                            .contains(&parent_name)
+                        {
+                            format!("{parent_name}/{name}")
+                        } else {
+                            format!("unknown/{name}")
+                        }
+                    } else {
+                        format!("unknown/{name}")
+                    }
+                } else {
+                    format!("unknown/{name}")
+                }
+            }
+        };
 
         Ok(Self { path, name, slug })
     }

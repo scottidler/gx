@@ -92,7 +92,7 @@ pub enum Commands {
 REMOTE STATUS:
   🟢  Up to date with remote    ⬆️N  Ahead by N commits
   ⬇️N  Behind by N commits      🔀  Diverged (ahead+behind)
-  📍  No remote branch          ⚠️  Remote check error
+  📍  No remote branch          ⚠️git Remote check error (git command failed)
 
 EXAMPLES:
   gx status                     # Show all repositories
