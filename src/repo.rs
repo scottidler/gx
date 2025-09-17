@@ -127,71 +127,93 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
     Ok(repos)
 }
 
-/// Find the appropriate workspace root for consistent discovery
+/// Find the appropriate search root based on simple rules
+/// 1. If we're inside a repo (.git exists here): search from parent to include this repo
+/// 2. If we're above repos: search down from here  
+/// 3. If we're in random dir: move up until we find a repo, then search from its parent
 fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
-    // If start_dir itself is a git repository, search from its parent
-    if start_dir.join(".git").exists() {
-        if let Some(parent) = start_dir.parent() {
+    let mut current = start_dir.to_path_buf();
+
+    // Case 1: If we're inside a git repository, search from its parent
+    if current.join(".git").exists() {
+        if let Some(parent) = current.parent() {
             debug!(
-                "Start dir is a git repo, using parent: {}",
+                "Inside git repo at {}, searching from parent: {}",
+                current.display(),
                 parent.display()
             );
             return Ok(parent.to_path_buf());
         }
     }
 
-    // Walk up to find a directory that contains multiple git repos or is a good workspace root
-    let mut current = start_dir.to_path_buf();
-
-    for _ in 0..max_depth {
-        debug!("Checking potential workspace root: {}", current.display());
-
-        // Count git repositories at this level
-        let git_repos = count_git_repos_at_level(&current)?;
+    // Case 2: Check if we can find repos by searching down from current directory
+    let repos_found_down = count_repos_in_subtree(&current, max_depth)?;
+    if repos_found_down > 0 {
         debug!(
-            "Found {} git repos at level {}",
-            git_repos,
+            "Found {} repos searching down from {}, using as search root",
+            repos_found_down,
             current.display()
         );
+        return Ok(current);
+    }
 
-        // If we find multiple repos, this is likely a workspace root
-        if git_repos >= 2 {
+    // Case 3: No repos found downward, so walk up until we find something useful
+    while let Some(parent) = current.parent() {
+        current = parent.to_path_buf();
+        
+        // Check if this parent directory itself is a git repo
+        if current.join(".git").exists() {
+            // Found a repo, search from its parent
+            if let Some(grandparent) = current.parent() {
+                debug!(
+                    "Found repo while walking up at {}, searching from parent: {}",
+                    current.display(),
+                    grandparent.display()
+                );
+                return Ok(grandparent.to_path_buf());
+            } else {
+                // Repo is at root level, search from repo itself
+                debug!(
+                    "Found repo at root level {}, searching from there",
+                    current.display()
+                );
+                return Ok(current);
+            }
+        }
+        
+        // Check if this parent directory has repos underneath it
+        let repos_found_down = count_repos_in_subtree(&current, max_depth)?;
+        if repos_found_down > 0 {
             debug!(
-                "Found workspace root with {} repos: {}",
-                git_repos,
+                "Found {} repos while walking up, searching down from: {}",
+                repos_found_down,
                 current.display()
             );
             return Ok(current);
         }
-
-        // If we find exactly 1 repo and we're not in that repo's directory, use this level
-        if git_repos == 1 && !current.join(".git").exists() {
-            debug!("Found workspace root with 1 repo: {}", current.display());
-            return Ok(current);
-        }
-
-        // Move up one level
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            break;
-        }
     }
 
     // Fallback: use the original start_dir
-    debug!("Using fallback workspace root: {}", start_dir.display());
+    debug!("No repos found, using original start dir: {}", start_dir.display());
     Ok(start_dir.to_path_buf())
 }
 
-/// Count git repositories directly at the given directory level (non-recursive)
-fn count_git_repos_at_level(dir: &Path) -> Result<usize> {
+/// Count git repositories in subtree with given max depth
+fn count_repos_in_subtree(dir: &Path, max_depth: usize) -> Result<usize> {
     let mut count = 0;
 
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && path.join(".git").exists() && !is_ignored_directory(&path) {
-                count += 1;
+    for entry in WalkDir::new(dir)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_entry(|e| !is_ignored_directory(e.path()))
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
+            if let Some(repo_root) = path.parent() {
+                if !is_ignored_directory(repo_root) {
+                    count += 1;
+                }
             }
         }
     }
