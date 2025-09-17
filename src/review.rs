@@ -458,7 +458,9 @@ pub fn process_review_purge_command(
 fn clone_repo_for_pr(org_dir: &Path, pr: &PrInfo, change_id: &str) -> ReviewResult {
     let repo_name = extract_repo_name(&pr.repo_slug);
     let repo_dir = org_dir.join(&repo_name);
-    let repo = Repo::new(repo_dir.clone());
+    // Create repo object - use slug fallback if the directory isn't a valid repo yet
+    let repo =
+        Repo::new(repo_dir.clone()).unwrap_or_else(|_| Repo::from_slug(pr.repo_slug.clone()));
 
     if repo_dir.exists() {
         // Repository already exists, pull latest

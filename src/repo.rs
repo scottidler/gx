@@ -1,4 +1,4 @@
-use eyre::{Context, Result};
+use eyre::Result;
 use log::debug;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -11,7 +11,7 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Result<Self> {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -19,11 +19,11 @@ impl Repo {
             .to_string();
 
         // Extract git config information to determine slug
-        let origin_url = extract_origin_url(&path);
-        let user = extract_user_from_remote(&origin_url);
+        let origin_url = extract_origin_url(&path)?;
+        let user = extract_user_from_remote(&origin_url)?;
         let slug = format!("{user}/{name}");
 
-        Self { path, name, slug }
+        Ok(Self { path, name, slug })
     }
 
     /// Create a fake repo from slug for filtering purposes (used in clone command)
@@ -61,20 +61,31 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
         .max_depth(max_depth)
         .into_iter()
         .filter_entry(|e| !is_ignored_directory(e.path()))
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                // Log permission errors and other IO errors, but continue
+                debug!("Skipping directory due to error: {err}");
+                None
+            }
+        })
     {
-        let entry = entry.context("Failed to read directory entry")?;
         let path = entry.path();
 
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
                 // Try to create repo, skip if it fails (e.g., invalid git config)
-                match std::panic::catch_unwind(|| Repo::new(repo_root.to_path_buf())) {
+                match Repo::new(repo_root.to_path_buf()) {
                     Ok(repo) => {
                         debug!("Found repo: {} at {}", repo.name, repo.path.display());
                         repos.push(repo);
                     }
-                    Err(_) => {
-                        debug!("Skipping invalid repository at {}", repo_root.display());
+                    Err(e) => {
+                        debug!(
+                            "Skipping invalid repository at {}: {}",
+                            repo_root.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -161,31 +172,30 @@ fn count_git_repos_at_level(dir: &Path) -> Result<usize> {
 }
 
 /// Extract origin URL from git config
-fn extract_origin_url(repo_path: &Path) -> String {
+fn extract_origin_url(repo_path: &Path) -> Result<String> {
     let config_path = repo_path.join(".git").join("config");
 
     // Try to read git config
-    let config_content = match std::fs::read_to_string(&config_path) {
-        Ok(content) => content,
-        Err(_) => panic!(
+    let config_content = std::fs::read_to_string(&config_path).map_err(|_| {
+        eyre::eyre!(
             "Repository at {} has no .git/config file",
             repo_path.display()
-        ),
-    };
+        )
+    })?;
 
     // Extract origin URL (required)
-    extract_remote_url_from_config(&config_content, "origin").unwrap_or_else(|| {
-        panic!(
+    extract_remote_url_from_config(&config_content, "origin").ok_or_else(|| {
+        eyre::eyre!(
             "Repository at {} has no remote origin configured",
             repo_path.display()
         )
     })
 }
 
-/// Extract user from remote URL (panics if unable to parse)
-fn extract_user_from_remote(remote_url: &str) -> String {
+/// Extract user from remote URL
+fn extract_user_from_remote(remote_url: &str) -> Result<String> {
     parse_user_from_url(remote_url)
-        .unwrap_or_else(|_| panic!("Cannot parse user from remote URL: {remote_url}"))
+        .map_err(|_| eyre::eyre!("Cannot parse user from remote URL: {remote_url}"))
 }
 
 /// Parse git config to extract remote URL
@@ -222,6 +232,16 @@ fn parse_user_from_url(url: &str) -> Result<String> {
     if let Some(ssh_match) = url.strip_prefix("git@") {
         if let Some(colon_pos) = ssh_match.find(':') {
             let path_part = &ssh_match[colon_pos + 1..];
+            if let Some(slash_pos) = path_part.find('/') {
+                let user = path_part[..slash_pos].to_string();
+                return Ok(user);
+            }
+        }
+    }
+
+    // Handle SSH URL format: ssh://git@github.com/user/repo.git
+    if url.starts_with("ssh://git@github.com/") {
+        if let Some(path_part) = url.strip_prefix("ssh://git@github.com/") {
             if let Some(slash_pos) = path_part.find('/') {
                 let user = path_part[..slash_pos].to_string();
                 return Ok(user);
@@ -328,6 +348,10 @@ mod tests {
         // Test SSH format
         let result = parse_user_from_url("git@github.com:tatari-tv/frontend.git").unwrap();
         assert_eq!(result, "tatari-tv");
+
+        // Test SSH URL format
+        let result = parse_user_from_url("ssh://git@github.com/scottidler/nvim").unwrap();
+        assert_eq!(result, "scottidler");
 
         // Test HTTPS format
         let result = parse_user_from_url("https://github.com/scottidler/gx.git").unwrap();
