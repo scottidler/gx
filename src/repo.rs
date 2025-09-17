@@ -160,7 +160,7 @@ fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
     // Case 3: No repos found downward, so walk up until we find something useful
     while let Some(parent) = current.parent() {
         current = parent.to_path_buf();
-        
+
         // Check if this parent directory itself is a git repo
         if current.join(".git").exists() {
             // Found a repo, search from its parent
@@ -180,7 +180,7 @@ fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
                 return Ok(current);
             }
         }
-        
+
         // Check if this parent directory has repos underneath it
         let repos_found_down = count_repos_in_subtree(&current, max_depth)?;
         if repos_found_down > 0 {
@@ -194,7 +194,10 @@ fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
     }
 
     // Fallback: use the original start_dir
-    debug!("No repos found, using original start dir: {}", start_dir.display());
+    debug!(
+        "No repos found, using original start dir: {}",
+        start_dir.display()
+    );
     Ok(start_dir.to_path_buf())
 }
 
