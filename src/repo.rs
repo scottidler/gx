@@ -272,7 +272,10 @@ fn parse_user_from_url(url: &str) -> Result<String> {
 fn is_ignored_directory(path: &Path) -> bool {
     if let Some(path_str) = path.to_str() {
         // Ignore cache directories by path - this should catch pre-commit cache
-        if path_str.contains("/.cache/") || path_str.contains("/.local/") || path_str.contains("/.nvm/") {
+        if path_str.contains("/.cache/")
+            || path_str.contains("/.local/")
+            || path_str.contains("/.nvm/")
+        {
             return true;
         }
 
@@ -292,7 +295,10 @@ fn is_ignored_directory(path: &Path) -> bool {
         }
 
         // Ignore pre-commit cache directories that start with "repo" and have random suffixes
-        if name.starts_with("repo") && name.len() >= 8 && name.chars().skip(4).all(|c| c.is_alphanumeric()) {
+        if name.starts_with("repo")
+            && name.len() >= 8
+            && name.chars().skip(4).all(|c| c.is_alphanumeric())
+        {
             return true;
         }
     }
