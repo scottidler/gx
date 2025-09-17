@@ -74,6 +74,12 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
 
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
+                // Skip if this is an ignored directory
+                if is_ignored_directory(repo_root) {
+                    debug!("Skipping ignored directory: {}", repo_root.display());
+                    continue;
+                }
+
                 // Try to create repo, skip if it fails (e.g., invalid git config)
                 match Repo::new(repo_root.to_path_buf()) {
                     Ok(repo) => {
@@ -162,7 +168,7 @@ fn count_git_repos_at_level(dir: &Path) -> Result<usize> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join(".git").exists() {
+            if path.is_dir() && path.join(".git").exists() && !is_ignored_directory(&path) {
                 count += 1;
             }
         }
@@ -264,14 +270,34 @@ fn parse_user_from_url(url: &str) -> Result<String> {
 
 /// Check if directory should be ignored during discovery
 fn is_ignored_directory(path: &Path) -> bool {
+    if let Some(path_str) = path.to_str() {
+        // Ignore cache directories by path - this should catch pre-commit cache
+        if path_str.contains("/.cache/") || path_str.contains("/.local/") || path_str.contains("/.nvm/") {
+            return true;
+        }
+
+        // Ignore Go module cache
+        if path_str.contains("/go/pkg/mod/") {
+            return true;
+        }
+    }
+
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        matches!(
+        // Ignore common build/cache directories
+        if matches!(
             name,
             "node_modules" | "target" | "build" | ".next" | "dist" | "vendor"
-        )
-    } else {
-        false
+        ) {
+            return true;
+        }
+
+        // Ignore pre-commit cache directories that start with "repo" and have random suffixes
+        if name.starts_with("repo") && name.len() >= 8 && name.chars().skip(4).all(|c| c.is_alphanumeric()) {
+            return true;
+        }
     }
+
+    false
 }
 
 /// Filter repositories using slam's 4-level filtering logic
