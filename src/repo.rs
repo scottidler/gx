@@ -129,7 +129,7 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
 
 /// Find the appropriate search root based on simple rules
 /// 1. If we're inside a repo (.git exists here): search from parent to include this repo
-/// 2. If we're above repos: search down from here  
+/// 2. If we're above repos: search down from here
 /// 3. If we're in random dir: move up until we find a repo, then search from its parent
 fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
     let mut current = start_dir.to_path_buf();

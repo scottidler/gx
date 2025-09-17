@@ -62,7 +62,7 @@ pub fn process_status_command(
         return Ok(());
     }
 
-    // 3. Fast pre-scan for alignment widths
+    // 3. Use the fast calculation that now properly handles all possible emoji patterns
     let widths = output::calculate_alignment_widths_fast(&filtered_repos);
 
     // 4. Create status options

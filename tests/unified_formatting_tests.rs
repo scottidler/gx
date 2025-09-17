@@ -236,7 +236,7 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         commit_sha: Some("jkl3456".to_string()),
         is_clean: true,
         changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::Error("timeout".to_string()), // ⚠️tim (5 chars)
+        remote_status: gx::git::RemoteStatus::Error("timeout".to_string()), // ⚠️ tim (6 chars)
         error: None,
     };
 
@@ -261,5 +261,5 @@ fn test_emoji_width_calculation_with_complex_combinations() {
     assert_eq!(simple_emoji_status.get_emoji(&opts), "🟢");
     assert_eq!(ahead_status.get_emoji(&opts), "⬆️15");
     assert_eq!(diverged_status.get_emoji(&opts), "🔀5↑3↓");
-    assert_eq!(error_status.get_emoji(&opts), "⚠️tim");
+    assert_eq!(error_status.get_emoji(&opts), "⚠️ tim");
 }

@@ -6,14 +6,95 @@ use crate::git::{
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
+use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use unicode_display_width::width as display_width;
+use string_width::string_width;
 
-/// Calculate display width for emoji strings, handling terminal display quirks
+/// Detect the current terminal type for width calculation adjustments
+fn get_terminal_type() -> String {
+    // Check various environment variables to determine terminal
+    if let Ok(term_program) = env::var("TERM_PROGRAM") {
+        return term_program.to_lowercase();
+    }
+
+    if let Ok(terminal_emulator) = env::var("TERMINAL_EMULATOR") {
+        return terminal_emulator.to_lowercase();
+    }
+
+    if let Ok(term) = env::var("TERM") {
+        return term.to_lowercase();
+    }
+
+    // Check for specific terminal indicators
+    if env::var("ITERM_SESSION_ID").is_ok() {
+        return "iterm2".to_string();
+    }
+
+    if env::var("GNOME_TERMINAL_SERVICE").is_ok() {
+        return "gnome-terminal".to_string();
+    }
+
+    if env::var("KONSOLE_VERSION").is_ok() {
+        return "konsole".to_string();
+    }
+
+    if env::var("ALACRITTY_SOCKET").is_ok() {
+        return "alacritty".to_string();
+    }
+
+    "unknown".to_string()
+}
+
+/// Calculate display width for emoji strings with terminal-aware adjustments
+/// This uses the string_width library but applies terminal-specific corrections
 pub fn calculate_display_width(s: &str) -> usize {
-    // Use unicode-display-width crate which handles emoji sequences better
-    display_width(s) as usize
+    let base_width = string_width(s);
+    let terminal_type = get_terminal_type();
+
+    // Apply terminal-specific adjustments for emoji rendering differences
+    match terminal_type.as_str() {
+        "vscode" => {
+            // VSCode integrated terminal has specific emoji rendering behavior
+            // Based on empirical testing: all these patterns appear shifted right (too much space)
+            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
+                // All these patterns need -1 adjustment (they appear shifted right)
+                return base_width - 1;
+            }
+            base_width
+        }
+
+        // Many terminals have issues with arrow emoji + variation selector width calculations
+        term if term.contains("xterm")
+            || term.contains("gnome")
+            || term.contains("konsole")
+            || term.contains("alacritty")
+            || term.contains("kitty") =>
+        {
+            // These terminals render these patterns with too much space (shifted right)
+            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
+                return base_width - 1;
+            }
+            base_width
+        }
+
+        "iterm2" => {
+            // iTerm2 has similar emoji rendering issues
+            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
+                return base_width - 1;
+            }
+            base_width
+        }
+
+        _ => {
+            // For unknown terminals, use conservative approach
+            // Most terminals seem to have the same issue with these patterns
+            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
+                return base_width - 1;
+            }
+            base_width
+        }
+    }
 }
 
 /// Pad a string to a specific display width, handling emoji properly
@@ -123,21 +204,21 @@ impl UnifiedDisplay for RepoStatus {
                 }
                 RemoteStatus::Ahead(n) => {
                     if opts.use_emoji {
-                        format!("⬆️{n}")
+                        format!("⬆️ {n}")
                     } else {
                         format!("↑{n}")
                     }
                 }
                 RemoteStatus::Behind(n) => {
                     if opts.use_emoji {
-                        format!("⬇️{n}")
+                        format!("⬇️ {n}")
                     } else {
                         format!("↓{n}")
                     }
                 }
                 RemoteStatus::Diverged(ahead, behind) => {
                     if opts.use_emoji {
-                        format!("🔀{ahead}↑{behind}↓")
+                        format!("🔀 {ahead}↑{behind}↓")
                     } else {
                         format!("±{ahead}↑{behind}↓")
                     }
@@ -151,7 +232,7 @@ impl UnifiedDisplay for RepoStatus {
                 }
                 RemoteStatus::Error(e) => {
                     if opts.use_emoji {
-                        format!("⚠️{}", e.chars().take(3).collect::<String>())
+                        format!("⚠️ {}", e.chars().take(3).collect::<String>())
                     } else {
                         format!("!{}", e.chars().take(3).collect::<String>())
                     }
@@ -295,21 +376,21 @@ impl UnifiedDisplay for &RepoStatus {
                 }
                 RemoteStatus::Ahead(n) => {
                     if opts.use_emoji {
-                        format!("⬆️{n}")
+                        format!("⬆️ {n}")
                     } else {
                         format!("↑{n}")
                     }
                 }
                 RemoteStatus::Behind(n) => {
                     if opts.use_emoji {
-                        format!("⬇️{n}")
+                        format!("⬇️ {n}")
                     } else {
                         format!("↓{n}")
                     }
                 }
                 RemoteStatus::Diverged(ahead, behind) => {
                     if opts.use_emoji {
-                        format!("🔀{ahead}↑{behind}↓")
+                        format!("🔀 {ahead}↑{behind}↓")
                     } else {
                         format!("±{ahead}↑{behind}↓")
                     }
@@ -323,7 +404,7 @@ impl UnifiedDisplay for &RepoStatus {
                 }
                 RemoteStatus::Error(e) => {
                     if opts.use_emoji {
-                        format!("⚠️{}", e.chars().take(3).collect::<String>())
+                        format!("⚠️ {}", e.chars().take(3).collect::<String>())
                     } else {
                         format!("!{}", e.chars().take(3).collect::<String>())
                     }
@@ -945,16 +1026,69 @@ pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> Alignment
     // SHA width: Always fixed
     let sha_width = 7;
 
-    // Emoji width: Set to maximum possible width to handle all cases
-    // Covers: 🟢 (2), ⬇️1 (3), ⬆️12 (4), ⚠️abc (5), 🔀2↑3↓ (6)
-    // Use a more conservative estimate for emoji display width
-    let emoji_width = 8; // Increased to handle wider emoji combinations
+    // Emoji width: Calculate based on all possible emoji patterns that could appear
+    // This is fast because we're not doing git operations, just measuring known emoji patterns
+    let emoji_width = calculate_max_possible_emoji_width();
 
     AlignmentWidths {
         branch_width,
         sha_width,
         emoji_width,
     }
+}
+
+/// Calculate the maximum possible emoji width for all patterns that could appear in status output
+/// This is fast because it only measures a small set of known patterns, no git operations
+fn calculate_max_possible_emoji_width() -> usize {
+    // All possible emoji patterns that could appear in gx status output
+    let possible_patterns = vec![
+        // Simple status emojis (2 width each)
+        "🟢",
+        "📝",
+        "❓",
+        "❌",
+        "🎯",
+        "➕",
+        "📍",
+        // Ahead/behind patterns (4-7 width) - now with spaces
+        "⬆️ 1",
+        "⬆️ 99",
+        "⬆️ 999",
+        "⬆️ 9999", // Up to 4 digits
+        "⬇️ 1",
+        "⬇️ 99",
+        "⬇️ 999",
+        "⬇️ 9999", // Up to 4 digits
+        // Diverged patterns (7-11 width) - most complex, now with space
+        "🔀 1↑1↓",
+        "🔀 99↑99↓",
+        "🔀 999↑999↓", // Up to 3 digits each
+        // Error patterns (6-7 width)
+        "⚠️ git",
+        "⚠️ tim",
+        "⚠️ net",
+        "⚠️ abc",
+        // Checkout patterns (2 width)
+        "📥",
+        "✨",
+        "📦",
+        "⚠️",
+        // Create patterns (2 width)
+        "👁️",
+        "💾",
+        // Review patterns (2 width)
+        "📋",
+        "✅",
+        "🧹",
+    ];
+
+    // Find the maximum width among all possible patterns
+    possible_patterns
+        .iter()
+        .map(|pattern| calculate_display_width(pattern))
+        .max()
+        .unwrap_or(2) // Fallback to minimum
+        .max(2) // Ensure at least 2 for readability
 }
 
 /// Display a single status result immediately with pre-calculated alignment
