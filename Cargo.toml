@@ -28,11 +28,7 @@ serde_json = "1.0"
 serde_yaml = "0.9.34"
 similar = "2.7.0"
 tempfile = "3.22"
-unicode-width = "0.2"
-unicode-display-width = "0.3"
-unicode-segmentation = "1"
 string-width = "0.1"
-url = "2.5"
 walkdir = "2.5"
 # Using std::process::Command for git calls like slam
 
