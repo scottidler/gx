@@ -9,26 +9,22 @@ use eyre::{Context, Result};
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use unicode_width::UnicodeWidthStr;
+use unicode_display_width::width as display_width;
 
 /// Calculate display width for emoji strings, handling terminal display quirks
-fn calculate_display_width(s: &str) -> usize {
-    // For emoji-heavy strings, use a more conservative approach
-    // Many terminals display emojis as 2 characters wide, but some are 1
-    let unicode_width = s.width();
+pub fn calculate_display_width(s: &str) -> usize {
+    // Use unicode-display-width crate which handles emoji sequences better
+    display_width(s) as usize
+}
 
-    // Count actual emoji characters (anything above basic ASCII)
-    let emoji_count = s.chars().filter(|c| *c as u32 > 127).count();
-
-    if emoji_count > 0 {
-        // For strings with emojis, use a heuristic:
-        // - Each emoji is typically 2 display columns
-        // - ASCII characters are 1 column each
-        let ascii_count = s.chars().filter(|c| *c as u32 <= 127).count();
-        emoji_count * 2 + ascii_count
+/// Pad a string to a specific display width, handling emoji properly
+pub fn pad_to_width(s: &str, target_width: usize) -> String {
+    let current_width = calculate_display_width(s);
+    if current_width >= target_width {
+        s.to_string()
     } else {
-        // For ASCII-only strings, use unicode width
-        unicode_width
+        let padding_needed = target_width - current_width;
+        format!("{}{}", s, " ".repeat(padding_needed))
     }
 }
 
@@ -704,15 +700,9 @@ fn get_relative_repo_path(repo_path: &Path) -> String {
 }
 
 /// Format repository path with separate colors for path and repo slug
-fn format_repo_path_with_colors(repo_path: &Path, repo_slug: &str, use_colors: bool) -> String {
-    let relative_path = get_relative_repo_path(repo_path);
-
-    // Handle the case where we're in the repo directory itself (relative path is empty or just ".")
-    let display_path = if relative_path.is_empty() || relative_path == "." {
-        repo_slug.to_string()
-    } else {
-        relative_path
-    };
+fn format_repo_path_with_colors(_repo_path: &Path, repo_slug: &str, use_colors: bool) -> String {
+    // Always use the repo slug for consistent display
+    let display_path = repo_slug.to_string();
 
     if use_colors {
         // Find where the repo slug appears in the display path
@@ -765,7 +755,7 @@ pub fn display_unified_format<T: UnifiedDisplay>(
 
     // Emoji/Status indicator (left-aligned)
     let emoji = item.get_emoji(opts);
-    let emoji_display = format!("{:<width$}", emoji, width = widths.emoji_width);
+    let emoji_display = pad_to_width(&emoji, widths.emoji_width);
 
     // Repository path/slug
     let repo = item.get_repo();
@@ -813,7 +803,7 @@ pub fn display_review_result(
 
     // Emoji/Status indicator (left-aligned)
     let emoji = result.get_emoji(opts);
-    let emoji_display = format!("{:<width$}", emoji, width = widths.emoji_width);
+    let emoji_display = pad_to_width(&emoji, widths.emoji_width);
 
     // Repository path/slug
     let repo = &result.repo;
