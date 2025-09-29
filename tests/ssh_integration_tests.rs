@@ -179,3 +179,4 @@ fn test_ssh_url_special_characters() {
         assert!(validation.is_ok(), "Special URL should be valid: {url}");
     }
 }
+
