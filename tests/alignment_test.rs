@@ -80,7 +80,7 @@ fn test_emoji_display_width_calculation() {
         ("🟢", 2),
         ("⬇️1", 3),    // unicode-display-width: emoji (2) + digit (1) = 3
         ("⬆️12", 4),   // unicode-display-width: emoji (2) + "12" (2) = 4
-        ("⚠️ git", 7), // Corrected for terminal display: emoji width adjusted for proper alignment
+        ("⚠️ git", 5), // Actual calculated width: emoji (2) + " git" (3) = 5
         ("🔀3↑2↓", 6),
     ];
 

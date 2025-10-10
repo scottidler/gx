@@ -123,6 +123,14 @@ EXAMPLES:
             help = "Repository name patterns to filter"
         )]
         patterns: Vec<String>,
+
+        /// Fetch latest remote refs before status check
+        #[arg(long, help = "Fetch latest remote refs before status check")]
+        fetch_first: bool,
+
+        /// Skip remote status checks entirely
+        #[arg(long, help = "Skip remote status checks entirely")]
+        no_remote: bool,
     },
 
     /// Checkout branches across multiple repositories

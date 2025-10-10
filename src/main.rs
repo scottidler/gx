@@ -74,7 +74,19 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             no_emoji,
             no_color,
             patterns,
-        } => status::process_status_command(cli, config, *detailed, !no_emoji, !no_color, patterns),
+            fetch_first,
+            no_remote,
+        } => {
+            let options = status::StatusCommandOptions {
+                detailed: *detailed,
+                use_emoji: !no_emoji,
+                use_colors: !no_color,
+                patterns,
+                fetch_first: *fetch_first,
+                no_remote: *no_remote,
+            };
+            status::process_status_command(cli, config, options)
+        }
         Commands::Checkout {
             create_branch,
             from_branch,

@@ -13,16 +13,43 @@ use rayon::prelude::*;
 use std::env;
 use std::sync::Mutex;
 
+/// Status command options
+pub struct StatusCommandOptions<'a> {
+    pub detailed: bool,
+    pub use_emoji: bool,
+    pub use_colors: bool,
+    pub patterns: &'a [String],
+    pub fetch_first: bool,
+    pub no_remote: bool,
+}
+
 /// Process the status subcommand
 pub fn process_status_command(
     cli: &Cli,
     config: &Config,
-    detailed: bool,
-    use_emoji: bool,
-    use_colors: bool,
-    patterns: &[String],
+    options: StatusCommandOptions,
 ) -> Result<()> {
-    info!("Processing status command with {} patterns", patterns.len());
+    info!(
+        "Processing status command with {} patterns (fetch_first: {}, no_remote: {})",
+        options.patterns.len(),
+        options.fetch_first,
+        options.no_remote
+    );
+
+    // Apply config defaults if CLI flags not provided
+    let effective_fetch_first = options.fetch_first
+        || config
+            .remote_status
+            .as_ref()
+            .and_then(|rs| rs.fetch_first)
+            .unwrap_or(false);
+
+    let effective_no_remote = options.no_remote
+        || !config
+            .remote_status
+            .as_ref()
+            .and_then(|rs| rs.enabled)
+            .unwrap_or(true);
 
     // Determine jobs
     let jobs = cli
@@ -54,7 +81,7 @@ pub fn process_status_command(
     info!("Discovered {} repositories", repos.len());
 
     // 2. Filter repositories
-    let filtered_repos = repo::filter_repos(repos, patterns);
+    let filtered_repos = repo::filter_repos(repos, options.patterns);
     info!("Filtered to {} repositories", filtered_repos.len());
 
     if filtered_repos.is_empty() {
@@ -66,7 +93,7 @@ pub fn process_status_command(
     let widths = output::calculate_alignment_widths_fast(&filtered_repos);
 
     // 4. Create status options
-    let verbosity = if detailed {
+    let verbosity = if options.detailed {
         // CLI --detailed flag overrides config
         OutputVerbosity::Detailed
     } else {
@@ -80,15 +107,16 @@ pub fn process_status_command(
 
     let status_opts = StatusOptions {
         verbosity,
-        use_emoji,
-        use_colors,
+        use_emoji: options.use_emoji,
+        use_colors: options.use_colors,
     };
 
     // 5. Process repositories in parallel with streaming output
     let results = Mutex::new(Vec::new());
 
     filtered_repos.par_iter().for_each(|repo| {
-        let result = git::get_repo_status(repo);
+        let result =
+            git::get_repo_status_with_options(repo, effective_fetch_first, effective_no_remote);
 
         // Store for final summary
         if let Ok(mut results_vec) = results.lock() {

@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(rename = "repo-discovery")]
     pub repo_discovery: Option<RepoDiscoveryConfig>,
     pub logging: Option<LoggingConfig>,
+    #[serde(rename = "remote-status")]
+    pub remote_status: Option<RemoteStatusConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
@@ -50,6 +52,26 @@ pub struct LoggingConfig {
     pub file: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RemoteStatusConfig {
+    pub enabled: Option<bool>,
+    #[serde(rename = "fetch-first")]
+    pub fetch_first: Option<bool>,
+    #[serde(rename = "timeout-seconds")]
+    pub timeout_seconds: Option<u32>,
+}
+
+impl Default for RemoteStatusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Some(true),
+            fetch_first: Some(false),
+            timeout_seconds: Some(10),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -59,6 +81,7 @@ impl Default for Config {
             output: None,
             repo_discovery: Some(RepoDiscoveryConfig::default()),
             logging: None,
+            remote_status: Some(RemoteStatusConfig::default()),
         }
     }
 }

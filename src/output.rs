@@ -230,6 +230,20 @@ impl UnifiedDisplay for RepoStatus {
                         "~".to_string()
                     }
                 }
+                RemoteStatus::NoUpstream => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
+                RemoteStatus::DetachedHead => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
                 RemoteStatus::Error(e) => {
                     if opts.use_emoji {
                         format!("⚠️ {}", e.chars().take(3).collect::<String>())
@@ -396,6 +410,20 @@ impl UnifiedDisplay for &RepoStatus {
                     }
                 }
                 RemoteStatus::NoRemote => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
+                RemoteStatus::NoUpstream => {
+                    if opts.use_emoji {
+                        "📍".to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                }
+                RemoteStatus::DetachedHead => {
                     if opts.use_emoji {
                         "📍".to_string()
                     } else {

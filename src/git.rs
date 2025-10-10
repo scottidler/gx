@@ -32,7 +32,17 @@ pub enum RemoteStatus {
     Behind(u32),        // ⬇️  Local is behind by N commits
     Diverged(u32, u32), // 🔀 Local ahead by N, behind by M
     NoRemote,           // 📍 No remote tracking branch
+    NoUpstream,         // 📍 No upstream branch configured
+    DetachedHead,       // 📍 Detached HEAD state
     Error(String),      // ❌ Error checking remote status
+}
+
+/// Branch tracking information parsed from git status --porcelain --branch
+#[derive(Debug, Clone)]
+pub struct BranchTrackingInfo {
+    pub remote_branch: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -79,13 +89,20 @@ impl StatusChanges {
     }
 }
 
-/// Get git status for a single repository
-pub fn get_repo_status(repo: &Repo) -> RepoStatus {
-    debug!("Getting status for repo: {}", repo.name);
+/// Get git status for a single repository with options
+pub fn get_repo_status_with_options(repo: &Repo, fetch_first: bool, no_remote: bool) -> RepoStatus {
+    debug!(
+        "Getting status for repo: {} (fetch_first: {}, no_remote: {})",
+        repo.name, fetch_first, no_remote
+    );
 
     let branch = get_current_branch(repo);
     let commit_sha = get_current_commit_sha(repo);
-    let remote_status = get_remote_status(repo, &branch);
+    let remote_status = if no_remote {
+        RemoteStatus::NoRemote
+    } else {
+        get_remote_status_with_fetch(repo, fetch_first)
+    };
 
     match get_status_changes(repo) {
         Ok(changes) => {
@@ -122,21 +139,6 @@ fn get_current_commit_sha(repo: &Repo) -> Option<String> {
             "--short=7",
             "HEAD",
         ])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let sha = String::from_utf8(output.stdout).ok()?;
-        Some(sha.trim().to_string())
-    } else {
-        None
-    }
-}
-
-/// Get current commit SHA (full length)
-fn get_current_commit_sha_full(repo: &Repo) -> Option<String> {
-    let output = Command::new("git")
-        .args(["-C", &repo.path.to_string_lossy(), "rev-parse", "HEAD"])
         .output()
         .ok()?;
 
@@ -248,64 +250,131 @@ fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
     Ok(changes)
 }
 
-/// Get remote tracking status for a repository branch
-fn get_remote_status(repo: &Repo, branch: &Option<String>) -> RemoteStatus {
-    let branch = match branch {
-        Some(b) if !b.starts_with("HEAD@") => b,
-        _ => return RemoteStatus::NoRemote,
-    };
+/// Parse git status --porcelain --branch output for remote tracking info
+fn parse_branch_tracking_info(status_output: &str) -> Result<BranchTrackingInfo> {
+    use regex::Regex;
 
-    debug!("Checking remote status for {}: {}", repo.name, branch);
+    // Get the first line which contains branch tracking info
+    let first_line = status_output
+        .lines()
+        .next()
+        .ok_or_else(|| eyre::eyre!("Empty git status output"))?;
 
-    // Get local HEAD SHA (current commit, not branch tip)
-    let local_sha = match get_current_commit_sha_full(repo) {
-        Some(sha) => sha,
-        None => return RemoteStatus::Error("Failed to get local HEAD SHA".to_string()),
-    };
-
-    // Get remote SHA using ls-remote (non-destructive!)
-    let remote_sha = match get_remote_sha_ls_remote(repo, branch) {
-        Ok(sha) => sha,
-        Err(e) => return RemoteStatus::Error(e.to_string()),
-    };
-
-    debug!(
-        "Remote status for {}: local={}, remote={}",
-        repo.name,
-        &local_sha[..7],
-        &remote_sha[..7]
-    );
-
-    // Quick comparison first
-    if local_sha == remote_sha {
-        return RemoteStatus::UpToDate;
+    // Check if it's a branch status line
+    if !first_line.starts_with("## ") {
+        return Err(eyre::eyre!(
+            "Invalid git status --porcelain --branch format"
+        ));
     }
 
-    // Count ahead/behind using actual SHAs
-    // When remote SHA doesn't exist locally, we can't count commits accurately
-    // This indicates the repo needs to be fetched/synced
-    let behind = count_commits_between(&local_sha, &remote_sha, repo).unwrap_or_else(|_| {
-        debug!(
-            "Cannot count commits behind for {} - remote SHA not in local repo",
-            repo.name
-        );
-        1 // Indicate that we're behind, but can't count exactly
-    });
+    // Parse branch tracking line: ## local...remote [ahead X, behind Y]
+    let branch_regex =
+        Regex::new(r"^## (?P<local>[^.\s]+)(?:\.\.\.(?P<remote>\S+))?(?: \[(?P<tracking>.*)\])?")
+            .context("Failed to compile branch regex")?;
 
-    let ahead = count_commits_between(&remote_sha, &local_sha, repo).unwrap_or_else(|_| {
-        debug!(
-            "Cannot count commits ahead for {} - remote SHA not in local repo",
-            repo.name
-        );
-        0 // If we can't count, assume we're not ahead
-    });
+    let captures = branch_regex
+        .captures(first_line)
+        .ok_or_else(|| eyre::eyre!("Failed to parse branch tracking info from: {}", first_line))?;
 
+    let remote_branch = captures.name("remote").map(|m| m.as_str().to_string());
+
+    // Parse tracking info [ahead X, behind Y]
+    let mut ahead = 0;
+    let mut behind = 0;
+
+    if let Some(tracking_match) = captures.name("tracking") {
+        let tracking_str = tracking_match.as_str();
+        let tracking_regex =
+            Regex::new(r"(?:ahead (?P<ahead>\d+))?(?:, )?(?:behind (?P<behind>\d+))?")
+                .context("Failed to compile tracking regex")?;
+
+        if let Some(tracking_captures) = tracking_regex.captures(tracking_str) {
+            if let Some(ahead_match) = tracking_captures.name("ahead") {
+                ahead = ahead_match
+                    .as_str()
+                    .parse::<u32>()
+                    .context("Failed to parse ahead count")?;
+            }
+            if let Some(behind_match) = tracking_captures.name("behind") {
+                behind = behind_match
+                    .as_str()
+                    .parse::<u32>()
+                    .context("Failed to parse behind count")?;
+            }
+        }
+    }
+
+    Ok(BranchTrackingInfo {
+        remote_branch,
+        ahead,
+        behind,
+    })
+}
+
+/// Get remote tracking status using git status --porcelain --branch
+fn get_remote_status_native(repo: &Repo) -> RemoteStatus {
     debug!(
-        "Remote status for {}: ahead={}, behind={}",
-        repo.name, ahead, behind
+        "Getting remote status using git status --porcelain --branch for {}",
+        repo.name
     );
 
-    match (ahead, behind) {
+    // Execute git status --porcelain --branch
+    let output = match Command::new("git")
+        .args([
+            "-C",
+            &repo.path.to_string_lossy(),
+            "status",
+            "--porcelain",
+            "--branch",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            debug!("Git status command failed for {}: {}", repo.name, e);
+            return RemoteStatus::Error("Git command failed".to_string());
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!("Git status failed for {}: {}", repo.name, stderr);
+        return RemoteStatus::Error("Git status failed".to_string());
+    }
+
+    let output_str = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!(
+                "Invalid UTF-8 in git status output for {}: {}",
+                repo.name, e
+            );
+            return RemoteStatus::Error("Invalid UTF-8 in output".to_string());
+        }
+    };
+
+    // Parse tracking info
+    let tracking_info = match parse_branch_tracking_info(&output_str) {
+        Ok(info) => info,
+        Err(e) => {
+            debug!("Failed to parse git status for {}: {}", repo.name, e);
+
+            // Handle special cases
+            if output_str.contains("## HEAD (no branch)") {
+                return RemoteStatus::DetachedHead;
+            }
+
+            return RemoteStatus::Error("Parse failed".to_string());
+        }
+    };
+
+    // Handle no upstream case
+    if tracking_info.remote_branch.is_none() {
+        return RemoteStatus::NoUpstream;
+    }
+
+    // Convert to RemoteStatus based on ahead/behind counts
+    match (tracking_info.ahead, tracking_info.behind) {
         (0, 0) => RemoteStatus::UpToDate,
         (a, 0) if a > 0 => RemoteStatus::Ahead(a),
         (0, b) if b > 0 => RemoteStatus::Behind(b),
@@ -314,69 +383,32 @@ fn get_remote_status(repo: &Repo, branch: &Option<String>) -> RemoteStatus {
     }
 }
 
-/// Get remote SHA using git ls-remote (non-destructive)
-fn get_remote_sha_ls_remote(repo: &Repo, branch: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &repo.path.to_string_lossy(),
-            "ls-remote",
-            "origin",
-            branch,
-        ])
-        .output()
-        .context("Failed to run git ls-remote")?;
+/// Enhanced remote status with optional fetch
+fn get_remote_status_with_fetch(repo: &Repo, fetch_first: bool) -> RemoteStatus {
+    if fetch_first {
+        debug!("Fetching latest remote refs for {}", repo.name);
+        // Perform lightweight fetch to update tracking refs
+        let fetch_result = Command::new("git")
+            .args(["-C", &repo.path.to_string_lossy(), "fetch", "--quiet"])
+            .output();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("git ls-remote failed: {}", stderr));
-    }
-
-    let output_str =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in ls-remote output")?;
-
-    // Parse: "SHA\trefs/heads/branch"
-    if let Some(line) = output_str.lines().next() {
-        if let Some(sha) = line.split('\t').next() {
-            return Ok(sha.to_string());
+        match fetch_result {
+            Ok(output) if output.status.success() => {
+                debug!("Successfully fetched remote refs for {}", repo.name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!("Fetch failed for {}: {}", repo.name, stderr);
+                // Continue with status check even if fetch fails
+            }
+            Err(e) => {
+                debug!("Fetch command failed for {}: {}", repo.name, e);
+                // Continue with status check even if fetch fails
+            }
         }
     }
 
-    Err(eyre::eyre!("Could not parse ls-remote output"))
-}
-
-/// Count commits between two SHAs
-fn count_commits_between(from_sha: &str, to_sha: &str, repo: &Repo) -> Result<u32> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &repo.path.to_string_lossy(),
-            "rev-list",
-            "--count",
-            &format!("{from_sha}..{to_sha}"),
-        ])
-        .output()
-        .context("Failed to count commits")?;
-
-    if output.status.success() {
-        let count_str =
-            String::from_utf8(output.stdout).context("Invalid UTF-8 in rev-list output")?;
-        let count = count_str
-            .trim()
-            .parse::<u32>()
-            .context("Failed to parse commit count")?;
-        Ok(count)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If the SHA doesn't exist locally, we can't count commits
-        // This happens when remote has commits we haven't fetched
-        if stderr.contains("unknown revision") || stderr.contains("ambiguous argument") {
-            debug!("Cannot count commits between {from_sha} and {to_sha} - remote SHA not in local repo");
-            Err(eyre::eyre!("Remote SHA not found in local repository"))
-        } else {
-            Err(eyre::eyre!("git rev-list failed: {}", stderr))
-        }
-    }
+    get_remote_status_native(repo)
 }
 
 /// Checkout or create a branch in a repository, with stashing and sync
@@ -1739,5 +1771,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Tests for new git status --porcelain --branch parser
+    #[test]
+    fn test_parse_branch_tracking_info_ahead_behind() {
+        let output = "## main...origin/main [ahead 2, behind 5]\nM  modified-file.txt\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, Some("origin/main".to_string()));
+        assert_eq!(info.ahead, 2);
+        assert_eq!(info.behind, 5);
+    }
+
+    #[test]
+    fn test_parse_branch_tracking_info_ahead_only() {
+        let output = "## main...origin/main [ahead 3]\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, Some("origin/main".to_string()));
+        assert_eq!(info.ahead, 3);
+        assert_eq!(info.behind, 0);
+    }
+
+    #[test]
+    fn test_parse_branch_tracking_info_behind_only() {
+        let output = "## main...origin/main [behind 7]\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, Some("origin/main".to_string()));
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 7);
+    }
+
+    #[test]
+    fn test_parse_branch_tracking_info_up_to_date() {
+        let output = "## main...origin/main\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, Some("origin/main".to_string()));
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 0);
+    }
+
+    #[test]
+    fn test_parse_branch_tracking_info_no_upstream() {
+        let output = "## main\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, None);
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 0);
+    }
+
+    #[test]
+    fn test_parse_branch_tracking_info_different_remote() {
+        let output = "## feature...upstream/feature [behind 1]\n";
+        let info = parse_branch_tracking_info(output).unwrap();
+        assert_eq!(info.remote_branch, Some("upstream/feature".to_string()));
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 1);
+    }
+
+    #[test]
+    fn test_get_repo_status_with_options_no_remote() {
+        // Create a test repo
+        let repo = Repo::from_slug("test/repo".to_string());
+
+        // Test with no_remote = true
+        let status = get_repo_status_with_options(&repo, false, true);
+
+        // Should have NoRemote status regardless of actual git state
+        assert!(matches!(status.remote_status, RemoteStatus::NoRemote));
+        assert_eq!(status.repo.name, "repo");
+    }
+
+    #[test]
+    fn test_get_repo_status_with_options_default_behavior() {
+        // Create a test repo
+        let repo = Repo::from_slug("test/repo".to_string());
+
+        // Test default behavior (no fetch, no skip remote)
+        let status = get_repo_status_with_options(&repo, false, false);
+
+        // Should have basic repo info
+        assert_eq!(status.repo.name, "repo");
+        // Remote status will depend on actual git state, but shouldn't be NoRemote
+        assert!(!matches!(status.remote_status, RemoteStatus::NoRemote));
     }
 }

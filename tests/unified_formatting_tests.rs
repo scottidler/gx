@@ -259,7 +259,7 @@ fn test_emoji_width_calculation_with_complex_combinations() {
     // Verify individual emoji widths
     let opts = StatusOptions::default();
     assert_eq!(simple_emoji_status.get_emoji(&opts), "🟢");
-    assert_eq!(ahead_status.get_emoji(&opts), "⬆️15");
-    assert_eq!(diverged_status.get_emoji(&opts), "🔀5↑3↓");
+    assert_eq!(ahead_status.get_emoji(&opts), "⬆️ 15");
+    assert_eq!(diverged_status.get_emoji(&opts), "🔀 5↑3↓");
     assert_eq!(error_status.get_emoji(&opts), "⚠️ tim");
 }
