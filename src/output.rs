@@ -86,9 +86,12 @@ pub fn calculate_display_width(s: &str) -> usize {
             base_width
         }
 
+        // For dumb terminals (like Cursor's command execution), use base width without adjustments
+        "dumb" => base_width,
+
         _ => {
-            // For unknown terminals, use conservative approach
-            // Most terminals seem to have the same issue with these patterns
+            // For most terminals, arrow emojis with variation selectors need -1 adjustment
+            // This includes screen-256color and other common terminal types
             if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
                 return base_width - 1;
             }
