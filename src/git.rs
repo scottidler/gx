@@ -1509,10 +1509,12 @@ mod tests {
         // This is a placeholder for the actual test implementation
 
         // For now, just test that StatusChanges works correctly
-        let mut changes = StatusChanges::default();
-        changes.modified = 1;
-        changes.untracked = 1;
-        changes.added = 1;
+        let changes = StatusChanges {
+            modified: 1,
+            untracked: 1,
+            added: 1,
+            ..Default::default()
+        };
 
         assert!(!changes.is_empty());
         assert_eq!(changes.modified, 1);
@@ -1535,7 +1537,7 @@ mod tests {
             // Initialize git repo
             let output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["init"])
+                .args(["init"])
                 .output()
                 .map_err(|e| eyre::eyre!("Failed to run git init: {}", e))?;
 
@@ -1549,13 +1551,13 @@ mod tests {
             // Set up git config
             Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["config", "user.email", "test@example.com"])
+                .args(["config", "user.email", "test@example.com"])
                 .output()
                 .map_err(|e| eyre::eyre!("Failed to set git email: {}", e))?;
 
             Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["config", "user.name", "Test User"])
+                .args(["config", "user.name", "Test User"])
                 .output()
                 .map_err(|e| eyre::eyre!("Failed to set git name: {}", e))?;
 
@@ -1581,7 +1583,7 @@ mod tests {
 
             let add_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["add", "test.txt"])
+                .args(["add", "test.txt"])
                 .output();
 
             if add_output.is_err() || !add_output.unwrap().status.success() {
@@ -1590,7 +1592,7 @@ mod tests {
 
             let commit_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["commit", "-m", "initial commit"])
+                .args(["commit", "-m", "initial commit"])
                 .output();
 
             if commit_output.is_err() || !commit_output.unwrap().status.success() {
@@ -1639,7 +1641,7 @@ mod tests {
 
             let add_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["add", "test.txt"])
+                .args(["add", "test.txt"])
                 .output();
 
             if add_output.is_err() || !add_output.unwrap().status.success() {
@@ -1648,7 +1650,7 @@ mod tests {
 
             let commit_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["commit", "-m", "initial commit"])
+                .args(["commit", "-m", "initial commit"])
                 .output();
 
             if commit_output.is_err() || !commit_output.unwrap().status.success() {
@@ -1686,7 +1688,7 @@ mod tests {
 
             let add_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["add", "test.txt"])
+                .args(["add", "test.txt"])
                 .output();
 
             if add_output.is_err() || !add_output.unwrap().status.success() {
@@ -1695,7 +1697,7 @@ mod tests {
 
             let commit_output = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["commit", "-m", "initial commit"])
+                .args(["commit", "-m", "initial commit"])
                 .output();
 
             if commit_output.is_err() || !commit_output.unwrap().status.success() {
@@ -1709,7 +1711,7 @@ mod tests {
 
             let add_output2 = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["add", "test2.txt"])
+                .args(["add", "test2.txt"])
                 .output();
 
             if add_output2.is_err() || !add_output2.unwrap().status.success() {
@@ -1718,7 +1720,7 @@ mod tests {
 
             let commit_output2 = Command::new("git")
                 .current_dir(&repo_path)
-                .args(&["commit", "-m", "second commit"])
+                .args(["commit", "-m", "second commit"])
                 .output();
 
             if commit_output2.is_err() || !commit_output2.unwrap().status.success() {
@@ -1733,7 +1735,7 @@ mod tests {
                 // Check git status to verify file is staged (if possible)
                 if let Ok(output) = Command::new("git")
                     .current_dir(&repo_path)
-                    .args(&["status", "--porcelain"])
+                    .args(["status", "--porcelain"])
                     .output()
                 {
                     if output.status.success() {

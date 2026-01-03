@@ -6,98 +6,14 @@ use crate::git::{
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
-use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use string_width::string_width;
+use unicode_display_width::width as unicode_width;
 
-/// Detect the current terminal type for width calculation adjustments
-fn get_terminal_type() -> String {
-    // Check various environment variables to determine terminal
-    if let Ok(term_program) = env::var("TERM_PROGRAM") {
-        return term_program.to_lowercase();
-    }
-
-    if let Ok(terminal_emulator) = env::var("TERMINAL_EMULATOR") {
-        return terminal_emulator.to_lowercase();
-    }
-
-    if let Ok(term) = env::var("TERM") {
-        return term.to_lowercase();
-    }
-
-    // Check for specific terminal indicators
-    if env::var("ITERM_SESSION_ID").is_ok() {
-        return "iterm2".to_string();
-    }
-
-    if env::var("GNOME_TERMINAL_SERVICE").is_ok() {
-        return "gnome-terminal".to_string();
-    }
-
-    if env::var("KONSOLE_VERSION").is_ok() {
-        return "konsole".to_string();
-    }
-
-    if env::var("ALACRITTY_SOCKET").is_ok() {
-        return "alacritty".to_string();
-    }
-
-    "unknown".to_string()
-}
-
-/// Calculate display width for emoji strings with terminal-aware adjustments
-/// This uses the string_width library but applies terminal-specific corrections
+/// Calculate display width for emoji strings using Unicode Standard width calculation
+/// This uses unicode-display-width which provides consistent results across environments
 pub fn calculate_display_width(s: &str) -> usize {
-    let base_width = string_width(s);
-    let terminal_type = get_terminal_type();
-
-    // Apply terminal-specific adjustments for emoji rendering differences
-    match terminal_type.as_str() {
-        "vscode" => {
-            // VSCode integrated terminal has specific emoji rendering behavior
-            // Based on empirical testing: all these patterns appear shifted right (too much space)
-            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
-                // All these patterns need -1 adjustment (they appear shifted right)
-                return base_width - 1;
-            }
-            base_width
-        }
-
-        // Many terminals have issues with arrow emoji + variation selector width calculations
-        term if term.contains("xterm")
-            || term.contains("gnome")
-            || term.contains("konsole")
-            || term.contains("alacritty")
-            || term.contains("kitty") =>
-        {
-            // These terminals render these patterns with too much space (shifted right)
-            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
-                return base_width - 1;
-            }
-            base_width
-        }
-
-        "iterm2" => {
-            // iTerm2 has similar emoji rendering issues
-            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
-                return base_width - 1;
-            }
-            base_width
-        }
-
-        // For dumb terminals (like Cursor's command execution), use base width without adjustments
-        "dumb" => base_width,
-
-        _ => {
-            // For most terminals, arrow emojis with variation selectors need -1 adjustment
-            // This includes screen-256color and other common terminal types
-            if s.starts_with("⬆️ ") || s.starts_with("⬇️ ") || s.starts_with("⚠️ ") {
-                return base_width - 1;
-            }
-            base_width
-        }
-    }
+    unicode_width(s) as usize
 }
 
 /// Pad a string to a specific display width, handling emoji properly

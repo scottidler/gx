@@ -1,5 +1,4 @@
 use gx::config::{Config, RemoteStatusConfig};
-use serde_yaml;
 
 /// Test RemoteStatusConfig default values
 #[test]
@@ -63,12 +62,14 @@ remote-status:
 /// Test RemoteStatusConfig serialization
 #[test]
 fn test_remote_status_config_serialization() {
-    let mut config = Config::default();
-    config.remote_status = Some(RemoteStatusConfig {
-        enabled: Some(false),
-        fetch_first: Some(true),
-        timeout_seconds: Some(20),
-    });
+    let config = Config {
+        remote_status: Some(RemoteStatusConfig {
+            enabled: Some(false),
+            fetch_first: Some(true),
+            timeout_seconds: Some(20),
+        }),
+        ..Default::default()
+    };
 
     let yaml = serde_yaml::to_string(&config).unwrap();
 

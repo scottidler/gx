@@ -35,7 +35,7 @@ fn test_emoji_alignment_consistency() {
 
     // All formatted outputs should have the same display width
     let first_width = outputs[0].2;
-    for (_i, (emoji, formatted, display_width)) in outputs.iter().enumerate() {
+    for (emoji, formatted, display_width) in outputs.iter() {
         assert_eq!(
             *display_width,
             first_width,
@@ -80,7 +80,7 @@ fn test_emoji_display_width_calculation() {
         ("🟢", 2),
         ("⬇️1", 3),    // unicode-display-width: emoji (2) + digit (1) = 3
         ("⬆️12", 4),   // unicode-display-width: emoji (2) + "12" (2) = 4
-        ("⚠️ git", 5), // Actual calculated width: emoji (2) + " git" (3) = 5
+        ("⚠️ git", 6), // Actual calculated width: emoji (2) + " git" (4) = 6
         ("🔀3↑2↓", 6),
     ];
 
