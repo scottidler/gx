@@ -449,10 +449,24 @@ impl UnifiedDisplay for CreateResult {
         } else {
             match self.action {
                 CreateAction::DryRun => {
+                    // Check if there were actual changes in this repo
+                    let has_changes = self
+                        .substitution_stats
+                        .as_ref()
+                        .map(|s| s.files_changed > 0)
+                        .unwrap_or(false)
+                        || !self.files_affected.is_empty();
+
                     if opts.use_emoji {
-                        "👁️".to_string()
+                        if has_changes {
+                            "✏️".to_string() // Would change
+                        } else {
+                            "➖".to_string() // No changes (skipped)
+                        }
+                    } else if has_changes {
+                        "CHANGE".to_string()
                     } else {
-                        "DRY".to_string()
+                        "SKIP".to_string()
                     }
                 }
 
@@ -503,10 +517,24 @@ impl UnifiedDisplay for &CreateResult {
         } else {
             match self.action {
                 CreateAction::DryRun => {
+                    // Check if there were actual changes in this repo
+                    let has_changes = self
+                        .substitution_stats
+                        .as_ref()
+                        .map(|s| s.files_changed > 0)
+                        .unwrap_or(false)
+                        || !self.files_affected.is_empty();
+
                     if opts.use_emoji {
-                        "👁️".to_string()
+                        if has_changes {
+                            "✏️".to_string() // Would change
+                        } else {
+                            "➖".to_string() // No changes (skipped)
+                        }
+                    } else if has_changes {
+                        "CHANGE".to_string()
                     } else {
-                        "DRY".to_string()
+                        "SKIP".to_string()
                     }
                 }
 

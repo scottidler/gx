@@ -1125,10 +1125,32 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
     let successful = results.iter().filter(|r| r.error.is_none()).count();
     let errors = total - successful;
 
-    let dry_runs = results
+    // Count dry runs that would have changes vs those that wouldn't
+    let dry_runs_with_changes = results
         .iter()
-        .filter(|r| matches!(r.action, CreateAction::DryRun))
+        .filter(|r| {
+            matches!(r.action, CreateAction::DryRun)
+                && (r
+                    .substitution_stats
+                    .as_ref()
+                    .map(|s| s.files_changed > 0)
+                    .unwrap_or(false)
+                    || !r.files_affected.is_empty())
+        })
         .count();
+    let dry_runs_no_changes = results
+        .iter()
+        .filter(|r| {
+            matches!(r.action, CreateAction::DryRun)
+                && !r
+                    .substitution_stats
+                    .as_ref()
+                    .map(|s| s.files_changed > 0)
+                    .unwrap_or(false)
+                && r.files_affected.is_empty()
+        })
+        .count();
+
     let committed = results
         .iter()
         .filter(|r| matches!(r.action, CreateAction::Committed))
@@ -1142,18 +1164,36 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
 
     if opts.use_emoji {
         println!("\n📊 {total} repositories processed:");
-        println!("   👁️  {dry_runs} dry runs");
-        println!("   💾 {committed} committed");
-        println!("   📥 {prs_created} PRs created");
+        if dry_runs_with_changes > 0 {
+            println!("   ✏️  {dry_runs_with_changes} would change");
+        }
+        if dry_runs_no_changes > 0 {
+            println!("   ➖ {dry_runs_no_changes} no matches");
+        }
+        if committed > 0 {
+            println!("   💾 {committed} committed");
+        }
+        if prs_created > 0 {
+            println!("   📥 {prs_created} PRs created");
+        }
         println!("   📄 {total_files} files affected");
         if errors > 0 {
             println!("   ❌ {errors} errors");
         }
     } else {
         println!("\nSummary: {total} repositories processed:");
-        println!("   {dry_runs} dry runs");
-        println!("   {committed} committed");
-        println!("   {prs_created} PRs created");
+        if dry_runs_with_changes > 0 {
+            println!("   {dry_runs_with_changes} would change");
+        }
+        if dry_runs_no_changes > 0 {
+            println!("   {dry_runs_no_changes} no matches");
+        }
+        if committed > 0 {
+            println!("   {committed} committed");
+        }
+        if prs_created > 0 {
+            println!("   {prs_created} PRs created");
+        }
         println!("   {total_files} files affected");
         if errors > 0 {
             println!("   {errors} errors");

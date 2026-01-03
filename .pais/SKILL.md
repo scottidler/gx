@@ -14,80 +14,136 @@ triggers:
 
 # GX
 
-CLI for git operations across multiple repositories simultaneously.
+CLI for git operations across multiple repositories simultaneously. Designed for progressive filtering — start broad, narrow down with each parameter.
 
-## When to Use
+## Core Concept: Progressive Filtering
 
-Use `gx` when the user needs to:
-- Make the same change across multiple repos (file updates, substitutions)
-- Create PRs in bulk with a single change-id
-- Review/approve/merge PRs across repos
-- Clean up branches after bulk operations
-- Check status of many repos at once
+GX operations follow a funnel pattern:
 
-## Commands
-
-### Status & Discovery
-
-```bash
-gx status                          # Status across all discovered repos
-gx status -p frontend              # Filter by pattern
-gx clone tatari-tv                 # Clone all repos from an org
+```
+All repos in cwd
+    ↓ -p pattern      (filter repos by name)
+    ↓ --files         (filter files within repos)
+    ↓ sub/regex       (filter by content match)
+    ↓ --commit        (actually make changes)
+    ↓ --pr            (create PRs)
 ```
 
-### Bulk Changes
+**Omit later stages to preview what would be affected.**
+
+## Discovery & Search (Dry-Run Mode)
+
+To find where something exists without making changes, omit `--commit`:
 
 ```bash
-# Dry-run (preview matches)
-gx create --files '*.json' -p myrepo
+# Step 1: See which repos have a file
+gx create --files 'pyproject.toml'
 
-# String substitution + commit + PR
-gx create --files 'Cargo.toml' sub 'version = "1.0"' 'version = "1.1"' \
-  --commit "Bump version" --pr
+# Step 2: Narrow to repos matching a pattern
+gx create --files 'pyproject.toml' -p python
 
-# Regex substitution
-gx create --files '*.md' regex 'v\d+\.\d+' 'v2.0' --commit "Update versions" --pr
+# Step 3: See which files contain a string (dry-run substitution)
+gx create --files 'pyproject.toml' -p python sub '3.9' 'PLACEHOLDER'
+# Output shows: "Files scanned: N, Files changed: M" (M = files with matches)
 
-# Add new file to repos
-gx create --files '*.toml' add .github/CODEOWNERS 'content here' --commit "Add CODEOWNERS" --pr
-
-# Delete files
-gx create --files 'legacy.txt' delete --commit "Remove legacy" --pr
+# Step 4: Different file types
+gx create --files '.python-version' sub '3.9' 'X'
+gx create --files 'Dockerfile' sub 'python3.9' 'X'
+gx create --files '*.yaml' sub 'python:3.9' 'X'
 ```
 
-### PR Management
+The Pattern Analysis in output shows:
+- `Files scanned` = files matching the --files pattern
+- `Files changed` = files that contain the search string
+- `Files with no matches` = files scanned but string not found
+
+## Making Changes
+
+Add `--commit` to actually modify files:
 
 ```bash
-gx review ls GX-2024-01-15              # List PRs for a change-id
-gx review approve GX-2024-01-15         # Approve and merge all
-gx review approve GX-2024-01-15 --admin # Admin merge (bypass checks)
-gx review delete GX-2024-01-15          # Close PRs, delete branches
-gx review purge                         # Clean up all GX-* branches
+# Substitution across repos
+gx create --files 'pyproject.toml' sub '^3.9' '^3.11' --commit "Upgrade to Python 3.11"
+
+# With PR creation
+gx create --files 'pyproject.toml' sub '^3.9' '^3.11' \
+  --commit "Upgrade to Python 3.11" --pr
+
+# Draft PR
+gx create --files '*.md' sub 'old-url' 'new-url' \
+  --commit "Update URLs" --pr=draft
+```
+
+## Commands Reference
+
+### Status
+```bash
+gx status                     # All repos
+gx status -p frontend         # Repos matching "frontend"
+gx status --detailed          # File-by-file details
+```
+
+### Clone
+```bash
+gx clone tatari-tv            # Clone all org repos
+gx clone tatari-tv -p python  # Only repos matching "python"
+```
+
+### Checkout
+```bash
+gx checkout main              # Checkout main everywhere
+gx checkout -b feature-x      # Create new branch everywhere
+gx checkout main -p frontend  # Only in matching repos
+```
+
+### Create (Changes & PRs)
+```bash
+# Preview matches (no action = show repos/files)
+gx create --files '*.json'
+
+# Preview substitution (action but no --commit = dry-run)
+gx create --files '*.json' sub 'old' 'new'
+
+# Execute (--commit = make changes)
+gx create --files '*.json' sub 'old' 'new' --commit "Update config"
+
+# With PR
+gx create --files '*.json' sub 'old' 'new' --commit "Update config" --pr
+```
+
+Actions: `add <path> <content>`, `delete`, `sub <find> <replace>`, `regex <pattern> <replace>`
+
+### Review (PR Management)
+```bash
+gx review ls GX-2024-01-15        # List PRs for change-id
+gx review approve GX-2024-01-15   # Approve and merge
+gx review delete GX-2024-01-15    # Close PRs, delete branches
+gx review purge                   # Clean up all GX-* branches
 ```
 
 ### Cleanup
-
 ```bash
-gx cleanup --list                  # Show what needs cleanup
-gx cleanup GX-2024-01-15           # Clean up specific change
-gx cleanup --all                   # Clean up all merged changes
+gx cleanup --list             # Show what needs cleanup
+gx cleanup GX-2024-01-15      # Clean specific change
+gx cleanup --all              # Clean all merged changes
 ```
+
+## Key Flags
+
+| Flag | Purpose |
+|------|---------|
+| `-p, --patterns` | Filter repos by name (can repeat: `-p foo -p bar`) |
+| `-f, --files` | File glob pattern within repos |
+| `-c, --commit` | Commit message (triggers actual changes) |
+| `--pr` | Create PR after commit |
+| `-j, --jobs` | Parallel workers |
+| `-m, --depth` | Max directory depth to scan |
 
 ## Change IDs
 
-GX auto-generates change IDs like `GX-2024-01-15T10-30-00`. All branches and PRs for a bulk operation share the same change-id, making them easy to track and clean up.
+GX auto-generates IDs like `GX-2026-01-03T12-30-00`. All branches/PRs for one operation share the same ID for tracking and cleanup.
 
-## State Tracking
+## Requirements
 
-GX tracks operations in `~/.gx/changes/`. This enables:
-- Knowing which repos were modified
-- Which PRs are open/merged/closed
-- Automatic cleanup of local branches after merge
-
-## Important Notes
-
-- Always do a dry-run first (omit `--commit`) to preview changes
-- The `--pr` flag requires `--commit`
-- Use `--pr=draft` for draft PRs
-- GX requires `gh` CLI to be authenticated
-
+- `git` >= 2.30
+- `gh` CLI (authenticated)
