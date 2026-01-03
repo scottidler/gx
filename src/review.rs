@@ -5,6 +5,7 @@ use crate::github::{self, PrInfo};
 use crate::output::{display_review_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
+use crate::state::StateManager;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
 use rayon::prelude::*;
@@ -532,6 +533,17 @@ fn approve_and_merge_pr(pr: &PrInfo, change_id: &str, admin_override: bool) -> R
     match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override) {
         Ok(()) => {
             info!("Successfully approved and merged PR #{}", pr.number);
+
+            // Update state tracking to mark PR as merged
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    state.mark_merged(&pr.repo_slug);
+                    if let Err(e) = manager.save(&state) {
+                        warn!("Failed to update state after merge: {}", e);
+                    }
+                }
+            }
+
             ReviewResult {
                 repo,
                 change_id: change_id.to_string(),
@@ -542,6 +554,15 @@ fn approve_and_merge_pr(pr: &PrInfo, change_id: &str, admin_override: bool) -> R
         }
         Err(e) => {
             warn!("Failed to approve and merge PR #{}: {}", pr.number, e);
+
+            // Update state tracking to mark failure
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    state.mark_failed(&pr.repo_slug, e.to_string());
+                    let _ = manager.save(&state);
+                }
+            }
+
             ReviewResult {
                 repo,
                 change_id: change_id.to_string(),
@@ -560,6 +581,14 @@ fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
     // First close the PR
     match github::close_pr(&pr.repo_slug, pr.number) {
         Ok(()) => {
+            // Update state tracking to mark PR as closed
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    state.mark_closed(&pr.repo_slug);
+                    let _ = manager.save(&state);
+                }
+            }
+
             // Then delete the remote branch
             match github::delete_remote_branch(&pr.repo_slug, &pr.branch) {
                 Ok(()) => {

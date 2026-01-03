@@ -66,6 +66,7 @@ fn list_cleanable_changes(state_manager: &StateManager) -> Result<()> {
     println!("Changes available for cleanup:\n");
     for state in cleanable {
         let repos_needing_cleanup = state.get_repos_needing_cleanup().len();
+        let open_prs = state.get_open_prs().len();
         let total_repos = state.repositories.len();
         let merged = state
             .repositories
@@ -74,8 +75,8 @@ fn list_cleanable_changes(state_manager: &StateManager) -> Result<()> {
             .count();
 
         println!(
-            "  📦 {} ({} repos, {} merged, {} need cleanup)",
-            state.change_id, total_repos, merged, repos_needing_cleanup
+            "  📦 {} ({} repos, {} merged, {} open, {} need cleanup)",
+            state.change_id, total_repos, merged, open_prs, repos_needing_cleanup
         );
 
         if let Some(desc) = &state.description {

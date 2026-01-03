@@ -136,6 +136,8 @@ impl ChangeState {
     }
 
     /// Update PR info for a repository
+    /// Note: Currently only used in tests. Will be integrated when github::create_pr
+    /// is updated to return PR info (number, URL).
     #[allow(dead_code)]
     pub fn set_pr_info(&mut self, repo_slug: &str, pr_number: u64, pr_url: String, is_draft: bool) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
@@ -152,7 +154,6 @@ impl ChangeState {
     }
 
     /// Mark a repository's PR as merged
-    #[allow(dead_code)]
     pub fn mark_merged(&mut self, repo_slug: &str) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.status = RepoChangeStatus::PrMerged;
@@ -162,7 +163,6 @@ impl ChangeState {
     }
 
     /// Mark a repository's PR as closed
-    #[allow(dead_code)]
     pub fn mark_closed(&mut self, repo_slug: &str) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.status = RepoChangeStatus::PrClosed;
@@ -179,7 +179,6 @@ impl ChangeState {
     }
 
     /// Mark a repository as failed
-    #[allow(dead_code)]
     pub fn mark_failed(&mut self, repo_slug: &str, error: String) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.status = RepoChangeStatus::Failed;
@@ -233,7 +232,6 @@ impl ChangeState {
     }
 
     /// Get open PRs
-    #[allow(dead_code)]
     pub fn get_open_prs(&self) -> Vec<&RepoChangeState> {
         self.repositories
             .values()
@@ -328,7 +326,6 @@ impl StateManager {
     }
 
     /// Clean up old states (older than specified days)
-    #[allow(dead_code)]
     pub fn cleanup_old(&self, days: u64) -> Result<usize> {
         let cutoff = Utc::now() - chrono::Duration::days(days as i64);
         let states = self.list()?;

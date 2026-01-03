@@ -1,9 +1,10 @@
 use crate::cli::RollbackAction;
+use crate::state::StateManager;
 use crate::transaction::{validate_rollback_operations, Transaction};
 use chrono::{DateTime, Duration, Utc};
 use colored::*;
 use eyre::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 /// Handle rollback commands
 pub fn handle_rollback(action: RollbackAction) -> Result<()> {
@@ -212,8 +213,8 @@ fn cleanup_recovery_states(
 
     let mut states_to_clean = Vec::new();
 
-    if let Some(duration_str) = older_than {
-        let cutoff_duration = parse_duration(&duration_str)?;
+    if let Some(ref duration_str) = older_than {
+        let cutoff_duration = parse_duration(duration_str)?;
         let cutoff_time = Utc::now() - cutoff_duration;
 
         for state in &states {
@@ -288,6 +289,29 @@ fn cleanup_recovery_states(
                 .yellow()
                 .bold()
         );
+    }
+
+    // Also clean up old change states if a duration was specified
+    if let Some(duration_str) = older_than.as_ref() {
+        if let Ok(cutoff_duration) = parse_duration(duration_str) {
+            let days = cutoff_duration.num_days() as u64;
+            if days > 0 {
+                if let Ok(state_manager) = StateManager::new() {
+                    match state_manager.cleanup_old(days) {
+                        Ok(deleted) if deleted > 0 => {
+                            println!(
+                                "{}",
+                                format!("🧹 Also cleaned up {deleted} old change states").blue()
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to cleanup old change states: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
