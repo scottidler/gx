@@ -14,6 +14,7 @@ pub mod repo;
 pub mod review;
 pub mod rollback;
 pub mod ssh;
+pub mod state;
 pub mod status;
 pub mod test_utils;
 pub mod transaction;

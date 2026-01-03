@@ -1,6 +1,7 @@
 use crate::config::Config;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
+use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 
@@ -193,6 +194,30 @@ pub enum PrState {
     Closed,
 }
 
+/// Raw PR data from GitHub CLI JSON output
+#[derive(Debug, Deserialize)]
+struct GhPrListItem {
+    number: u64,
+    title: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    author: GhAuthor,
+    state: String,
+    url: String,
+    repository: GhRepository,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhAuthor {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+}
+
 /// List PRs by change ID pattern
 pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<PrInfo>> {
     debug!("Listing PRs for org: {org}, change ID pattern: {change_id_pattern}");
@@ -224,14 +249,31 @@ pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<P
 
 /// Parse JSON output from gh pr list
 fn parse_pr_list_json(json_output: &str) -> Result<Vec<PrInfo>> {
-    // For now, we'll use a simple JSON parsing approach
-    // In a production system, you'd want to use serde_json
-    let prs = Vec::new();
+    let trimmed = json_output.trim();
+    if trimmed.is_empty() || trimmed == "[]" {
+        return Ok(Vec::new());
+    }
 
-    // This is a simplified parser - in reality you'd use serde_json
-    // For now, just return empty list to avoid complex JSON parsing
-    debug!("PR list JSON: {json_output}");
+    let gh_prs: Vec<GhPrListItem> =
+        serde_json::from_str(trimmed).context("Failed to parse PR list JSON")?;
 
+    let prs: Vec<PrInfo> = gh_prs
+        .into_iter()
+        .map(|gh_pr| PrInfo {
+            repo_slug: gh_pr.repository.name_with_owner,
+            number: gh_pr.number,
+            title: gh_pr.title,
+            branch: gh_pr.head_ref_name,
+            author: gh_pr.author.login,
+            state: match gh_pr.state.to_uppercase().as_str() {
+                "OPEN" => PrState::Open,
+                _ => PrState::Closed,
+            },
+            url: gh_pr.url,
+        })
+        .collect();
+
+    debug!("Parsed {} PRs from JSON", prs.len());
     Ok(prs)
 }
 
@@ -362,6 +404,7 @@ pub fn list_branches_with_prefix(repo_slug: &str, prefix: &str) -> Result<Vec<St
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn test_query_parsing() {
@@ -377,5 +420,126 @@ mod tests {
         assert_eq!(repos[0], "owner/repo1");
         assert_eq!(repos[1], "owner/repo2");
         assert_eq!(repos[2], "owner/repo3");
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_empty_string() {
+        let result = parse_pr_list_json("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_empty_array() {
+        let result = parse_pr_list_json("[]").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_whitespace() {
+        let result = parse_pr_list_json("  \n  ").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_single_pr() {
+        let json = r#"[{
+            "number": 123,
+            "title": "GX-2024-01-15: Update configs",
+            "headRefName": "GX-2024-01-15",
+            "author": {"login": "testuser"},
+            "state": "OPEN",
+            "url": "https://github.com/org/repo/pull/123",
+            "repository": {"nameWithOwner": "org/repo"}
+        }]"#;
+
+        let result = parse_pr_list_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].number, 123);
+        assert_eq!(result[0].title, "GX-2024-01-15: Update configs");
+        assert_eq!(result[0].branch, "GX-2024-01-15");
+        assert_eq!(result[0].author, "testuser");
+        assert_eq!(result[0].repo_slug, "org/repo");
+        assert_eq!(result[0].state, PrState::Open);
+        assert_eq!(result[0].url, "https://github.com/org/repo/pull/123");
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_multiple_prs() {
+        let json = r#"[
+            {
+                "number": 1,
+                "title": "PR 1",
+                "headRefName": "branch1",
+                "author": {"login": "user1"},
+                "state": "OPEN",
+                "url": "https://github.com/org/repo1/pull/1",
+                "repository": {"nameWithOwner": "org/repo1"}
+            },
+            {
+                "number": 2,
+                "title": "PR 2",
+                "headRefName": "branch2",
+                "author": {"login": "user2"},
+                "state": "CLOSED",
+                "url": "https://github.com/org/repo2/pull/2",
+                "repository": {"nameWithOwner": "org/repo2"}
+            }
+        ]"#;
+
+        let result = parse_pr_list_json(json).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].number, 1);
+        assert_eq!(result[0].state, PrState::Open);
+        assert_eq!(result[1].number, 2);
+        assert_eq!(result[1].state, PrState::Closed);
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_lowercase_state() {
+        let json = r#"[{
+            "number": 1,
+            "title": "Test PR",
+            "headRefName": "test-branch",
+            "author": {"login": "user"},
+            "state": "open",
+            "url": "https://github.com/org/repo/pull/1",
+            "repository": {"nameWithOwner": "org/repo"}
+        }]"#;
+
+        let result = parse_pr_list_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].state, PrState::Open);
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_merged_state() {
+        let json = r#"[{
+            "number": 1,
+            "title": "Test PR",
+            "headRefName": "test-branch",
+            "author": {"login": "user"},
+            "state": "MERGED",
+            "url": "https://github.com/org/repo/pull/1",
+            "repository": {"nameWithOwner": "org/repo"}
+        }]"#;
+
+        let result = parse_pr_list_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        // MERGED is treated as Closed (not Open)
+        assert_eq!(result[0].state, PrState::Closed);
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_invalid_json() {
+        let json = "not valid json";
+        let result = parse_pr_list_json(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_pr_list_json_missing_fields() {
+        let json = r#"[{"number": 1}]"#;
+        let result = parse_pr_list_json(json);
+        assert!(result.is_err());
     }
 }
