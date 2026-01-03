@@ -15,11 +15,23 @@ triggers:
 
 # GX
 
-CLI for git operations across multiple repositories simultaneously. Designed for progressive filtering — start broad, narrow down with each parameter.
+CLI for git operations across multiple repositories simultaneously.
+
+## Syntax Discovery
+
+**ALWAYS run `--help` to discover exact syntax before using any command:**
+
+```bash
+gx --help                    # List all commands
+gx <command> --help          # Command options (e.g., gx create --help)
+gx <command> <action> --help # Action options (e.g., gx create sub --help)
+```
+
+The help output includes working EXAMPLES - use those as templates.
 
 ## Core Concept: Progressive Filtering
 
-GX operations follow a funnel pattern:
+GX operations follow a funnel pattern - start broad, narrow down:
 
 ```
 All repos in cwd
@@ -32,120 +44,61 @@ All repos in cwd
 
 **Omit later stages to preview what would be affected.**
 
-## Discovery & Search (Dry-Run Mode)
+## Workflow
 
-To find where something exists without making changes, omit `--commit`:
+### 1. Discovery (Dry-Run)
 
-```bash
-# Step 1: See which repos have a file
-gx create --files 'pyproject.toml'
-
-# Step 2: Narrow to repos matching a pattern
-gx create --files 'pyproject.toml' -p python
-
-# Step 3: See which files contain a string (dry-run substitution)
-gx create --files 'pyproject.toml' -p python sub '3.9' 'PLACEHOLDER'
-# Output shows: "Files scanned: N, Files changed: M" (M = files with matches)
-
-# Step 4: Different file types
-gx create --files '.python-version' sub '3.9' 'X'
-gx create --files 'Dockerfile' sub 'python3.9' 'X'
-gx create --files '*.yaml' sub 'python:3.9' 'X'
-```
-
-The Pattern Analysis in output shows:
-- `Files scanned` = files matching the --files pattern
-- `Files changed` = files that contain the search string
-- `Files with no matches` = files scanned but string not found
-
-## Making Changes
-
-Add `--commit` BEFORE the action to actually modify files:
+Find what exists without making changes - omit `--commit`:
 
 ```bash
-# IMPORTANT: --commit and --pr must come BEFORE the action (sub/regex/add/delete)
-
-# Substitution across repos
-gx create --files 'pyproject.toml' --commit "Upgrade to Python 3.11" sub '3.9' '3.11'
-
-# With PR creation
-gx create --files 'pyproject.toml' --commit "Upgrade to Python 3.11" --pr sub '3.9' '3.11'
-
-# Draft PR
-gx create --files '*.md' --commit "Update URLs" --pr=draft sub 'old-url' 'new-url'
+gx create --files 'pyproject.toml'                    # Which repos have this file?
+gx create --files 'pyproject.toml' -p python          # Narrow to repos matching "python"
+gx create --files 'pyproject.toml' sub '3.9' 'X'      # Which files contain "3.9"?
 ```
 
-## Commands Reference
+Output shows `Files scanned` vs `Files changed` - use this to refine your scope.
 
-### Status
-```bash
-gx status                     # All repos
-gx status -p frontend         # Repos matching "frontend"
-gx status --detailed          # File-by-file details
-```
+### 2. Execute Changes
 
-### Clone
-```bash
-gx clone tatari-tv            # Clone all org repos
-gx clone tatari-tv -p python  # Only repos matching "python"
-```
+Add `--commit` to actually modify files. **Run `gx create --help` for exact flag order.**
 
-### Checkout
-```bash
-gx checkout main              # Checkout main everywhere
-gx checkout -b feature-x      # Create new branch everywhere
-gx checkout main -p frontend  # Only in matching repos
-```
+### 3. Create PRs
 
-### Create (Changes & PRs)
+Add `--pr` (or `--pr=draft`) after `--commit` to create pull requests.
 
-**CRITICAL**: Options (`--commit`, `--pr`) must come BEFORE the action (`sub`, `regex`, `add`, `delete`).
+### 4. Review & Merge
 
 ```bash
-# Preview matches (no action = show repos/files)
-gx create --files '*.json'
-
-# Preview substitution (action but no --commit = dry-run)
-gx create --files '*.json' sub 'old' 'new'
-
-# Execute (--commit BEFORE sub = make changes)
-gx create --files '*.json' --commit "Update config" sub 'old' 'new'
-
-# With PR (--commit and --pr BEFORE sub)
-gx create --files '*.json' --commit "Update config" --pr sub 'old' 'new'
+gx review ls <change-id>       # List PRs for a change
+gx review approve <change-id>  # Approve and merge
 ```
 
-Actions: `add <path> <content>`, `delete`, `sub <find> <replace>`, `regex <pattern> <replace>`
+### 5. Cleanup
 
-### Review (PR Management)
 ```bash
-gx review ls GX-2024-01-15        # List PRs for change-id
-gx review approve GX-2024-01-15   # Approve and merge
-gx review delete GX-2024-01-15    # Close PRs, delete branches
-gx review purge                   # Clean up all GX-* branches
+gx cleanup --list              # Show what needs cleanup
+gx cleanup <change-id>         # Clean up after merge
 ```
 
-### Cleanup
-```bash
-gx cleanup --list             # Show what needs cleanup
-gx cleanup GX-2024-01-15      # Clean specific change
-gx cleanup --all              # Clean all merged changes
-```
+## Commands Overview
 
-## Key Flags
+| Command | Purpose |
+|---------|---------|
+| `status` | Show git status across repos |
+| `checkout` | Checkout branches across repos |
+| `clone` | Clone org repos |
+| `create` | Make changes, create PRs |
+| `review` | Manage PRs (list, approve, delete) |
+| `cleanup` | Clean up branches after merge |
+| `rollback` | Recover from interrupted operations |
 
-| Flag | Purpose |
-|------|---------|
-| `-p, --patterns` | Filter repos by name (can repeat: `-p foo -p bar`) |
-| `-f, --files` | File glob pattern within repos |
-| `-c, --commit` | Commit message (triggers actual changes) |
-| `--pr` | Create PR after commit |
-| `-j, --jobs` | Parallel workers |
-| `-m, --depth` | Max directory depth to scan |
+Run `gx <command> --help` for each command's options and examples.
 
-## Change IDs
+## Key Concepts
 
-GX auto-generates IDs like `GX-2026-01-03T12-30-00`. All branches/PRs for one operation share the same ID for tracking and cleanup.
+- **Change IDs**: Auto-generated like `GX-2026-01-03T12-30-00`. All branches/PRs for one operation share the same ID.
+- **Dry-run by default**: Without `--commit`, changes are previewed only.
+- **Pattern Analysis**: Output shows files scanned, changed, and unmatched.
 
 ## Requirements
 
