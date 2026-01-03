@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod checkout;
+mod cleanup;
 mod cli;
 mod clone;
 mod config;
@@ -19,6 +20,7 @@ mod repo;
 mod review;
 mod rollback;
 mod ssh;
+mod state;
 mod status;
 mod transaction;
 mod user_org;
@@ -181,6 +183,21 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             }
         },
         Commands::Rollback { action } => rollback::handle_rollback(action.clone()),
+        Commands::Cleanup {
+            change_id,
+            all,
+            list,
+            include_remote,
+            force,
+        } => cleanup::process_cleanup_command(
+            cli,
+            config,
+            change_id.as_deref(),
+            *all,
+            *list,
+            *include_remote,
+            *force,
+        ),
     }
 }
 

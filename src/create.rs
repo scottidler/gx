@@ -6,12 +6,14 @@ use crate::git;
 use crate::github;
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
+use crate::state::{ChangeState, StateManager};
 use crate::transaction::{RollbackType, Transaction};
 use chrono::Local;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// Statistics for substitution operations
 #[derive(Debug, Default, Clone)]
@@ -181,6 +183,14 @@ pub fn process_create_command(
         return Ok(());
     }
 
+    // Initialize state tracking if we're going to make changes (not dry run)
+    let change_state = if commit_message.is_some() {
+        let state = ChangeState::new(change_id.clone(), commit_message.clone());
+        Some(Mutex::new(state))
+    } else {
+        None
+    };
+
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
@@ -198,17 +208,51 @@ pub fn process_create_command(
         filtered_repos
             .par_iter()
             .map(|repo| {
-                process_single_repo(
+                let result = process_single_repo(
                     repo,
                     &change_id,
                     files,
                     &change,
                     commit_message.as_deref(),
                     pr.as_ref(),
-                )
+                );
+
+                // Update state tracking if enabled
+                if let Some(ref state_mutex) = change_state {
+                    if let Ok(mut state) = state_mutex.lock() {
+                        update_change_state(&mut state, &result, pr.as_ref());
+                    }
+                }
+
+                result
             })
             .collect()
     });
+
+    // Save state if we made changes
+    if let Some(state_mutex) = change_state {
+        if let Ok(state) = state_mutex.into_inner() {
+            // Only save if there were actual changes (not all dry runs)
+            let has_changes = results
+                .iter()
+                .any(|r| matches!(r.action, CreateAction::Committed | CreateAction::PrCreated));
+
+            if has_changes {
+                match StateManager::new() {
+                    Ok(manager) => {
+                        if let Err(e) = manager.save(&state) {
+                            warn!("Failed to save change state: {}", e);
+                        } else {
+                            info!("Saved change state for {}", state.change_id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to create state manager: {}", e);
+                    }
+                }
+            }
+        }
+    }
 
     // Display results
     let opts = StatusOptions {
@@ -225,6 +269,43 @@ pub fn process_create_command(
     display_create_summary(&results, &opts);
 
     Ok(())
+}
+
+/// Update change state based on create result
+fn update_change_state(
+    state: &mut ChangeState,
+    result: &CreateResult,
+    pr: Option<&crate::cli::PR>,
+) {
+    // Only track if the operation actually did something
+    match result.action {
+        CreateAction::Committed | CreateAction::PrCreated => {
+            // Add repository to state
+            state.add_repository(result.repo.slug.clone(), result.change_id.clone());
+
+            // Update local path
+            if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
+                repo_state.local_path = Some(result.repo.path.to_string_lossy().to_string());
+                repo_state.files_modified = result.files_affected.clone();
+            }
+
+            // If PR was created, update PR info
+            // Note: We don't have PR URL/number from current implementation
+            // This would need github::create_pr to return the PR info
+            if matches!(result.action, CreateAction::PrCreated) {
+                if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
+                    repo_state.status = if matches!(pr, Some(crate::cli::PR::Draft)) {
+                        crate::state::RepoChangeStatus::PrDraft
+                    } else {
+                        crate::state::RepoChangeStatus::PrOpen
+                    };
+                }
+            }
+        }
+        CreateAction::DryRun => {
+            // Don't track dry runs
+        }
+    }
 }
 
 /// Process create command for a single repository with comprehensive rollback

@@ -332,6 +332,38 @@ EXAMPLES:
         #[command(subcommand)]
         action: RollbackAction,
     },
+
+    /// Clean up branches after PR merge
+    #[command(after_help = "CLEANUP LEGEND:
+  🧹  Local branch deleted     🌐  Remote branch deleted
+  ⏭️   Already cleaned          ⚠️   Still has open PR
+  ❌  Cleanup failed            📊  Summary stats
+
+EXAMPLES:
+  gx cleanup GX-2024-01-15           # Clean up specific change
+  gx cleanup --all                   # Clean up all merged changes
+  gx cleanup --list                  # List changes needing cleanup")]
+    Cleanup {
+        /// Change ID to clean up (optional if --all or --list)
+        #[arg(value_name = "CHANGE_ID")]
+        change_id: Option<String>,
+
+        /// Clean up all merged changes
+        #[arg(long, conflicts_with = "change_id")]
+        all: bool,
+
+        /// List changes that can be cleaned up
+        #[arg(long, conflicts_with = "change_id", conflicts_with = "all")]
+        list: bool,
+
+        /// Also delete remote branches (if not auto-deleted)
+        #[arg(long)]
+        include_remote: bool,
+
+        /// Force cleanup even if PR status is unknown
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
