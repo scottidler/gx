@@ -126,7 +126,8 @@ pub struct CreateResult {
     pub action: CreateAction,
     pub files_affected: Vec<String>,
     pub substitution_stats: Option<SubstitutionStats>,
-
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
     pub error: Option<String>,
 }
 
@@ -283,22 +284,17 @@ fn update_change_state(
             // Add repository to state
             state.add_repository(result.repo.slug.clone(), result.change_id.clone());
 
-            // Update local path
+            // Update local path and files modified
             if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
                 repo_state.local_path = Some(result.repo.path.to_string_lossy().to_string());
                 repo_state.files_modified = result.files_affected.clone();
             }
 
-            // If PR was created, update PR info
-            // Note: We don't have PR URL/number from current implementation
-            // This would need github::create_pr to return the PR info
+            // If PR was created, update PR info using the new set_pr_info method
             if matches!(result.action, CreateAction::PrCreated) {
-                if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
-                    repo_state.status = if matches!(pr, Some(crate::cli::PR::Draft)) {
-                        crate::state::RepoChangeStatus::PrDraft
-                    } else {
-                        crate::state::RepoChangeStatus::PrOpen
-                    };
+                if let (Some(pr_number), Some(pr_url)) = (result.pr_number, result.pr_url.clone()) {
+                    let is_draft = matches!(pr, Some(crate::cli::PR::Draft));
+                    state.set_pr_info(&result.repo.slug, pr_number, pr_url, is_draft);
                 }
             }
         }
@@ -356,6 +352,8 @@ fn process_single_repo(
                         action: CreateAction::DryRun,
                         files_affected: Vec::new(),
                         substitution_stats: None,
+                        pr_number: None,
+                        pr_url: None,
                         error: Some(format!("Failed to stash changes: {e}")),
                     };
                 }
@@ -369,6 +367,8 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
                 substitution_stats: None,
+                pr_number: None,
+                pr_url: None,
                 error: Some(format!("Failed to check repository status: {e}")),
             };
         }
@@ -387,6 +387,8 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected: Vec::new(),
                 substitution_stats: None,
+                pr_number: None,
+                pr_url: None,
                 error: Some(format!("Failed to get current branch: {e}")),
             };
         }
@@ -406,6 +408,8 @@ fn process_single_repo(
                             action: CreateAction::DryRun,
                             files_affected: Vec::new(),
                             substitution_stats: None,
+                            pr_number: None,
+                            pr_url: None,
                             error: Some(format!("Failed to switch to head branch: {e}")),
                         };
                     }
@@ -442,6 +446,8 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
             substitution_stats: None,
+            pr_number: None,
+            pr_url: None,
             error: Some(format!("Failed to pull latest changes: {e}")),
         };
     }
@@ -525,6 +531,8 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
             substitution_stats,
+            pr_number: None,
+            pr_url: None,
             error: Some(format!("Failed to apply changes: {e}")),
         };
     }
@@ -538,6 +546,8 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected: Vec::new(),
             substitution_stats,
+            pr_number: None,
+            pr_url: None,
             error: None,
         };
     }
@@ -551,6 +561,8 @@ fn process_single_repo(
             action: CreateAction::DryRun,
             files_affected,
             substitution_stats,
+            pr_number: None,
+            pr_url: None,
             error: None,
         };
     }
@@ -568,16 +580,20 @@ fn process_single_repo(
 
     match commit_result {
         Ok(()) => {
-            let final_action = if let Some(pr) = pr {
+            let (final_action, pr_number, pr_url) = if let Some(pr) = pr {
                 match create_pull_request(repo, change_id, commit_message.unwrap(), pr) {
-                    Ok(()) => CreateAction::PrCreated,
+                    Ok(pr_result) => (
+                        CreateAction::PrCreated,
+                        Some(pr_result.number),
+                        Some(pr_result.url),
+                    ),
                     Err(e) => {
                         warn!("Failed to create PR for {}: {}", repo.name, e);
-                        CreateAction::Committed
+                        (CreateAction::Committed, None, None)
                     }
                 }
             } else {
-                CreateAction::Committed
+                (CreateAction::Committed, None, None)
             };
 
             // Use preflight check before committing
@@ -588,6 +604,8 @@ fn process_single_repo(
                     action: final_action,
                     files_affected,
                     substitution_stats,
+                    pr_number,
+                    pr_url,
                     error: None,
                 },
                 Err(e) => {
@@ -599,6 +617,8 @@ fn process_single_repo(
                         action: CreateAction::DryRun,
                         files_affected: Vec::new(),
                         substitution_stats,
+                        pr_number: None,
+                        pr_url: None,
                         error: Some(format!("Preflight check failed: {e}")),
                     }
                 }
@@ -612,6 +632,8 @@ fn process_single_repo(
                 action: CreateAction::DryRun,
                 files_affected,
                 substitution_stats,
+                pr_number: None,
+                pr_url: None,
                 error: Some(format!("Failed to commit changes: {e}")),
             }
         }
@@ -1001,17 +1023,21 @@ fn commit_changes_with_rollback(
 }
 
 /// Create a pull request for the changes
+/// Returns the PR number and URL on success
 fn create_pull_request(
     repo: &Repo,
     change_id: &str,
     commit_message: &str,
     pr: &crate::cli::PR,
-) -> Result<()> {
+) -> Result<github::CreatePrResult> {
     let repo_slug = &repo.slug;
-    github::create_pr(repo_slug, change_id, commit_message, pr)
+    let result = github::create_pr(repo_slug, change_id, commit_message, pr)
         .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
-    info!("Created PR for repository: {repo_slug}");
-    Ok(())
+    info!(
+        "Created PR #{} for repository: {} - {}",
+        result.number, repo_slug, result.url
+    );
+    Ok(result)
 }
 
 /// Display pattern analysis for substitution operations
@@ -1175,7 +1201,8 @@ mod tests {
             action: CreateAction::DryRun,
             files_affected: vec!["test.txt".to_string()],
             substitution_stats: None,
-
+            pr_number: None,
+            pr_url: None,
             error: None,
         };
 

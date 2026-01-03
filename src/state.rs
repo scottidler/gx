@@ -136,9 +136,6 @@ impl ChangeState {
     }
 
     /// Update PR info for a repository
-    /// Note: Currently only used in tests. Will be integrated when github::create_pr
-    /// is updated to return PR info (number, URL).
-    #[allow(dead_code)]
     pub fn set_pr_info(&mut self, repo_slug: &str, pr_number: u64, pr_url: String, is_draft: bool) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.pr_number = Some(pr_number);

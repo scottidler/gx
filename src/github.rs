@@ -4,6 +4,20 @@ use log::{debug, info, warn};
 use serde::Deserialize;
 use std::fs;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+/// Maximum number of retry attempts for network operations
+const MAX_RETRIES: u32 = 3;
+/// Base delay between retries in milliseconds
+const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// Result of creating a PR, containing the PR info
+#[derive(Debug, Clone)]
+pub struct CreatePrResult {
+    pub number: u64,
+    pub url: String,
+}
 
 /// Get all repositories for a user/org from GitHub API
 pub fn get_user_repos(
@@ -128,12 +142,13 @@ pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
 }
 
 /// Create a pull request using GitHub CLI
+/// Returns the PR number and URL on success
 pub fn create_pr(
     repo_slug: &str,
     branch_name: &str,
     commit_message: &str,
     pr: &crate::cli::PR,
-) -> Result<()> {
+) -> Result<CreatePrResult> {
     debug!("Creating PR for repo: {repo_slug}, branch: {branch_name}");
 
     let title = branch_name.to_string();
@@ -159,20 +174,91 @@ pub fn create_pr(
         args.push("--draft");
     }
 
-    let output = Command::new("gh")
-        .args(&args)
-        .output()
-        .context("Failed to execute gh pr create")?;
+    // Use retry logic for network operations
+    let output = retry_command("gh", &args, MAX_RETRIES)?;
 
     if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout);
-        let url = url.trim();
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         debug!("PR created: {url}");
-        Ok(())
+
+        // Extract PR number from URL (e.g., https://github.com/org/repo/pull/123)
+        let number = extract_pr_number_from_url(&url).unwrap_or(0);
+
+        Ok(CreatePrResult { number, url })
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
         Err(eyre::eyre!("Failed to create PR: {}", error))
     }
+}
+
+/// Extract PR number from a GitHub PR URL
+fn extract_pr_number_from_url(url: &str) -> Option<u64> {
+    // URL format: https://github.com/owner/repo/pull/123
+    url.rsplit('/').next()?.parse().ok()
+}
+
+/// Execute a command with retry logic and exponential backoff
+fn retry_command(cmd: &str, args: &[&str], max_retries: u32) -> Result<std::process::Output> {
+    let mut last_error = None;
+
+    for attempt in 0..max_retries {
+        let output = Command::new(cmd)
+            .args(args)
+            .output()
+            .context(format!("Failed to execute {cmd}"))?;
+
+        if output.status.success() {
+            return Ok(output);
+        }
+
+        let error = String::from_utf8_lossy(&output.stderr);
+
+        // Check if this is a retryable error (network, timeout, rate limit)
+        if is_retryable_error(&error) && attempt < max_retries - 1 {
+            let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+            warn!(
+                "Attempt {} failed, retrying in {}ms: {}",
+                attempt + 1,
+                delay,
+                error.trim()
+            );
+            thread::sleep(Duration::from_millis(delay));
+            last_error = Some(error.to_string());
+        } else {
+            // Non-retryable error or last attempt
+            return Ok(output);
+        }
+    }
+
+    Err(eyre::eyre!(
+        "Command failed after {} attempts: {}",
+        max_retries,
+        last_error.unwrap_or_default()
+    ))
+}
+
+/// Check if an error message indicates a retryable condition
+fn is_retryable_error(error: &str) -> bool {
+    let retryable_patterns = [
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "network",
+        "rate limit",
+        "too many requests",
+        "503",
+        "502",
+        "504",
+        "ETIMEDOUT",
+        "ECONNRESET",
+        "ENOTFOUND",
+    ];
+
+    let error_lower = error.to_lowercase();
+    retryable_patterns
+        .iter()
+        .any(|pattern| error_lower.contains(pattern))
 }
 
 /// PR information structure
