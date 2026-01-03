@@ -1,6 +1,7 @@
 ---
 name: gx
 description: Multi-repo Git operations - bulk changes, PRs, and cleanup across many repositories
+allowed-tools: Bash(gx:*), Bash(gh:*)
 tier: 1
 triggers:
   - multi-repo
@@ -59,19 +60,19 @@ The Pattern Analysis in output shows:
 
 ## Making Changes
 
-Add `--commit` to actually modify files:
+Add `--commit` BEFORE the action to actually modify files:
 
 ```bash
+# IMPORTANT: --commit and --pr must come BEFORE the action (sub/regex/add/delete)
+
 # Substitution across repos
-gx create --files 'pyproject.toml' sub '^3.9' '^3.11' --commit "Upgrade to Python 3.11"
+gx create --files 'pyproject.toml' --commit "Upgrade to Python 3.11" sub '3.9' '3.11'
 
 # With PR creation
-gx create --files 'pyproject.toml' sub '^3.9' '^3.11' \
-  --commit "Upgrade to Python 3.11" --pr
+gx create --files 'pyproject.toml' --commit "Upgrade to Python 3.11" --pr sub '3.9' '3.11'
 
 # Draft PR
-gx create --files '*.md' sub 'old-url' 'new-url' \
-  --commit "Update URLs" --pr=draft
+gx create --files '*.md' --commit "Update URLs" --pr=draft sub 'old-url' 'new-url'
 ```
 
 ## Commands Reference
@@ -97,6 +98,9 @@ gx checkout main -p frontend  # Only in matching repos
 ```
 
 ### Create (Changes & PRs)
+
+**CRITICAL**: Options (`--commit`, `--pr`) must come BEFORE the action (`sub`, `regex`, `add`, `delete`).
+
 ```bash
 # Preview matches (no action = show repos/files)
 gx create --files '*.json'
@@ -104,11 +108,11 @@ gx create --files '*.json'
 # Preview substitution (action but no --commit = dry-run)
 gx create --files '*.json' sub 'old' 'new'
 
-# Execute (--commit = make changes)
-gx create --files '*.json' sub 'old' 'new' --commit "Update config"
+# Execute (--commit BEFORE sub = make changes)
+gx create --files '*.json' --commit "Update config" sub 'old' 'new'
 
-# With PR
-gx create --files '*.json' sub 'old' 'new' --commit "Update config" --pr
+# With PR (--commit and --pr BEFORE sub)
+gx create --files '*.json' --commit "Update config" --pr sub 'old' 'new'
 ```
 
 Actions: `add <path> <content>`, `delete`, `sub <find> <replace>`, `regex <pattern> <replace>`

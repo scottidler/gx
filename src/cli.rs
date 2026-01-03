@@ -230,12 +230,12 @@ EXAMPLES:
 
 EXAMPLES:
   gx create --files '*.json'                                    # Show matching files (dry-run)
-  gx create --files '*.json' -p frontend                       # Show matches in frontend repos only
-  gx create --files '*.json' add config.json '{\"debug\": true}' # Actually create files
-  gx create --files '*.md' sub 'old-text' 'new-text' --commit 'Update docs'
-  gx create --files 'package.json' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
-  gx create --files '*.txt' delete --commit 'Remove old files' --pr
-  gx create --files '*.md' sub 'old' 'new' --commit 'Draft update' --pr=draft")]
+  gx create --files '*.json' -p frontend                        # Show matches in frontend repos only
+  gx create --files '*.json' add config.json '{\"debug\": true}' # Create files (dry-run)
+  gx create --files '*.md' --commit 'Update docs' sub 'old-text' 'new-text'
+  gx create --files 'package.json' --commit 'Bump version' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
+  gx create --files '*.txt' --commit 'Remove old files' --pr delete
+  gx create --files '*.md' --commit 'Draft update' --pr=draft sub 'old' 'new'")]
     Create {
         /// Files to target (glob patterns)
         #[arg(short = 'f', long = "files", help = "File patterns to match")]
