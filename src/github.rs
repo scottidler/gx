@@ -280,52 +280,73 @@ pub enum PrState {
     Closed,
 }
 
-/// Raw PR data from GitHub CLI search output (gh search prs)
+/// GraphQL response wrapper
 #[derive(Debug, Deserialize)]
-struct GhSearchPrItem {
-    number: u64,
-    title: String,
-    author: GhSearchAuthor,
-    state: String,
-    url: String,
-    repository: GhSearchRepository,
+struct GhGraphqlResponse {
+    data: GhGraphqlData,
 }
 
-/// Author structure from gh search prs
 #[derive(Debug, Deserialize)]
-struct GhSearchAuthor {
+struct GhGraphqlData {
+    search: GhGraphqlSearch,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlSearch {
+    nodes: Vec<GhGraphqlPrItem>,
+}
+
+/// Raw PR data from GitHub GraphQL API
+#[derive(Debug, Deserialize)]
+struct GhGraphqlPrItem {
+    number: u64,
+    title: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    author: GhGraphqlAuthor,
+    state: String,
+    url: String,
+    repository: GhGraphqlRepository,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlAuthor {
     login: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct GhSearchRepository {
+struct GhGraphqlRepository {
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
 }
 
-/// List PRs by change ID pattern
+/// List PRs by change ID pattern using GraphQL API
 pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<PrInfo>> {
     debug!("Listing PRs for org: {org}, change ID pattern: {change_id_pattern}");
 
-    // Use `gh search prs` which can search across an organization
-    // Note: `gh pr list --search` only works within a single repository context
+    let query = format!(
+        r#"{{
+          search(query: "org:{} is:pr is:open head:{}", type: ISSUE, first: 100) {{
+            nodes {{
+              ... on PullRequest {{
+                number
+                title
+                headRefName
+                author {{ login }}
+                state
+                url
+                repository {{ nameWithOwner }}
+              }}
+            }}
+          }}
+        }}"#,
+        org, change_id_pattern
+    );
+
     let output = Command::new("gh")
-        .args([
-            "search",
-            "prs",
-            "--owner",
-            org,
-            "--head",
-            change_id_pattern,
-            "--state",
-            "open",
-            "--json",
-            "number,title,author,state,url,repository",
-            "--limit",
-            "100",
-        ])
+        .args(["api", "graphql", "-f", &format!("query={}", query)])
         .output()
-        .context("Failed to execute gh search prs")?;
+        .context("Failed to execute gh api graphql")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -333,31 +354,32 @@ pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<P
     }
 
     let json_output =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh search prs output")?;
+        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh api graphql output")?;
 
-    parse_search_prs_json(&json_output, change_id_pattern)
+    parse_graphql_prs_json(&json_output)
 }
 
-/// Parse JSON output from gh search prs
-fn parse_search_prs_json(json_output: &str, branch_name: &str) -> Result<Vec<PrInfo>> {
+/// Parse JSON output from gh api graphql
+fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
     let trimmed = json_output.trim();
-    if trimmed.is_empty() || trimmed == "[]" {
+    if trimmed.is_empty() {
         return Ok(Vec::new());
     }
 
-    let gh_prs: Vec<GhSearchPrItem> =
-        serde_json::from_str(trimmed).context("Failed to parse PR search JSON")?;
+    let response: GhGraphqlResponse =
+        serde_json::from_str(trimmed).context("Failed to parse GraphQL response JSON")?;
 
-    let prs: Vec<PrInfo> = gh_prs
+    let prs: Vec<PrInfo> = response
+        .data
+        .search
+        .nodes
         .into_iter()
         .map(|gh_pr| PrInfo {
             repo_slug: gh_pr.repository.name_with_owner,
             number: gh_pr.number,
             title: gh_pr.title,
-            // gh search prs doesn't return headRefName, but we know it from the search filter
-            branch: branch_name.to_string(),
+            branch: gh_pr.head_ref_name,
             author: gh_pr.author.login,
-            // gh search prs returns lowercase state
             state: match gh_pr.state.to_uppercase().as_str() {
                 "OPEN" => PrState::Open,
                 _ => PrState::Closed,
@@ -366,7 +388,7 @@ fn parse_search_prs_json(json_output: &str, branch_name: &str) -> Result<Vec<PrI
         })
         .collect();
 
-    debug!("Parsed {} PRs from search JSON", prs.len());
+    debug!("Parsed {} PRs from GraphQL response", prs.len());
     Ok(prs)
 }
 
@@ -515,35 +537,31 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_search_prs_json_empty_string() {
-        let result = parse_search_prs_json("", "GX-test").unwrap();
+    fn test_parse_graphql_prs_json_empty_string() {
+        let result = parse_graphql_prs_json("").unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_parse_search_prs_json_empty_array() {
-        let result = parse_search_prs_json("[]", "GX-test").unwrap();
+    fn test_parse_graphql_prs_json_empty_nodes() {
+        let json = r#"{"data":{"search":{"nodes":[]}}}"#;
+        let result = parse_graphql_prs_json(json).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_parse_search_prs_json_whitespace() {
-        let result = parse_search_prs_json("  \n  ", "GX-test").unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_search_prs_json_single_pr() {
-        let json = r#"[{
+    fn test_parse_graphql_prs_json_single_pr() {
+        let json = r#"{"data":{"search":{"nodes":[{
             "number": 123,
             "title": "GX-2024-01-15: Update configs",
+            "headRefName": "GX-2024-01-15",
             "author": {"login": "testuser"},
-            "state": "open",
+            "state": "OPEN",
             "url": "https://github.com/org/repo/pull/123",
             "repository": {"nameWithOwner": "org/repo"}
-        }]"#;
+        }]}}}"#;
 
-        let result = parse_search_prs_json(json, "GX-2024-01-15").unwrap();
+        let result = parse_graphql_prs_json(json).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].number, 123);
         assert_eq!(result[0].title, "GX-2024-01-15: Update configs");
@@ -555,45 +573,42 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_search_prs_json_multiple_prs() {
-        let json = r#"[
+    fn test_parse_graphql_prs_json_multiple_prs() {
+        let json = r#"{"data":{"search":{"nodes":[
             {
                 "number": 1,
                 "title": "PR 1",
+                "headRefName": "GX-branch1",
                 "author": {"login": "user1"},
-                "state": "open",
+                "state": "OPEN",
                 "url": "https://github.com/org/repo1/pull/1",
                 "repository": {"nameWithOwner": "org/repo1"}
             },
             {
                 "number": 2,
                 "title": "PR 2",
+                "headRefName": "GX-branch2",
                 "author": {"login": "user2"},
-                "state": "closed",
+                "state": "CLOSED",
                 "url": "https://github.com/org/repo2/pull/2",
                 "repository": {"nameWithOwner": "org/repo2"}
             }
-        ]"#;
+        ]}}}"#;
 
-        let result = parse_search_prs_json(json, "GX-test").unwrap();
+        let result = parse_graphql_prs_json(json).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].number, 1);
+        assert_eq!(result[0].branch, "GX-branch1");
         assert_eq!(result[0].state, PrState::Open);
         assert_eq!(result[1].number, 2);
+        assert_eq!(result[1].branch, "GX-branch2");
         assert_eq!(result[1].state, PrState::Closed);
     }
 
     #[test]
-    fn test_parse_search_prs_json_invalid_json() {
+    fn test_parse_graphql_prs_json_invalid_json() {
         let json = "not valid json";
-        let result = parse_search_prs_json(json, "GX-test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_search_prs_json_missing_fields() {
-        let json = r#"[{"number": 1}]"#;
-        let result = parse_search_prs_json(json, "GX-test");
+        let result = parse_graphql_prs_json(json);
         assert!(result.is_err());
     }
 }

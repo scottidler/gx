@@ -52,6 +52,12 @@ pub fn process_review_ls_command(
     let user_org_contexts =
         crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
+    if user_org_contexts.is_empty() {
+        eprintln!("Error: No organization detected. Use --org <org> to specify one.");
+        eprintln!("Example: gx review --org tatari-tv ls");
+        return Ok(());
+    }
+
     info!(
         "Using {} org(s): {}",
         user_org_contexts.len(),
@@ -66,19 +72,26 @@ pub fn process_review_ls_command(
             .join(", ")
     );
 
-    info!("Listing PRs for change IDs: {change_ids:?}");
+    // If no change IDs provided, search for all GX- prefixed PRs
+    let search_patterns: Vec<String> = if change_ids.is_empty() {
+        vec!["GX-".to_string()]
+    } else {
+        change_ids.to_vec()
+    };
+
+    info!("Listing PRs for patterns: {search_patterns:?}");
 
     let mut all_results = Vec::new();
 
-    // Process each org and change ID combination
+    // Process each org and pattern combination
     for context in &user_org_contexts {
-        for change_id in change_ids {
-            match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+        for pattern in &search_patterns {
+            match github::list_prs_by_change_id(&context.user_or_org, pattern) {
                 Ok(prs) => {
                     info!(
-                        "Found {} PRs for change ID '{}' in org '{}'",
+                        "Found {} PRs for pattern '{}' in org '{}'",
                         prs.len(),
-                        change_id,
+                        pattern,
                         context.user_or_org
                     );
 
@@ -88,7 +101,7 @@ pub fn process_review_ls_command(
 
                         let result = ReviewResult {
                             repo,
-                            change_id: change_id.clone(),
+                            change_id: pr.branch.clone(),
                             pr_number: Some(pr.number),
                             action: ReviewAction::Listed,
                             error: None,
@@ -107,9 +120,9 @@ pub fn process_review_ls_command(
                 }
                 Err(e) => {
                     log::warn!(
-                        "Failed to get PRs from org '{}' for change ID '{}': {}",
+                        "Failed to get PRs from org '{}' for pattern '{}': {}",
                         context.user_or_org,
-                        change_id,
+                        pattern,
                         e
                     );
                 }
