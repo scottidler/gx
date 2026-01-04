@@ -1072,19 +1072,39 @@ pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Re
     }
 }
 
-/// Add all changes to staging area
-pub fn add_all_changes(repo_path: &std::path::Path) -> Result<()> {
+/// Stage specific files (handles add, modify, and delete)
+/// Uses "git add -A --" which stages all changes for the specified files:
+/// - New files are added
+/// - Modified files are staged
+/// - Deleted files are staged for removal
+pub fn add_files(repo_path: &std::path::Path, files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        debug!("No files to stage in '{}'", repo_path.display());
+        return Ok(());
+    }
+
+    let repo_path_str = repo_path.to_string_lossy().to_string();
+    let mut args: Vec<&str> = vec!["-C", &repo_path_str, "add", "-A", "--"];
+    for file in files {
+        args.push(file.as_str());
+    }
+
     let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "add", "."])
+        .args(&args)
         .output()
         .context("Failed to execute git add")?;
 
     if output.status.success() {
-        debug!("Added all changes to staging in '{}'", repo_path.display());
+        debug!(
+            "Staged {} files in '{}': {:?}",
+            files.len(),
+            repo_path.display(),
+            files
+        );
         Ok(())
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
-        Err(eyre::eyre!("Failed to add changes: {}", error))
+        Err(eyre::eyre!("Failed to stage files: {}", error))
     }
 }
 

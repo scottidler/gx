@@ -356,11 +356,19 @@ pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<P
     let json_output =
         String::from_utf8(output.stdout).context("Invalid UTF-8 in gh api graphql output")?;
 
-    parse_graphql_prs_json(&json_output)
+    // Filter results to ensure both branch AND title start with the pattern
+    // GitHub's search is a substring match, so we need post-filtering
+    parse_graphql_prs_json_with_pattern(&json_output, change_id_pattern)
 }
 
-/// Parse JSON output from gh api graphql
+/// Parse JSON output from gh api graphql (test helper that uses default GX- pattern)
+#[cfg(test)]
 fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
+    parse_graphql_prs_json_with_pattern(json_output, "GX-")
+}
+
+/// Parse JSON output from gh api graphql with pattern filtering
+fn parse_graphql_prs_json_with_pattern(json_output: &str, pattern: &str) -> Result<Vec<PrInfo>> {
     let trimmed = json_output.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -374,6 +382,14 @@ fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
         .search
         .nodes
         .into_iter()
+        .filter(|gh_pr| {
+            // GX naming convention: BOTH branch AND title must start with "GX-" to avoid false positives
+            // (e.g., branch "gx-alerts" or title mentioning "GX" in the middle)
+            // Then filter branch name against the specific pattern for exact matching
+            let has_gx_prefix = gh_pr.head_ref_name.starts_with("GX-") && gh_pr.title.starts_with("GX-");
+            let matches_pattern = gh_pr.head_ref_name.starts_with(pattern);
+            has_gx_prefix && matches_pattern
+        })
         .map(|gh_pr| PrInfo {
             repo_slug: gh_pr.repository.name_with_owner,
             number: gh_pr.number,
@@ -388,7 +404,7 @@ fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
         })
         .collect();
 
-    debug!("Parsed {} PRs from GraphQL response", prs.len());
+    debug!("Parsed {} PRs from GraphQL response (after filtering for pattern '{}')", prs.len(), pattern);
     Ok(prs)
 }
 
@@ -586,7 +602,7 @@ mod tests {
         let json = r#"{"data":{"search":{"nodes":[
             {
                 "number": 1,
-                "title": "PR 1",
+                "title": "GX-branch1: PR 1",
                 "headRefName": "GX-branch1",
                 "author": {"login": "user1"},
                 "state": "OPEN",
@@ -595,7 +611,7 @@ mod tests {
             },
             {
                 "number": 2,
-                "title": "PR 2",
+                "title": "GX-branch2: PR 2",
                 "headRefName": "GX-branch2",
                 "author": {"login": "user2"},
                 "state": "CLOSED",
@@ -612,6 +628,57 @@ mod tests {
         assert_eq!(result[1].number, 2);
         assert_eq!(result[1].branch, "GX-branch2");
         assert_eq!(result[1].state, PrState::Closed);
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_json_filters_non_gx_prs() {
+        // This test verifies that PRs without proper GX- prefix on BOTH branch AND title are filtered out
+        // This prevents false positives like "gx-alerts" branch or "[MCORE-1276] Enable Slack alerts for GX checks" title
+        let json = r#"{"data":{"search":{"nodes":[
+            {
+                "number": 1,
+                "title": "GX-2024-01-15: Proper GX PR",
+                "headRefName": "GX-2024-01-15",
+                "author": {"login": "user1"},
+                "state": "OPEN",
+                "url": "https://github.com/org/repo1/pull/1",
+                "repository": {"nameWithOwner": "org/repo1"}
+            },
+            {
+                "number": 2,
+                "title": "[MCORE-1276] Enable Slack alerts for GX checks",
+                "headRefName": "gx-alerts",
+                "author": {"login": "user2"},
+                "state": "OPEN",
+                "url": "https://github.com/org/repo2/pull/2",
+                "repository": {"nameWithOwner": "org/repo2"}
+            },
+            {
+                "number": 3,
+                "title": "Some other PR with GX in title",
+                "headRefName": "feature-branch",
+                "author": {"login": "user3"},
+                "state": "OPEN",
+                "url": "https://github.com/org/repo3/pull/3",
+                "repository": {"nameWithOwner": "org/repo3"}
+            },
+            {
+                "number": 4,
+                "title": "Non-GX title",
+                "headRefName": "GX-2024-01-16",
+                "author": {"login": "user4"},
+                "state": "OPEN",
+                "url": "https://github.com/org/repo4/pull/4",
+                "repository": {"nameWithOwner": "org/repo4"}
+            }
+        ]}}}"#;
+
+        let result = parse_graphql_prs_json(json).unwrap();
+        // Only the first PR should match (both branch AND title start with GX-)
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].number, 1);
+        assert_eq!(result[0].branch, "GX-2024-01-15");
+        assert_eq!(result[0].title, "GX-2024-01-15: Proper GX PR");
     }
 
     #[test]

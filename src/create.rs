@@ -575,6 +575,7 @@ fn process_single_repo(
         change_id,
         original_branch.as_deref().unwrap_or("main"),
         commit_message.unwrap(),
+        &files_affected,
         &mut transaction,
     );
 
@@ -947,6 +948,7 @@ fn commit_changes_with_rollback(
     change_id: &str,
     original_branch: &str,
     commit_message: &str,
+    files_affected: &[String],
     transaction: &mut Transaction,
 ) -> Result<()> {
     // Check if branch existed before we try to create it
@@ -983,10 +985,10 @@ fn commit_changes_with_rollback(
         RollbackType::BranchOperation,
     );
 
-    // Stage all changes
-    git::add_all_changes(repo_path).context("Failed to stage changes")?;
+    // Stage only the specific files we modified - never use "git add ."
+    git::add_files(repo_path, files_affected).context("Failed to stage files")?;
 
-    // Commit changes
+    // Commit staged changes
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
     // Add commit rollback
