@@ -280,26 +280,25 @@ pub enum PrState {
     Closed,
 }
 
-/// Raw PR data from GitHub CLI JSON output
+/// Raw PR data from GitHub CLI search output (gh search prs)
 #[derive(Debug, Deserialize)]
-struct GhPrListItem {
+struct GhSearchPrItem {
     number: u64,
     title: String,
-    #[serde(rename = "headRefName")]
-    head_ref_name: String,
-    author: GhAuthor,
+    author: GhSearchAuthor,
     state: String,
     url: String,
-    repository: GhRepository,
+    repository: GhSearchRepository,
 }
 
+/// Author structure from gh search prs
 #[derive(Debug, Deserialize)]
-struct GhAuthor {
+struct GhSearchAuthor {
     login: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct GhRepository {
+struct GhSearchRepository {
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
 }
@@ -308,40 +307,46 @@ struct GhRepository {
 pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<PrInfo>> {
     debug!("Listing PRs for org: {org}, change ID pattern: {change_id_pattern}");
 
+    // Use `gh search prs` which can search across an organization
+    // Note: `gh pr list --search` only works within a single repository context
     let output = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--search",
-            &format!("org:{org} head:{change_id_pattern}"),
+            "search",
+            "prs",
+            "--owner",
+            org,
+            "--head",
+            change_id_pattern,
+            "--state",
+            "open",
             "--json",
-            "number,title,headRefName,author,state,url,repository",
+            "number,title,author,state,url,repository",
             "--limit",
             "100",
         ])
         .output()
-        .context("Failed to execute gh pr list")?;
+        .context("Failed to execute gh search prs")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("Failed to list PRs: {}", error));
+        return Err(eyre::eyre!("Failed to search PRs: {}", error));
     }
 
     let json_output =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh pr list output")?;
+        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh search prs output")?;
 
-    parse_pr_list_json(&json_output)
+    parse_search_prs_json(&json_output, change_id_pattern)
 }
 
-/// Parse JSON output from gh pr list
-fn parse_pr_list_json(json_output: &str) -> Result<Vec<PrInfo>> {
+/// Parse JSON output from gh search prs
+fn parse_search_prs_json(json_output: &str, branch_name: &str) -> Result<Vec<PrInfo>> {
     let trimmed = json_output.trim();
     if trimmed.is_empty() || trimmed == "[]" {
         return Ok(Vec::new());
     }
 
-    let gh_prs: Vec<GhPrListItem> =
-        serde_json::from_str(trimmed).context("Failed to parse PR list JSON")?;
+    let gh_prs: Vec<GhSearchPrItem> =
+        serde_json::from_str(trimmed).context("Failed to parse PR search JSON")?;
 
     let prs: Vec<PrInfo> = gh_prs
         .into_iter()
@@ -349,8 +354,10 @@ fn parse_pr_list_json(json_output: &str) -> Result<Vec<PrInfo>> {
             repo_slug: gh_pr.repository.name_with_owner,
             number: gh_pr.number,
             title: gh_pr.title,
-            branch: gh_pr.head_ref_name,
+            // gh search prs doesn't return headRefName, but we know it from the search filter
+            branch: branch_name.to_string(),
             author: gh_pr.author.login,
+            // gh search prs returns lowercase state
             state: match gh_pr.state.to_uppercase().as_str() {
                 "OPEN" => PrState::Open,
                 _ => PrState::Closed,
@@ -359,7 +366,7 @@ fn parse_pr_list_json(json_output: &str) -> Result<Vec<PrInfo>> {
         })
         .collect();
 
-    debug!("Parsed {} PRs from JSON", prs.len());
+    debug!("Parsed {} PRs from search JSON", prs.len());
     Ok(prs)
 }
 
@@ -494,7 +501,6 @@ mod tests {
 
     #[test]
     fn test_query_parsing() {
-        // Test that we can parse repository names correctly
         let test_output = "owner/repo1\nowner/repo2\nowner/repo3\n";
         let repos: Vec<String> = test_output
             .lines()
@@ -509,36 +515,35 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_json_empty_string() {
-        let result = parse_pr_list_json("").unwrap();
+    fn test_parse_search_prs_json_empty_string() {
+        let result = parse_search_prs_json("", "GX-test").unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_parse_pr_list_json_empty_array() {
-        let result = parse_pr_list_json("[]").unwrap();
+    fn test_parse_search_prs_json_empty_array() {
+        let result = parse_search_prs_json("[]", "GX-test").unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_parse_pr_list_json_whitespace() {
-        let result = parse_pr_list_json("  \n  ").unwrap();
+    fn test_parse_search_prs_json_whitespace() {
+        let result = parse_search_prs_json("  \n  ", "GX-test").unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_parse_pr_list_json_single_pr() {
+    fn test_parse_search_prs_json_single_pr() {
         let json = r#"[{
             "number": 123,
             "title": "GX-2024-01-15: Update configs",
-            "headRefName": "GX-2024-01-15",
             "author": {"login": "testuser"},
-            "state": "OPEN",
+            "state": "open",
             "url": "https://github.com/org/repo/pull/123",
             "repository": {"nameWithOwner": "org/repo"}
         }]"#;
 
-        let result = parse_pr_list_json(json).unwrap();
+        let result = parse_search_prs_json(json, "GX-2024-01-15").unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].number, 123);
         assert_eq!(result[0].title, "GX-2024-01-15: Update configs");
@@ -550,29 +555,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_json_multiple_prs() {
+    fn test_parse_search_prs_json_multiple_prs() {
         let json = r#"[
             {
                 "number": 1,
                 "title": "PR 1",
-                "headRefName": "branch1",
                 "author": {"login": "user1"},
-                "state": "OPEN",
+                "state": "open",
                 "url": "https://github.com/org/repo1/pull/1",
                 "repository": {"nameWithOwner": "org/repo1"}
             },
             {
                 "number": 2,
                 "title": "PR 2",
-                "headRefName": "branch2",
                 "author": {"login": "user2"},
-                "state": "CLOSED",
+                "state": "closed",
                 "url": "https://github.com/org/repo2/pull/2",
                 "repository": {"nameWithOwner": "org/repo2"}
             }
         ]"#;
 
-        let result = parse_pr_list_json(json).unwrap();
+        let result = parse_search_prs_json(json, "GX-test").unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].number, 1);
         assert_eq!(result[0].state, PrState::Open);
@@ -581,51 +584,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_json_lowercase_state() {
-        let json = r#"[{
-            "number": 1,
-            "title": "Test PR",
-            "headRefName": "test-branch",
-            "author": {"login": "user"},
-            "state": "open",
-            "url": "https://github.com/org/repo/pull/1",
-            "repository": {"nameWithOwner": "org/repo"}
-        }]"#;
-
-        let result = parse_pr_list_json(json).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].state, PrState::Open);
-    }
-
-    #[test]
-    fn test_parse_pr_list_json_merged_state() {
-        let json = r#"[{
-            "number": 1,
-            "title": "Test PR",
-            "headRefName": "test-branch",
-            "author": {"login": "user"},
-            "state": "MERGED",
-            "url": "https://github.com/org/repo/pull/1",
-            "repository": {"nameWithOwner": "org/repo"}
-        }]"#;
-
-        let result = parse_pr_list_json(json).unwrap();
-        assert_eq!(result.len(), 1);
-        // MERGED is treated as Closed (not Open)
-        assert_eq!(result[0].state, PrState::Closed);
-    }
-
-    #[test]
-    fn test_parse_pr_list_json_invalid_json() {
+    fn test_parse_search_prs_json_invalid_json() {
         let json = "not valid json";
-        let result = parse_pr_list_json(json);
+        let result = parse_search_prs_json(json, "GX-test");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_pr_list_json_missing_fields() {
+    fn test_parse_search_prs_json_missing_fields() {
         let json = r#"[{"number": 1}]"#;
-        let result = parse_pr_list_json(json);
+        let result = parse_search_prs_json(json, "GX-test");
         assert!(result.is_err());
     }
 }
