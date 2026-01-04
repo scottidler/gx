@@ -386,6 +386,11 @@ pub enum ReviewAction {
         change_id: String,
         #[arg(long, help = "Use admin override for merge")]
         admin: bool,
+        #[arg(
+            long,
+            help = "Enable auto-merge (merge when all checks pass)"
+        )]
+        auto: bool,
     },
     /// Delete PRs and branches
     Delete {

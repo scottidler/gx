@@ -270,13 +270,44 @@ pub fn process_review_approve_command(
     _patterns: &[String],
     change_id: &str,
     admin_override: bool,
+    auto_merge: bool,
 ) -> Result<()> {
     info!("Approving PRs for change ID: {change_id}");
 
-    // For now, use a simple implementation - TODO: implement full multi-org support
-    let org_str = org.unwrap_or("default-org");
-    let prs = github::list_prs_by_change_id(org_str, change_id)
-        .with_context(|| format!("Failed to list PRs for change ID: {change_id}"))?;
+    // Discover repositories for org auto-detection
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
+
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    let user_org_contexts =
+        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+
+    if user_org_contexts.is_empty() {
+        eprintln!("Error: No organization detected. Use --org <org> to specify one.");
+        return Ok(());
+    }
+
+    // Collect PRs from all detected orgs
+    let mut all_prs = Vec::new();
+    for context in &user_org_contexts {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+            Ok(prs) => all_prs.extend(prs),
+            Err(e) => {
+                log::warn!(
+                    "Failed to get PRs from org '{}': {}",
+                    context.user_or_org,
+                    e
+                );
+            }
+        }
+    }
+    let prs = all_prs;
 
     if prs.is_empty() {
         println!("No PRs found for change ID: {change_id}");
@@ -315,7 +346,7 @@ pub fn process_review_approve_command(
     let results: Vec<ReviewResult> = pool.install(|| {
         open_prs
             .par_iter()
-            .map(|pr| approve_and_merge_pr(pr, change_id, admin_override))
+            .map(|pr| approve_and_merge_pr(pr, change_id, admin_override, auto_merge))
             .collect()
     });
 
@@ -346,10 +377,40 @@ pub fn process_review_delete_command(
 ) -> Result<()> {
     info!("Deleting PRs for change ID: {change_id}");
 
-    // For now, use a simple implementation - TODO: implement full multi-org support
-    let org_str = org.unwrap_or("default-org");
-    let prs = github::list_prs_by_change_id(org_str, change_id)
-        .with_context(|| format!("Failed to list PRs for change ID: {change_id}"))?;
+    // Discover repositories for org auto-detection
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
+
+    let repos = crate::repo::discover_repos(start_dir, max_depth)
+        .context("Failed to discover repositories")?;
+
+    let user_org_contexts =
+        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+
+    if user_org_contexts.is_empty() {
+        eprintln!("Error: No organization detected. Use --org <org> to specify one.");
+        return Ok(());
+    }
+
+    // Collect PRs from all detected orgs
+    let mut all_prs = Vec::new();
+    for context in &user_org_contexts {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+            Ok(prs) => all_prs.extend(prs),
+            Err(e) => {
+                log::warn!(
+                    "Failed to get PRs from org '{}': {}",
+                    context.user_or_org,
+                    e
+                );
+            }
+        }
+    }
+    let prs = all_prs;
 
     if prs.is_empty() {
         println!("No PRs found for change ID: {change_id}");
@@ -540,10 +601,15 @@ fn clone_repo_for_pr(org_dir: &Path, pr: &PrInfo, change_id: &str) -> ReviewResu
 }
 
 /// Approve and merge a PR
-fn approve_and_merge_pr(pr: &PrInfo, change_id: &str, admin_override: bool) -> ReviewResult {
+fn approve_and_merge_pr(
+    pr: &PrInfo,
+    change_id: &str,
+    admin_override: bool,
+    auto_merge: bool,
+) -> ReviewResult {
     let repo = create_repo_from_slug(&pr.repo_slug);
 
-    match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override) {
+    match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override, auto_merge) {
         Ok(()) => {
             info!("Successfully approved and merged PR #{}", pr.number);
 

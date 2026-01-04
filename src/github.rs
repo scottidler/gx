@@ -393,7 +393,12 @@ fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
 }
 
 /// Approve and merge a PR
-pub fn approve_and_merge_pr(repo_slug: &str, pr_number: u64, admin_override: bool) -> Result<()> {
+pub fn approve_and_merge_pr(
+    repo_slug: &str,
+    pr_number: u64,
+    admin_override: bool,
+    auto_merge: bool,
+) -> Result<()> {
     debug!("Approving and merging PR #{pr_number} in {repo_slug}");
 
     // First approve the PR
@@ -428,6 +433,10 @@ pub fn approve_and_merge_pr(repo_slug: &str, pr_number: u64, admin_override: boo
 
     if admin_override {
         merge_args.push("--admin");
+    }
+
+    if auto_merge {
+        merge_args.push("--auto");
     }
 
     let merge_output = Command::new("gh")

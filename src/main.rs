@@ -161,16 +161,19 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 change_id,
                 *all,
             ),
-            cli::ReviewAction::Approve { change_id, admin } => {
-                review::process_review_approve_command(
-                    cli,
-                    config,
-                    org.as_deref(),
-                    patterns,
-                    change_id,
-                    *admin,
-                )
-            }
+            cli::ReviewAction::Approve {
+                change_id,
+                admin,
+                auto,
+            } => review::process_review_approve_command(
+                cli,
+                config,
+                org.as_deref(),
+                patterns,
+                change_id,
+                *admin,
+                *auto,
+            ),
             cli::ReviewAction::Delete { change_id } => review::process_review_delete_command(
                 cli,
                 config,
