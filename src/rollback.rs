@@ -1,10 +1,47 @@
 use crate::cli::RollbackAction;
 use crate::state::StateManager;
-use crate::transaction::{validate_rollback_operations, Transaction};
+use crate::transaction::{RecoveryState, Transaction};
 use chrono::{DateTime, Duration, Utc};
 use colored::*;
 use eyre::Result;
 use log::{debug, error, info, warn};
+
+/// Basic validation of a recovery state: the repo must still exist and be a git
+/// repository. Returns `(errors, warnings)`.
+fn validate_recovery_state(state: &RecoveryState) -> (Vec<String>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    let repo = &state.repo_path;
+    if !repo.exists() {
+        errors.push(format!(
+            "Repository path no longer exists: {}",
+            repo.display()
+        ));
+    } else if !repo.join(".git").exists() {
+        errors.push(format!("Not a git repository: {}", repo.display()));
+    }
+
+    if state.steps.is_empty() {
+        warnings.push("Recovery state has no steps".to_string());
+    }
+
+    (errors, warnings)
+}
+
+/// Summarize step kinds for display.
+fn step_kind(step: &crate::transaction::RollbackStep) -> &'static str {
+    use crate::transaction::RollbackStep::*;
+    match step {
+        PopStash { .. } => "pop-stash",
+        SwitchBranch { .. } => "switch-branch",
+        DeleteLocalBranch { .. } => "delete-local-branch",
+        DeleteRemoteBranch { .. } => "delete-remote-branch",
+        ResetCommit { .. } => "reset-commit",
+        RestoreBackup { .. } => "restore-backup",
+        RemoveCreatedFile { .. } => "remove-created-file",
+    }
+}
 
 /// Handle rollback commands
 pub fn handle_rollback(action: RollbackAction) -> Result<()> {
@@ -42,25 +79,23 @@ fn list_recovery_states() -> Result<()> {
             "{}",
             format!("🔄 Transaction: {}", state.transaction_id).bold()
         );
+        println!("   Change ID: {}", state.change_id);
+        println!("   Repository: {}", state.repo_path.display());
         println!(
             "   Created: {} ({} ago)",
             created_time.format("%Y-%m-%d %H:%M:%S UTC"),
             format_duration(age)
         );
-        println!("   Operations: {}", state.operation_count);
-        println!("   Rollback Actions: {}", state.rollback_actions.len());
-        println!("   Rollback Points: {}", state.rollback_points.len());
+        println!("   Steps: {}", state.steps.len());
 
-        if !state.rollback_actions.is_empty() {
-            println!("   Action Types:");
-            let mut type_counts = std::collections::HashMap::new();
-            for action in &state.rollback_actions {
-                *type_counts
-                    .entry(format!("{:?}", action.operation_type))
-                    .or_insert(0) += 1;
+        if !state.steps.is_empty() {
+            println!("   Step Types:");
+            let mut type_counts = std::collections::BTreeMap::new();
+            for step in &state.steps {
+                *type_counts.entry(step_kind(step)).or_insert(0) += 1;
             }
-            for (op_type, count) in type_counts {
-                println!("     {} {}: {}", "•".blue(), op_type, count);
+            for (kind, count) in type_counts {
+                println!("     {} {}: {}", "•".blue(), kind, count);
             }
         }
         println!();
@@ -87,18 +122,17 @@ fn execute_recovery(transaction_id: &str, force: bool) -> Result<()> {
             .blue()
     );
     println!("   Created: {}", state.created_at);
-    println!("   Operations: {}", state.operation_count);
-    println!("   Rollback Actions: {}", state.rollback_actions.len());
+    println!("   Steps: {}", state.steps.len());
     println!();
 
     // Validate before executing unless forced
     if !force {
         println!("{}", "🔍 Validating recovery operations...".yellow());
-        let validation = validate_rollback_operations(&state.rollback_actions);
+        let (errors, warnings) = validate_recovery_state(&state);
 
-        if !validation.is_valid() {
+        if !errors.is_empty() {
             println!("{}", "❌ Validation failed:".red().bold());
-            for error in &validation.errors {
+            for error in &errors {
                 println!("   {} {}", "•".red(), error.red());
             }
             println!();
@@ -109,9 +143,9 @@ fn execute_recovery(transaction_id: &str, force: bool) -> Result<()> {
             return Err(eyre::eyre!("Recovery validation failed"));
         }
 
-        if !validation.warnings.is_empty() {
+        if !warnings.is_empty() {
             println!("{}", "⚠️  Validation warnings:".yellow().bold());
-            for warning in &validation.warnings {
+            for warning in &warnings {
                 println!("   {} {}", "•".yellow(), warning.yellow());
             }
             println!();
@@ -143,14 +177,12 @@ fn validate_recovery(transaction_id: &str) -> Result<()> {
             .blue()
     );
     println!("   Created: {}", state.created_at);
-    println!("   Operations: {}", state.operation_count);
-    println!("   Rollback Actions: {}", state.rollback_actions.len());
+    println!("   Steps: {}", state.steps.len());
     println!();
 
-    let validation = validate_rollback_operations(&state.rollback_actions);
+    let (errors, warnings) = validate_recovery_state(&state);
 
-    // Display validation results
-    if validation.is_valid() {
+    if errors.is_empty() {
         println!(
             "{}",
             "✅ Validation passed - Recovery is safe to execute"
@@ -166,23 +198,23 @@ fn validate_recovery(transaction_id: &str) -> Result<()> {
         );
     }
 
-    if !validation.errors.is_empty() {
+    if !errors.is_empty() {
         println!();
         println!("{}", "Errors:".red().bold());
-        for error in &validation.errors {
+        for error in &errors {
             println!("   {} {}", "•".red(), error.red());
         }
     }
 
-    if !validation.warnings.is_empty() {
+    if !warnings.is_empty() {
         println!();
         println!("{}", "Warnings:".yellow().bold());
-        for warning in &validation.warnings {
+        for warning in &warnings {
             println!("   {} {}", "•".yellow(), warning.yellow());
         }
     }
 
-    if validation.errors.is_empty() && validation.warnings.is_empty() {
+    if errors.is_empty() && warnings.is_empty() {
         println!();
         println!("{}", "No issues detected.".green());
     }

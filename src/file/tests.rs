@@ -321,63 +321,25 @@ fn test_write_file_content_with_nested_dirs() {
 }
 
 #[test]
-fn test_backup_and_restore() {
+fn test_create_and_restore_out_of_tree_backup() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("original.txt");
-    let original_content = "original content";
-    fs::write(&file_path, original_content).unwrap();
-
-    let backup_path = backup_file(&file_path).unwrap();
-    assert!(backup_path.exists());
-
-    fs::write(&file_path, "modified content").unwrap();
-    restore_from_backup(&backup_path, &file_path).unwrap();
-    assert!(!backup_path.exists());
-    assert_eq!(fs::read_to_string(&file_path).unwrap(), original_content);
-}
-
-#[test]
-fn test_cleanup_backup_file() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.txt");
-    let backup_path = temp_dir.path().join("test.txt.backup");
+    let backup_path = temp_dir
+        .path()
+        .join("backups")
+        .join("tx-1")
+        .join("original.txt");
     fs::write(&file_path, "original content").unwrap();
-    fs::write(&backup_path, "backup content").unwrap();
 
-    cleanup_backup_file(&backup_path).unwrap();
-    assert!(!backup_path.exists());
-    assert!(file_path.exists());
-}
+    // Backup lives outside the worktree and the original is untouched.
+    create_backup(&file_path, &backup_path).unwrap();
+    assert!(backup_path.exists());
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
 
-#[test]
-fn test_cleanup_backup_file_nonexistent() {
-    let temp_dir = TempDir::new().unwrap();
-    let backup_path = temp_dir.path().join("nonexistent.backup");
-    assert!(cleanup_backup_file(&backup_path).is_ok());
-}
-
-#[test]
-fn test_find_backup_files_recursive() {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_path = temp_dir.path();
-
-    fs::create_dir_all(repo_path.join("src").join("utils")).unwrap();
-    fs::write(repo_path.join("file1.txt.backup"), "backup1").unwrap();
-    fs::write(repo_path.join("src").join("file2.rs.backup"), "backup2").unwrap();
-    fs::write(
-        repo_path.join("src").join("utils").join("file3.ts.backup"),
-        "backup3",
-    )
-    .unwrap();
-    fs::create_dir_all(repo_path.join(".git")).unwrap();
-    fs::write(repo_path.join(".git").join("config.backup"), "git backup").unwrap();
-
-    let backup_files = find_backup_files_recursive(repo_path).unwrap();
-    assert_eq!(backup_files.len(), 3);
-    let backup_names: Vec<_> = backup_files
-        .iter()
-        .map(|p| p.file_name().unwrap().to_str().unwrap())
-        .collect();
-    assert!(backup_names.contains(&"file1.txt.backup"));
-    assert!(!backup_names.contains(&"config.backup"));
+    // Modify, then restore from the out-of-tree backup.
+    fs::write(&file_path, "modified content").unwrap();
+    restore_backup(&backup_path, &file_path).unwrap();
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
+    // The backup is left in place (the tx dir is cleaned wholesale later).
+    assert!(backup_path.exists());
 }

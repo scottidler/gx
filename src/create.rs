@@ -7,7 +7,7 @@ use crate::github;
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::state::{ChangeState, StateManager};
-use crate::transaction::{RollbackType, Transaction};
+use crate::transaction::Transaction;
 use chrono::Local;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
@@ -370,7 +370,25 @@ fn update_change_state(
     }
 }
 
-/// Process create command for a single repository with comprehensive rollback
+/// Build an error result in the DryRun (nothing committed) state.
+fn dry_run_error(repo: &Repo, change_id: &str, error: String) -> CreateResult {
+    CreateResult {
+        repo: repo.clone(),
+        change_id: change_id.to_string(),
+        action: CreateAction::DryRun,
+        files_affected: Vec::new(),
+        substitution_stats: None,
+        pr_number: None,
+        pr_url: None,
+        error: Some(error),
+    }
+}
+
+/// Process create command for a single repository with comprehensive rollback.
+///
+/// Order (design Architecture): lock → stash -u → switch to head → pull →
+/// mutate → branch → stage → commit → push → finalize → create PR. Rollback
+/// steps are persisted write-ahead via the typed `Transaction`.
 fn process_single_repo(
     repo: &Repo,
     change_id: &str,
@@ -379,146 +397,114 @@ fn process_single_repo(
     commit_message: Option<&str>,
     pr: Option<&crate::cli::PR>,
 ) -> CreateResult {
-    debug!("Processing repository: {}", repo.name);
-
-    let mut transaction = Transaction::new();
-    transaction.set_continue_on_failure(true); // Continue rollback even if some actions fail
+    debug!(
+        "process_single_repo: repo={} change_id={change_id}",
+        repo.name
+    );
     let repo_path = &repo.path;
-    let mut files_affected = Vec::new();
-    let mut diff_parts = Vec::new();
-    let mut _stash_ref: Option<String> = None;
+    let committing = commit_message.is_some();
 
-    // Add rollback points for major phases
-    transaction.add_rollback_point("Repository preparation phase".to_string());
-
-    // 1. Handle uncommitted changes with stash
-    match git::has_uncommitted_changes(repo_path) {
-        Ok(true) => {
-            debug!("Found uncommitted changes, stashing...");
-            match git::stash_save(repo_path, &format!("GX auto-stash for {change_id}")) {
-                Ok(stash) => {
-                    _stash_ref = Some(stash.clone());
-                    transaction.add_rollback_with_type(
-                        {
-                            let repo_path = repo_path.clone();
-                            let stash_ref = stash.clone();
-                            move || {
-                                debug!("Rolling back: restoring stashed changes");
-                                git::stash_pop(&repo_path, &stash_ref)
-                            }
-                        },
-                        format!("Restore stash: {stash}"),
-                        RollbackType::StashOperation,
-                    );
-                }
-                Err(e) => {
-                    return CreateResult {
-                        repo: repo.clone(),
-                        change_id: change_id.to_string(),
-                        action: CreateAction::DryRun,
-                        files_affected: Vec::new(),
-                        substitution_stats: None,
-                        pr_number: None,
-                        pr_url: None,
-                        error: Some(format!("Failed to stash changes: {e}")),
-                    };
-                }
-            }
-        }
-        Ok(false) => {} // No uncommitted changes
-        Err(e) => {
-            return CreateResult {
-                repo: repo.clone(),
-                change_id: change_id.to_string(),
-                action: CreateAction::DryRun,
-                files_affected: Vec::new(),
-                substitution_stats: None,
-                pr_number: None,
-                pr_url: None,
-                error: Some(format!("Failed to check repository status: {e}")),
-            };
-        }
-    }
-
-    transaction.add_rollback_point("Branch operations phase".to_string());
-
-    // 2. Get current branch and switch to head branch if needed
-    let original_branch = match git::get_current_branch_name(repo_path) {
-        Ok(branch) => Some(branch),
-        Err(e) => {
-            transaction.rollback();
-            return CreateResult {
-                repo: repo.clone(),
-                change_id: change_id.to_string(),
-                action: CreateAction::DryRun,
-                files_affected: Vec::new(),
-                substitution_stats: None,
-                pr_number: None,
-                pr_url: None,
-                error: Some(format!("Failed to get current branch: {e}")),
-            };
-        }
+    // Per-repo lock: a second concurrent gx invocation must not interleave
+    // stash/branch operations on this repo (design Q5).
+    let _lock = match crate::lock::RepoLock::acquire(repo_path) {
+        Ok(lock) => lock,
+        Err(e) => return dry_run_error(repo, change_id, format!("Repository is locked: {e}")),
     };
 
-    // 3. Switch to head branch if not already on it
-    match git::get_head_branch(repo_path) {
-        Ok(head) => {
-            if let Some(ref current) = original_branch {
-                if current != &head {
-                    debug!("Switching from '{current}' to head branch '{head}'");
-                    if let Err(e) = git::switch_branch(repo_path, &head) {
-                        transaction.rollback();
-                        return CreateResult {
-                            repo: repo.clone(),
-                            change_id: change_id.to_string(),
-                            action: CreateAction::DryRun,
-                            files_affected: Vec::new(),
-                            substitution_stats: None,
-                            pr_number: None,
-                            pr_url: None,
-                            error: Some(format!("Failed to switch to head branch: {e}")),
-                        };
-                    }
+    let mut transaction = Transaction::new(repo_path.clone(), change_id.to_string(), committing);
+    let mut files_affected = Vec::new();
+    let mut diff_parts = Vec::new();
 
-                    // Add rollback to switch back to original branch
-                    transaction.add_rollback_with_type(
-                        {
-                            let repo_path = repo_path.clone();
-                            let original_branch = current.clone();
-                            move || {
-                                debug!("Rolling back: switching back to original branch '{original_branch}'");
-                                git::switch_branch(&repo_path, &original_branch)
-                            }
-                        },
-                        format!("Switch back to branch: {current}"),
-                        RollbackType::BranchOperation,
+    // 1. Determine the original branch; guard against detached HEAD ([A30]).
+    let original_branch = match git::get_current_branch_name(repo_path) {
+        Ok(branch) if branch.is_empty() => {
+            return dry_run_error(
+                repo,
+                change_id,
+                "Repository is in detached HEAD state; check out a branch first".to_string(),
+            );
+        }
+        Ok(branch) => branch,
+        Err(e) => {
+            return dry_run_error(
+                repo,
+                change_id,
+                format!("Failed to get current branch: {e}"),
+            );
+        }
+    };
+    transaction.set_original_branch(original_branch.clone());
+
+    // 2. Stash uncommitted work (including untracked, -u) so the worktree is a
+    //    pristine checkout of HEAD during mutation. status --porcelain counts
+    //    untracked (??) entries, so the dirty predicate already includes them.
+    match git::has_uncommitted_changes(repo_path) {
+        Ok(true) => match git::stash_save_with_untracked(
+            repo_path,
+            &format!("GX auto-stash for {change_id}"),
+        ) {
+            Ok(sha) => {
+                transaction.set_stash_sha(sha.clone());
+                // Write-ahead: persist PopStash immediately after the stash exists.
+                if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::PopStash {
+                    repo: repo_path.clone(),
+                    stash_sha: sha,
+                }) {
+                    transaction.rollback();
+                    return dry_run_error(
+                        repo,
+                        change_id,
+                        format!("Failed to persist recovery: {e}"),
                     );
                 }
             }
-        }
+            Err(e) => {
+                return dry_run_error(repo, change_id, format!("Failed to stash changes: {e}"));
+            }
+        },
+        Ok(false) => {}
         Err(e) => {
-            debug!("Could not determine head branch, continuing with current branch: {e}");
+            return dry_run_error(
+                repo,
+                change_id,
+                format!("Failed to check repository status: {e}"),
+            );
         }
     }
 
-    transaction.add_rollback_point("File modifications phase".to_string());
+    // 3. Switch to the head branch if we are not already on it.
+    if let Ok(head) = git::get_head_branch(repo_path) {
+        if head != original_branch {
+            // Write-ahead: persist the switch-back before switching away.
+            if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::SwitchBranch {
+                repo: repo_path.clone(),
+                branch: original_branch.clone(),
+            }) {
+                transaction.rollback();
+                return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
+            }
+            if let Err(e) = git::switch_branch(repo_path, &head) {
+                transaction.rollback();
+                return dry_run_error(
+                    repo,
+                    change_id,
+                    format!("Failed to switch to head branch: {e}"),
+                );
+            }
+        }
+    }
 
-    // 4. Pull latest changes
+    // 4. Pull latest changes.
     if let Err(e) = git::pull_latest_changes(repo_path) {
         transaction.rollback();
-        return CreateResult {
-            repo: repo.clone(),
-            change_id: change_id.to_string(),
-            action: CreateAction::DryRun,
-            files_affected: Vec::new(),
-            substitution_stats: None,
-            pr_number: None,
-            pr_url: None,
-            error: Some(format!("Failed to pull latest changes: {e}")),
-        };
+        return dry_run_error(
+            repo,
+            change_id,
+            format!("Failed to pull latest changes: {e}"),
+        );
     }
 
-    // 5. Apply changes based on change type
+    // 5. Apply the change (each registers its undo step write-ahead).
     let mut substitution_stats = None;
     let change_result = match change {
         Change::Add(path, content) => apply_add_change(
@@ -528,89 +514,55 @@ fn process_single_repo(
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
-        )
-        .map(|_| ()),
+        ),
         Change::Delete => apply_delete_change(
             repo_path,
             file_patterns,
             &mut transaction,
             &mut files_affected,
             &mut diff_parts,
+        ),
+        Change::Sub(pattern, replacement) => apply_substitution_change(
+            repo_path,
+            file_patterns,
+            pattern,
+            replacement,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
         )
-        .map(|_| ()),
-        Change::Sub(pattern, replacement) => {
-            match apply_substitution_change(
-                repo_path,
-                file_patterns,
-                pattern,
-                replacement,
-                &mut transaction,
-                &mut files_affected,
-                &mut diff_parts,
-            ) {
-                Ok(stats) => {
-                    substitution_stats = Some(stats);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
-        Change::Regex(pattern, replacement) => {
-            match apply_regex_change(
-                repo_path,
-                file_patterns,
-                pattern,
-                replacement,
-                &mut transaction,
-                &mut files_affected,
-                &mut diff_parts,
-            ) {
-                Ok(stats) => {
-                    substitution_stats = Some(stats);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
+        .map(|stats| substitution_stats = Some(stats)),
+        Change::Regex(pattern, replacement) => apply_regex_change(
+            repo_path,
+            file_patterns,
+            pattern,
+            replacement,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        )
+        .map(|stats| substitution_stats = Some(stats)),
     };
-
-    // Add file modification rollback after changes are applied
-    if !files_affected.is_empty() {
-        transaction.add_rollback_with_type(
-            {
-                let repo_path = repo_path.clone();
-                move || {
-                    debug!("Rolling back: resetting file modifications");
-                    git::reset_hard(&repo_path)
-                }
-            },
-            "Reset file modifications".to_string(),
-            RollbackType::FileOperation,
-        );
-    }
 
     if let Err(e) = change_result {
         transaction.rollback();
-        return CreateResult {
-            repo: repo.clone(),
-            change_id: change_id.to_string(),
-            action: CreateAction::DryRun,
-            files_affected: Vec::new(),
-            substitution_stats,
-            pr_number: None,
-            pr_url: None,
-            error: Some(format!("Failed to apply changes: {e}")),
-        };
+        let mut result = dry_run_error(repo, change_id, format!("Failed to apply changes: {e}"));
+        result.substitution_stats = substitution_stats;
+        return result;
     }
 
-    // If no files were affected, return early
-    if files_affected.is_empty() {
+    // No files affected, or dry run: roll back (restores worktree, branch, stash).
+    if files_affected.is_empty() || !committing {
         transaction.rollback();
         return CreateResult {
             repo: repo.clone(),
             change_id: change_id.to_string(),
             action: CreateAction::DryRun,
-            files_affected: Vec::new(),
+            files_affected: if committing {
+                Vec::new()
+            } else {
+                files_affected
+            },
             substitution_stats,
             pr_number: None,
             pr_url: None,
@@ -618,92 +570,82 @@ fn process_single_repo(
         };
     }
 
-    // If no commit message, this is a dry run - rollback and return
-    if commit_message.is_none() {
-        transaction.rollback();
-        return CreateResult {
-            repo: repo.clone(),
-            change_id: change_id.to_string(),
-            action: CreateAction::DryRun,
-            files_affected,
-            substitution_stats,
-            pr_number: None,
-            pr_url: None,
-            error: None,
-        };
-    }
+    let commit_message = commit_message.unwrap_or_default();
 
-    transaction.add_rollback_point("Git operations phase".to_string());
-
-    // 6. Create branch and commit changes with comprehensive rollback
-    let commit_result = commit_changes_with_rollback(
+    // 6. branch → stage → commit → push (each undo persisted write-ahead).
+    if let Err(e) = commit_changes_with_rollback(
         repo_path,
         change_id,
-        original_branch.as_deref().unwrap_or("main"),
-        commit_message.unwrap(),
+        commit_message,
         &files_affected,
         &mut transaction,
-    );
+    ) {
+        transaction.rollback();
+        let mut result = dry_run_error(repo, change_id, format!("Failed to commit changes: {e}"));
+        result.substitution_stats = substitution_stats;
+        return result;
+    }
 
-    match commit_result {
-        Ok(()) => {
-            let (final_action, pr_number, pr_url) = if let Some(pr) = pr {
-                match create_pull_request(repo, change_id, commit_message.unwrap(), pr) {
-                    Ok(pr_result) => (
-                        CreateAction::PrCreated,
-                        Some(pr_result.number),
-                        Some(pr_result.url),
-                    ),
-                    Err(e) => {
-                        warn!("Failed to create PR for {}: {}", repo.name, e);
-                        (CreateAction::Committed, None, None)
-                    }
-                }
-            } else {
-                (CreateAction::Committed, None, None)
-            };
-
-            // Use preflight check before committing
-            match transaction.commit_with_preflight_check(repo_path) {
-                Ok(()) => CreateResult {
-                    repo: repo.clone(),
-                    change_id: change_id.to_string(),
-                    action: final_action,
-                    files_affected,
-                    substitution_stats,
-                    pr_number,
-                    pr_url,
-                    error: None,
-                },
-                Err(e) => {
-                    warn!("Preflight check failed, rolling back transaction: {e}");
-                    transaction.rollback();
-                    CreateResult {
-                        repo: repo.clone(),
-                        change_id: change_id.to_string(),
-                        action: CreateAction::DryRun,
-                        files_affected: Vec::new(),
-                        substitution_stats,
-                        pr_number: None,
-                        pr_url: None,
-                        error: Some(format!("Preflight check failed: {e}")),
-                    }
-                }
-            }
-        }
+    // 7. Finalize BEFORE creating the PR: switch back to the original branch and
+    //    re-apply the stash. A finalize error (e.g. cannot restore branch) keeps
+    //    the recovery file for manual resolution and is reported as Committed.
+    let finalize_outcome = match transaction.finalize() {
+        Ok(outcome) => outcome,
         Err(e) => {
-            transaction.rollback();
-            CreateResult {
+            return CreateResult {
                 repo: repo.clone(),
                 change_id: change_id.to_string(),
-                action: CreateAction::DryRun,
+                action: CreateAction::Committed,
                 files_affected,
                 substitution_stats,
                 pr_number: None,
                 pr_url: None,
-                error: Some(format!("Failed to commit changes: {e}")),
-            }
+                error: Some(format!("Committed and pushed, but finalize failed: {e}")),
+            };
         }
+    };
+
+    // 8. Create the PR against the (already-restored) remote. A PR failure is
+    //    surfaced on the result, not swallowed ([A4]; Phase 5 refines).
+    let (action, pr_number, pr_url, mut error) = match pr {
+        Some(pr) => match create_pull_request(repo, change_id, commit_message, pr) {
+            Ok(result) => (
+                CreateAction::PrCreated,
+                Some(result.number),
+                Some(result.url),
+                None,
+            ),
+            Err(e) => (
+                CreateAction::Committed,
+                None,
+                None,
+                Some(format!("PR creation failed: {e}")),
+            ),
+        },
+        None => (CreateAction::Committed, None, None, None),
+    };
+
+    // A stash-restore conflict is surfaced (design Q2): committed, but the user's
+    // WIP could not be re-applied; the stash is preserved for manual recovery.
+    if let Some((sha, msg)) = finalize_outcome.stash_error {
+        let stash_err = format!(
+            "stash-restore-failed: could not re-apply stash {sha} ({msg}); recover with `git stash apply {sha}`"
+        );
+        error = Some(match error {
+            Some(existing) => format!("{existing}; {stash_err}"),
+            None => stash_err,
+        });
+    }
+
+    CreateResult {
+        repo: repo.clone(),
+        change_id: change_id.to_string(),
+        action,
+        files_affected,
+        substitution_stats,
+        pr_number,
+        pr_url,
+        error,
     }
 }
 
@@ -725,6 +667,11 @@ fn apply_add_change(
         return Err(eyre::eyre!("File already exists: {}", file_path));
     }
 
+    // Write-ahead: register removal of the created file before creating it.
+    transaction.push_step(crate::transaction::RollbackStep::RemoveCreatedFile {
+        path: full_path.clone(),
+    })?;
+
     // Create file and generate diff
     let (_, diff) = file::create_file_with_content(&full_path, content, 3)?;
 
@@ -734,20 +681,6 @@ fn apply_add_change(
         file_path,
         crate::utils::indent(&diff, 4)
     ));
-
-    // Add rollback action to delete the created file
-    let full_path_clone = full_path.clone();
-    transaction.add_rollback(move || {
-        if full_path_clone.exists() {
-            std::fs::remove_file(&full_path_clone).with_context(|| {
-                format!(
-                    "Failed to rollback file creation: {}",
-                    full_path_clone.display()
-                )
-            })?;
-        }
-        Ok(())
-    });
 
     Ok(())
 }
@@ -775,8 +708,13 @@ fn apply_delete_change(
             continue;
         };
 
-        // Create backup for rollback
-        let backup_path = file::backup_file(&full_path)?;
+        // Out-of-tree backup, then write-ahead register the restore before delete.
+        let backup_path = transaction.backup_path_for(&file_path)?;
+        file::create_backup(&full_path, &backup_path)?;
+        transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
+            backup: backup_path,
+            original: full_path.clone(),
+        })?;
 
         // Delete file
         file::delete_file(&full_path)?;
@@ -788,20 +726,6 @@ fn apply_delete_change(
             file_path.display(),
             crate::utils::indent(&diff, 4)
         ));
-
-        // Add rollback action
-        let backup_path_clone = backup_path.clone();
-        let full_path_clone = full_path.clone();
-        transaction
-            .add_rollback(move || file::restore_from_backup(&backup_path_clone, &full_path_clone));
-
-        // Add cleanup action for successful operations
-        let cleanup_backup_path = backup_path.clone();
-        transaction.add_rollback_with_type(
-            move || file::cleanup_backup_file(&cleanup_backup_path),
-            format!("Cleanup backup file: {}", backup_path.display()),
-            crate::transaction::RollbackType::FileOperation,
-        );
     }
 
     Ok(())
@@ -837,8 +761,13 @@ fn apply_substitution_change(
                 diff,
                 matches,
             } => {
-                // Create backup for rollback
-                let backup_path = file::backup_file(&full_path)?;
+                // Out-of-tree backup, then write-ahead register the restore.
+                let backup_path = transaction.backup_path_for(&file_path)?;
+                file::create_backup(&full_path, &backup_path)?;
+                transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
+                    backup: backup_path,
+                    original: full_path.clone(),
+                })?;
 
                 // Write updated content
                 file::write_file_content(&full_path, &updated_content)?;
@@ -849,21 +778,6 @@ fn apply_substitution_change(
                     file_path.display(),
                     crate::utils::indent(&diff, 4)
                 ));
-
-                // Add rollback action
-                let backup_path_clone = backup_path.clone();
-                let full_path_clone = full_path.clone();
-                transaction.add_rollback(move || {
-                    file::restore_from_backup(&backup_path_clone, &full_path_clone)
-                });
-
-                // Add cleanup action for successful operations
-                let cleanup_backup_path = backup_path.clone();
-                transaction.add_rollback_with_type(
-                    move || file::cleanup_backup_file(&cleanup_backup_path),
-                    format!("Cleanup backup file: {}", backup_path.display()),
-                    crate::transaction::RollbackType::FileOperation,
-                );
 
                 stats.files_changed += 1;
                 stats.total_matches += matches;
@@ -924,8 +838,13 @@ fn apply_regex_change(
                 diff,
                 matches,
             } => {
-                // Create backup for rollback
-                let backup_path = file::backup_file(&full_path)?;
+                // Out-of-tree backup, then write-ahead register the restore.
+                let backup_path = transaction.backup_path_for(&file_path)?;
+                file::create_backup(&full_path, &backup_path)?;
+                transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
+                    backup: backup_path,
+                    original: full_path.clone(),
+                })?;
 
                 // Write updated content
                 file::write_file_content(&full_path, &updated_content)?;
@@ -936,21 +855,6 @@ fn apply_regex_change(
                     file_path.display(),
                     crate::utils::indent(&diff, 4)
                 ));
-
-                // Add rollback action
-                let backup_path_clone = backup_path.clone();
-                let full_path_clone = full_path.clone();
-                transaction.add_rollback(move || {
-                    file::restore_from_backup(&backup_path_clone, &full_path_clone)
-                });
-
-                // Add cleanup action for successful operations
-                let cleanup_backup_path = backup_path.clone();
-                transaction.add_rollback_with_type(
-                    move || file::cleanup_backup_file(&cleanup_backup_path),
-                    format!("Cleanup backup file: {}", backup_path.display()),
-                    crate::transaction::RollbackType::FileOperation,
-                );
 
                 stats.files_changed += 1;
                 stats.total_matches += matches;
@@ -981,84 +885,48 @@ fn apply_regex_change(
     Ok(stats)
 }
 
-/// Enhanced commit function with comprehensive rollback
+/// Create the gx branch, stage, commit, and push - registering each undo step
+/// write-ahead. The success-path branch restoration and stash pop are handled by
+/// `Transaction::finalize`, not here.
 fn commit_changes_with_rollback(
     repo_path: &Path,
     change_id: &str,
-    original_branch: &str,
     commit_message: &str,
     files_affected: &[String],
     transaction: &mut Transaction,
 ) -> Result<()> {
-    // Check if branch existed before we try to create it
+    use crate::transaction::RollbackStep;
+
+    // Whether the branch pre-existed gx's run (so rollback won't delete it).
     let branch_existed = git::branch_exists_locally(repo_path, change_id).unwrap_or(false);
 
-    // Create and switch to branch (or switch to existing)
+    // Write-ahead: register branch deletion before creating the branch.
+    transaction.push_step(RollbackStep::DeleteLocalBranch {
+        repo: repo_path.to_path_buf(),
+        branch: change_id.to_string(),
+        branch_existed,
+    })?;
     git::create_branch(repo_path, change_id)
         .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
 
-    // Add branch rollback
-    transaction.add_rollback_with_type(
-        {
-            let repo_path = repo_path.to_path_buf();
-            let original_branch = original_branch.to_string();
-            let change_id = change_id.to_string();
-            move || {
-                debug!("Rolling back: switching back to original branch and cleaning up");
-                // Switch back to original branch
-                if let Err(e) = git::switch_branch(&repo_path, &original_branch) {
-                    warn!("Failed to switch back to original branch {original_branch}: {e}");
-                }
+    // Record the pre-commit HEAD so rollback resets to a known target, and
+    // register the reset write-ahead before committing.
+    let expected_sha = git::get_head_sha(repo_path)?;
+    transaction.push_step(RollbackStep::ResetCommit {
+        repo: repo_path.to_path_buf(),
+        expected_sha,
+    })?;
 
-                // Only delete the branch if we created it (not if it existed before)
-                if !branch_existed {
-                    if let Err(e) = git::delete_local_branch(&repo_path, &change_id) {
-                        warn!("Failed to delete branch {change_id}: {e}");
-                    }
-                }
-
-                Ok(())
-            }
-        },
-        format!("Branch cleanup: switch to {original_branch} and delete {change_id}"),
-        RollbackType::BranchOperation,
-    );
-
-    // Stage only the specific files we modified - never use "git add ."
+    // Stage only the specific files we modified - never "git add .".
     git::add_files(repo_path, files_affected).context("Failed to stage files")?;
-
-    // Commit staged changes
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
-    // Add commit rollback
-    transaction.add_rollback_with_type(
-        {
-            let repo_path = repo_path.to_path_buf();
-            move || {
-                debug!("Rolling back: resetting commit");
-                git::reset_commit(&repo_path)
-            }
-        },
-        "Reset commit".to_string(),
-        RollbackType::GitOperation,
-    );
-
-    // Push branch to remote
+    // Write-ahead: register remote branch deletion before pushing.
+    transaction.push_step(RollbackStep::DeleteRemoteBranch {
+        repo: repo_path.to_path_buf(),
+        branch: change_id.to_string(),
+    })?;
     git::push_branch(repo_path, change_id).context("Failed to push branch")?;
-
-    // Add push rollback (delete remote branch)
-    transaction.add_rollback_with_type(
-        {
-            let repo_path = repo_path.to_path_buf();
-            let change_id = change_id.to_string();
-            move || {
-                debug!("Rolling back: deleting remote branch '{change_id}'");
-                git::delete_remote_branch(&repo_path, &change_id)
-            }
-        },
-        format!("Delete remote branch: {change_id}"),
-        RollbackType::RemoteOperation,
-    );
 
     Ok(())
 }
@@ -1336,7 +1204,8 @@ mod tests {
     fn test_apply_add_change() {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();
-        let mut transaction = Transaction::new();
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
         let mut files_affected = Vec::new();
         let mut diff_parts = Vec::new();
 
@@ -1367,7 +1236,8 @@ mod tests {
         let file_path = repo_path.join("existing.txt");
         fs::write(&file_path, "existing content").unwrap();
 
-        let mut transaction = Transaction::new();
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
         let mut files_affected = Vec::new();
         let mut diff_parts = Vec::new();
 
@@ -1398,7 +1268,8 @@ mod tests {
         fs::write(repo_path.join("file3.md"), "markdown").unwrap();
         init_git_repo(repo_path);
 
-        let mut transaction = Transaction::new();
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
         let mut files_affected = Vec::new();
         let mut diff_parts = Vec::new();
         let patterns = vec!["*.txt".to_string()];
@@ -1432,7 +1303,8 @@ mod tests {
         fs::write(repo_path.join("test.txt"), "Hello world\nHello again").unwrap();
         init_git_repo(repo_path);
 
-        let mut transaction = Transaction::new();
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
         let mut files_affected = Vec::new();
         let mut diff_parts = Vec::new();
         let patterns = vec!["*.txt".to_string()];

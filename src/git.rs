@@ -1315,85 +1315,6 @@ pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result
     }
 }
 
-/// Save current changes to stash with GX-specific message
-/// Returns the stash reference (e.g., "stash@{0}")
-pub fn stash_save(repo_path: &std::path::Path, message: &str) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "push", "-m", message])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git stash push: {}", e))?;
-
-    if output.status.success() {
-        debug!("Stashed changes in '{}'", repo_path.display());
-        // Return the stash reference - new stash is always stash@{0}
-        Ok("stash@{0}".to_string())
-    } else {
-        Err(eyre::eyre!(
-            "Failed to stash changes: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Pop specific stash by reference
-pub fn stash_pop(repo_path: &std::path::Path, stash_ref: &str) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "pop", stash_ref])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git stash pop: {}", e))?;
-
-    if output.status.success() {
-        debug!("Popped stash {} in '{}'", stash_ref, repo_path.display());
-        Ok(())
-    } else {
-        Err(eyre::eyre!(
-            "Failed to pop stash {}: {}",
-            stash_ref,
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Hard reset to HEAD (for rollback of file modifications)
-pub fn reset_hard(repo_path: &std::path::Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["reset", "--hard", "HEAD"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git reset --hard: {}", e))?;
-
-    if output.status.success() {
-        debug!("Hard reset completed in '{}'", repo_path.display());
-        Ok(())
-    } else {
-        Err(eyre::eyre!(
-            "Failed to reset hard: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Reset last commit (for rollback of commits)
-pub fn reset_commit(repo_path: &std::path::Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["reset", "--soft", "HEAD~1"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git reset --soft: {}", e))?;
-
-    if output.status.success() {
-        debug!("Commit reset completed in '{}'", repo_path.display());
-        Ok(())
-    } else {
-        Err(eyre::eyre!(
-            "Failed to reset commit: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
 /// Get the default/head branch name for the repository
 pub fn get_head_branch(repo_path: &std::path::Path) -> Result<String> {
     // First try to get the default branch from remote
@@ -1460,23 +1381,6 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
     }
 }
 
-/// Check if a remote branch exists
-pub fn remote_branch_exists(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["ls-remote", "--heads", "origin", branch_name])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git ls-remote: {}", e))?;
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(!stdout.trim().is_empty())
-    } else {
-        // If remote check fails, assume branch doesn't exist
-        Ok(false)
-    }
-}
-
 /// Pull latest changes from the remote repository
 pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
     let output = Command::new("git")
@@ -1503,6 +1407,206 @@ pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
         } else {
             Err(eyre::eyre!("Failed to pull latest changes: {}", stderr))
         }
+    }
+}
+
+/// Get the full SHA of HEAD.
+pub fn get_head_sha(repo_path: &std::path::Path) -> Result<String> {
+    debug!("get_head_sha: repo_path={}", repo_path.display());
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("Failed to execute git rev-parse HEAD")?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to get HEAD sha: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Stash current changes (including untracked, `-u`) and return the stash commit
+/// SHA so it can later be re-applied by SHA rather than by a positional
+/// `stash@{n}` that a concurrent stash could shift ([A15], design Q6).
+pub fn stash_save_with_untracked(repo_path: &std::path::Path, message: &str) -> Result<String> {
+    debug!(
+        "stash_save_with_untracked: repo_path={} message={message}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "push", "-u", "-m", message])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git stash push -u: {}", e))?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!(
+            "Failed to stash changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Resolve the SHA of the stash we just created.
+    let sha_output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "stash@{0}"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to resolve stash SHA: {}", e))?;
+
+    if !sha_output.status.success() {
+        return Err(eyre::eyre!(
+            "Failed to resolve stash SHA after push: {}",
+            String::from_utf8_lossy(&sha_output.stderr)
+        ));
+    }
+
+    let sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
+    debug!("stash_save_with_untracked: created stash {sha}");
+    Ok(sha)
+}
+
+/// Apply a stash by its commit SHA. `git stash apply` accepts any stash-shaped
+/// commit (unlike `pop`/`drop`, which need a positional ref). Returns an error
+/// if the apply fails or conflicts; the caller decides whether to drop.
+pub fn stash_apply_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result<()> {
+    debug!(
+        "stash_apply_sha: repo_path={} stash_sha={stash_sha}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "apply", stash_sha])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git stash apply: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "git stash apply {} failed: {}",
+            stash_sha,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Drop the stash entry whose commit SHA equals `stash_sha`.
+///
+/// `git stash drop` only accepts a positional `stash@{n}`, so we resolve `n`
+/// from `git reflog show stash` by matching the SHA immediately before dropping
+/// and re-verify the SHA at that index, so a concurrent stash mutation cannot
+/// shift the entry and drop the wrong stash ([A15]).
+pub fn stash_drop_by_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result<()> {
+    debug!(
+        "stash_drop_by_sha: repo_path={} stash_sha={stash_sha}",
+        repo_path.display()
+    );
+    let reflog = Command::new("git")
+        .current_dir(repo_path)
+        .args(["reflog", "show", "stash", "--format=%H"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to read stash reflog: {}", e))?;
+
+    if !reflog.status.success() {
+        return Err(eyre::eyre!(
+            "Failed to read stash reflog: {}",
+            String::from_utf8_lossy(&reflog.stderr)
+        ));
+    }
+
+    let reflog_text = String::from_utf8_lossy(&reflog.stdout);
+    let index = reflog_text
+        .lines()
+        .position(|line| line.trim() == stash_sha)
+        .ok_or_else(|| eyre::eyre!("Stash {} no longer present in reflog", stash_sha))?;
+
+    let stash_ref = format!("stash@{{{index}}}");
+
+    // Re-verify the SHA at that index before dropping.
+    let verify = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", &stash_ref])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to verify stash ref {}: {}", stash_ref, e))?;
+    let verified_sha = String::from_utf8_lossy(&verify.stdout).trim().to_string();
+    if verified_sha != stash_sha {
+        return Err(eyre::eyre!(
+            "Stash index shifted: {} now resolves to {}, expected {}",
+            stash_ref,
+            verified_sha,
+            stash_sha
+        ));
+    }
+
+    let drop = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "drop", &stash_ref])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to drop stash: {}", e))?;
+
+    if drop.status.success() {
+        debug!("stash_drop_by_sha: dropped {stash_ref} ({stash_sha})");
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to drop stash {}: {}",
+            stash_ref,
+            String::from_utf8_lossy(&drop.stderr)
+        ))
+    }
+}
+
+/// Hard-reset to a specific SHA. Used during rollback to undo a commit back to a
+/// recorded pre-commit HEAD (idempotent if HEAD is already there) ([A2]).
+pub fn reset_hard_to_sha(repo_path: &std::path::Path, sha: &str) -> Result<()> {
+    debug!(
+        "reset_hard_to_sha: repo_path={} sha={sha}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["reset", "--hard", sha])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git reset --hard {}: {}", sha, e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to reset to {}: {}",
+            sha,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Force-checkout a branch, discarding any uncommitted worktree changes. Used
+/// during rollback to get off a gx branch before deleting it.
+pub fn force_switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    debug!(
+        "force_switch_branch: repo_path={} branch={branch_name}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["checkout", "-f", branch_name])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to run git checkout -f {}: {}", branch_name, e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to force-switch to {}: {}",
+            branch_name,
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -1638,189 +1742,6 @@ mod tests {
                 .map_err(|e| eyre::eyre!("Failed to set git name: {}", e))?;
 
             Ok((temp_dir, repo_path))
-        }
-
-        #[test]
-        fn test_stash_save_and_pop() {
-            // Skip if git is not available
-            if Command::new("git").arg("--version").output().is_err() {
-                return;
-            }
-
-            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
-                // Skip test if setup fails (git not available, etc.)
-                return;
-            };
-
-            // Create a file and commit it
-            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
-                return;
-            }
-
-            let add_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["add", "test.txt"])
-                .output();
-
-            if add_output.is_err() || !add_output.unwrap().status.success() {
-                return;
-            }
-
-            let commit_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["commit", "-m", "initial commit"])
-                .output();
-
-            if commit_output.is_err() || !commit_output.unwrap().status.success() {
-                return;
-            }
-
-            // Modify the file (uncommitted change)
-            if fs::write(repo_path.join("test.txt"), "modified content").is_err() {
-                return;
-            }
-
-            // Test stash save
-            if let Ok(stash_ref) = stash_save(&repo_path, "test stash") {
-                assert_eq!(stash_ref, "stash@{0}");
-
-                // File should be back to original content
-                if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
-                    assert_eq!(content, "original content");
-                }
-
-                // Test stash pop
-                if stash_pop(&repo_path, &stash_ref).is_ok() {
-                    // File should have modified content again
-                    if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
-                        assert_eq!(content, "modified content");
-                    }
-                }
-            }
-        }
-
-        #[test]
-        fn test_reset_hard() {
-            // Skip if git is not available
-            if Command::new("git").arg("--version").output().is_err() {
-                return;
-            }
-
-            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
-                return;
-            };
-
-            // Create initial commit
-            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
-                return;
-            }
-
-            let add_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["add", "test.txt"])
-                .output();
-
-            if add_output.is_err() || !add_output.unwrap().status.success() {
-                return;
-            }
-
-            let commit_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["commit", "-m", "initial commit"])
-                .output();
-
-            if commit_output.is_err() || !commit_output.unwrap().status.success() {
-                return;
-            }
-
-            // Modify file
-            if fs::write(repo_path.join("test.txt"), "modified content").is_err() {
-                return;
-            }
-
-            // Reset hard should restore original content
-            if reset_hard(&repo_path).is_ok() {
-                if let Ok(content) = fs::read_to_string(repo_path.join("test.txt")) {
-                    assert_eq!(content, "original content");
-                }
-            }
-        }
-
-        #[test]
-        fn test_reset_commit() {
-            // Skip if git is not available
-            if Command::new("git").arg("--version").output().is_err() {
-                return;
-            }
-
-            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
-                return;
-            };
-
-            // Create initial commit
-            if fs::write(repo_path.join("test.txt"), "original content").is_err() {
-                return;
-            }
-
-            let add_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["add", "test.txt"])
-                .output();
-
-            if add_output.is_err() || !add_output.unwrap().status.success() {
-                return;
-            }
-
-            let commit_output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["commit", "-m", "initial commit"])
-                .output();
-
-            if commit_output.is_err() || !commit_output.unwrap().status.success() {
-                return;
-            }
-
-            // Create second commit
-            if fs::write(repo_path.join("test2.txt"), "second file").is_err() {
-                return;
-            }
-
-            let add_output2 = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["add", "test2.txt"])
-                .output();
-
-            if add_output2.is_err() || !add_output2.unwrap().status.success() {
-                return;
-            }
-
-            let commit_output2 = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["commit", "-m", "second commit"])
-                .output();
-
-            if commit_output2.is_err() || !commit_output2.unwrap().status.success() {
-                return;
-            }
-
-            // Reset commit should undo the last commit but keep files staged
-            if reset_commit(&repo_path).is_ok() {
-                // test2.txt should still exist
-                assert!(repo_path.join("test2.txt").exists());
-
-                // Check git status to verify file is staged (if possible)
-                if let Ok(output) = Command::new("git")
-                    .current_dir(&repo_path)
-                    .args(["status", "--porcelain"])
-                    .output()
-                {
-                    if output.status.success() {
-                        let status = String::from_utf8_lossy(&output.stdout);
-                        // Should show the file as added (staged)
-                        assert!(status.contains("test2.txt"));
-                    }
-                }
-            }
         }
 
         #[test]

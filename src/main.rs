@@ -15,6 +15,7 @@ mod diff;
 mod file;
 mod git;
 mod github;
+mod lock;
 mod output;
 mod repo;
 mod review;

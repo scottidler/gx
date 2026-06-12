@@ -10,6 +10,7 @@ pub mod diff;
 pub mod file;
 pub mod git;
 pub mod github;
+pub mod lock;
 pub mod output;
 pub mod repo;
 pub mod review;

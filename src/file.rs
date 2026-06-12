@@ -271,86 +271,44 @@ pub fn create_file_with_content(
     Ok((file_content, diff_output))
 }
 
-/// Backup a file by creating a .backup copy
-pub fn backup_file(file_path: &Path) -> Result<PathBuf> {
-    let backup_path = file_path.with_extension(format!(
-        "{}.backup",
-        file_path.extension().and_then(|s| s.to_str()).unwrap_or("")
-    ));
-
-    fs::copy(file_path, &backup_path).with_context(|| {
+/// Copy `original` to an out-of-tree `backup` path, creating parent dirs.
+///
+/// Backups live under `$XDG_DATA_HOME/gx/backups/<tx-id>/...`, never beside the
+/// original ([A21]). This keeps `*.backup` files out of the worktree where they
+/// could match later glob patterns or collide with user files.
+pub fn create_backup(original: &Path, backup: &Path) -> Result<()> {
+    if let Some(parent) = backup.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create backup dir: {}", parent.display()))?;
+    }
+    fs::copy(original, backup).with_context(|| {
         format!(
-            "Failed to backup file {} to {}",
-            file_path.display(),
-            backup_path.display()
+            "Failed to back up {} to {}",
+            original.display(),
+            backup.display()
         )
     })?;
-
     debug!(
-        "Created backup: {} -> {}",
-        file_path.display(),
-        backup_path.display()
-    );
-    Ok(backup_path)
-}
-
-/// Restore a file from its backup
-pub fn restore_from_backup(backup_path: &Path, original_path: &Path) -> Result<()> {
-    fs::copy(backup_path, original_path).with_context(|| {
-        format!(
-            "Failed to restore from backup {} to {}",
-            backup_path.display(),
-            original_path.display()
-        )
-    })?;
-
-    // Remove backup file
-    fs::remove_file(backup_path)
-        .with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
-
-    debug!(
-        "Restored from backup: {} -> {}",
-        backup_path.display(),
-        original_path.display()
+        "create_backup: {} -> {}",
+        original.display(),
+        backup.display()
     );
     Ok(())
 }
 
-/// Clean up a backup file without restoring (for successful operations)
-pub fn cleanup_backup_file(backup_path: &Path) -> Result<()> {
-    if backup_path.exists() {
-        fs::remove_file(backup_path)
-            .with_context(|| format!("Failed to remove backup file: {}", backup_path.display()))?;
-        debug!("Cleaned up backup file: {}", backup_path.display());
-    }
+/// Restore `original` from an out-of-tree `backup` (atomic write). The backup
+/// itself is left in place; the whole tx backup dir is removed on finalize or
+/// completed rollback.
+pub fn restore_backup(backup: &Path, original: &Path) -> Result<()> {
+    let bytes =
+        fs::read(backup).with_context(|| format!("Failed to read backup: {}", backup.display()))?;
+    atomic_write(original, &bytes)?;
+    debug!(
+        "restore_backup: {} -> {}",
+        backup.display(),
+        original.display()
+    );
     Ok(())
-}
-
-/// Find all .backup files in a repository (recursive)
-pub fn find_backup_files_recursive(repo_path: &Path) -> Result<Vec<PathBuf>> {
-    use walkdir::WalkDir;
-
-    let mut backup_files = Vec::new();
-
-    for entry in WalkDir::new(repo_path).into_iter().filter_entry(|e| {
-        // Skip .git directory and other hidden directories (but allow the root)
-        let file_name = e.file_name().to_str().unwrap_or("");
-        e.depth() == 0 || !file_name.starts_with('.')
-    }) {
-        let entry = entry.with_context(|| "Failed to read directory entry during backup scan")?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(extension) = path.extension() {
-                if extension == "backup" {
-                    backup_files.push(path.to_path_buf());
-                }
-            }
-        }
-    }
-
-    backup_files.sort();
-    Ok(backup_files)
 }
 
 #[cfg(test)]
