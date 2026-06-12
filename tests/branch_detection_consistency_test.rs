@@ -20,14 +20,14 @@ fn test_stephen_branch_detection_consistency_issue() {
     init_git_repo(&repo_path, "testuser", "test-repo").unwrap();
 
     // Test Case 1: Run discovery from INSIDE the repository
-    let repos_from_inside = discover_repos(&repo_path, 3).unwrap();
+    let repos_from_inside = discover_repos(&repo_path, 3, &[]).unwrap();
     println!(
         "Discovery from inside repo: found {} repos",
         repos_from_inside.len()
     );
 
     // Test Case 2: Run discovery from ONE LEVEL ABOVE (workspace directory)
-    let repos_from_above = discover_repos(workspace_path, 3).unwrap();
+    let repos_from_above = discover_repos(workspace_path, 3, &[]).unwrap();
     println!(
         "Discovery from workspace: found {} repos",
         repos_from_above.len()
@@ -97,7 +97,7 @@ fn test_multiple_repo_workspace_consistency() {
     init_git_repo(&repo3_path, "user3", "repo3").unwrap();
 
     // Discovery from workspace should find all repos
-    let repos = discover_repos(workspace_path, 3).unwrap();
+    let repos = discover_repos(workspace_path, 3, &[]).unwrap();
 
     assert_eq!(repos.len(), 3, "Should discover all 3 repositories");
 
@@ -130,29 +130,19 @@ fn test_subdirectory_execution_consistency() {
     init_git_repo(&repo1_path, "myorg", "frontend").unwrap();
     init_git_repo(&repo2_path, "myorg", "backend").unwrap();
 
-    // Test discovery from workspace root
-    let repos_from_root = discover_repos(workspace_path, 3).unwrap();
+    // Test discovery from workspace root: finds both repos.
+    let repos_from_root = discover_repos(workspace_path, 3, &[]).unwrap();
+    assert_eq!(repos_from_root.len(), 2, "Root discovery finds both repos");
 
-    // Test discovery from subdirectory (this should behave consistently)
-    let repos_from_subdir = discover_repos(&subdir_path, 3).unwrap();
-
-    // Both should find the same repositories
+    // Test discovery from a repo-less subdirectory. gx no longer walks *up* the
+    // directory tree to widen scope ([A9]); a repo-less CWD that contains no
+    // repos downward finds zero, rather than reaching back up to the workspace.
+    let repos_from_subdir = discover_repos(&subdir_path, 3, &[]).unwrap();
     assert_eq!(
-        repos_from_root.len(),
         repos_from_subdir.len(),
-        "Discovery should be consistent regardless of execution subdirectory"
+        0,
+        "Discovery from a repo-less subdir must not widen scope upward"
     );
-
-    // Repository information should be identical
-    for repo_root in &repos_from_root {
-        let matching_repo = repos_from_subdir
-            .iter()
-            .find(|r| r.path == repo_root.path)
-            .expect("Should find matching repository");
-
-        assert_eq!(repo_root.name, matching_repo.name);
-        assert_eq!(repo_root.slug, matching_repo.slug);
-    }
 }
 
 /// Test per-repository user/org detection from git config
@@ -172,7 +162,7 @@ fn test_per_repo_user_org_detection() {
     init_git_repo(&personal_repo, "johndoe", "personal-project").unwrap();
     init_git_repo(&work_repo, "acme-corp", "work-project").unwrap();
 
-    let repos = discover_repos(workspace_path, 3).unwrap();
+    let repos = discover_repos(workspace_path, 3, &[]).unwrap();
     assert_eq!(repos.len(), 2);
 
     let personal = repos.iter().find(|r| r.name == "personal-project").unwrap();

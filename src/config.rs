@@ -44,7 +44,28 @@ pub struct Config {
     pub logging: Option<LoggingConfig>,
     #[serde(rename = "remote-status")]
     pub remote_status: Option<RemoteStatusConfig>,
+    pub create: Option<CreateConfig>,
 }
+
+/// Configuration for the `create` command.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CreateConfig {
+    /// Prompt before committing when more repositories than this are targeted.
+    #[serde(rename = "confirm-threshold")]
+    pub confirm_threshold: Option<usize>,
+}
+
+impl Default for CreateConfig {
+    fn default() -> Self {
+        Self {
+            confirm_threshold: Some(DEFAULT_CONFIRM_THRESHOLD),
+        }
+    }
+}
+
+/// Default confirm-threshold: prompt when committing to more repos than this.
+pub const DEFAULT_CONFIRM_THRESHOLD: usize = 5;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -109,6 +130,7 @@ impl Default for Config {
             repo_discovery: Some(RepoDiscoveryConfig::default()),
             logging: None,
             remote_status: Some(RemoteStatusConfig::default()),
+            create: Some(CreateConfig::default()),
         }
     }
 }
@@ -125,11 +147,17 @@ impl Default for RepoDiscoveryConfig {
     fn default() -> Self {
         Self {
             max_depth: Some(3), // Default changed from 2 to 3
+            // The documented defaults; formerly hardcoded in is_ignored_directory
+            // ([A27]). NOTE: `.git` must NOT appear here - discovery detects repos
+            // by walking into `.git` directories, so ignoring them by name would
+            // make every repo undiscoverable.
             ignore_patterns: Some(vec![
                 "node_modules".to_string(),
-                ".git".to_string(),
                 "target".to_string(),
                 "build".to_string(),
+                ".next".to_string(),
+                "dist".to_string(),
+                "vendor".to_string(),
             ]),
         }
     }
@@ -145,6 +173,27 @@ impl Default for LoggingConfig {
 }
 
 impl Config {
+    /// Effective repo-discovery ignore patterns: the configured list, or the
+    /// documented defaults when unset.
+    pub fn ignore_patterns(&self) -> Vec<String> {
+        self.repo_discovery
+            .as_ref()
+            .and_then(|rd| rd.ignore_patterns.clone())
+            .unwrap_or_else(|| {
+                RepoDiscoveryConfig::default()
+                    .ignore_patterns
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Effective confirm-threshold for the create command.
+    pub fn confirm_threshold(&self) -> usize {
+        self.create
+            .as_ref()
+            .and_then(|c| c.confirm_threshold)
+            .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
+    }
+
     /// Load configuration with fallback chain
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
         // If explicit config path provided, try to load it

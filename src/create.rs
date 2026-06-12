@@ -41,7 +41,8 @@ pub fn show_matches(
         .unwrap_or(3);
 
     // Discover repositories
-    let repos = discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = discover_repos(start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
 
     // Filter repositories by patterns
     let filtered_repos = filter_repos(repos, patterns);
@@ -155,6 +156,7 @@ pub fn process_create_command(
     patterns: &[String],
     commit_message: Option<String>,
     pr: Option<crate::cli::PR>,
+    yes: bool,
     change: Change,
 ) -> Result<()> {
     info!("Starting create command with change: {change:?}");
@@ -168,7 +170,8 @@ pub fn process_create_command(
         .unwrap_or(3);
 
     // Discover and filter repositories
-    let repos = discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = discover_repos(start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
@@ -181,6 +184,18 @@ pub fn process_create_command(
     if filtered_repos.is_empty() {
         println!("No repositories found matching the specified patterns.");
         return Ok(());
+    }
+
+    // Confirmation gate: in commit mode, show the blast radius and (unless --yes)
+    // prompt before mutating. Always prompt when no -p patterns were given; for
+    // patterned runs, prompt only when the repo count exceeds the threshold ([A9]).
+    if commit_message.is_some() {
+        let threshold = config.confirm_threshold();
+        let needs_prompt = patterns.is_empty() || filtered_repos.len() > threshold;
+        if !confirm_blast_radius(&filtered_repos, patterns, needs_prompt, yes)? {
+            println!("Aborted; no changes made.");
+            return Ok(());
+        }
     }
 
     // Initialize state tracking if we're going to make changes (not dry run)
@@ -269,6 +284,58 @@ pub fn process_create_command(
     display_create_summary(&results, &opts);
 
     Ok(())
+}
+
+/// Show the resolved repository list and, when a prompt is required, confirm
+/// before committing. Returns `Ok(true)` to proceed, `Ok(false)` if the user
+/// declined. Fails closed: a required prompt on a non-interactive stdin without
+/// `--yes` returns an error naming the flag rather than silently proceeding ([A9]).
+fn confirm_blast_radius(
+    repos: &[Repo],
+    patterns: &[String],
+    needs_prompt: bool,
+    yes: bool,
+) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+
+    println!("Targeting {} repositories:", repos.len());
+    for repo in repos {
+        println!("  {}", repo.slug);
+    }
+
+    if !needs_prompt {
+        return Ok(true);
+    }
+
+    if yes {
+        debug!("--yes supplied; skipping confirmation prompt");
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "Refusing to commit to {} repositories without confirmation on non-interactive stdin; pass --yes to proceed",
+            repos.len()
+        ));
+    }
+
+    let reason = if patterns.is_empty() {
+        "no -p patterns given (all discovered repos)"
+    } else {
+        "repo count exceeds confirm-threshold"
+    };
+    print!(
+        "Commit to these {} repositories? [{reason}] (y/N): ",
+        repos.len()
+    );
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }
 
 /// Update change state based on create result

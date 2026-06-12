@@ -274,6 +274,14 @@ EXAMPLES:
         )]
         pr: Option<PR>,
 
+        /// Skip the confirmation prompt before committing (for automation)
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before committing"
+        )]
+        yes: bool,
+
         #[command(subcommand)]
         action: Option<CreateAction>,
     },

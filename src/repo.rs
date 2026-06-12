@@ -66,15 +66,19 @@ impl Repo {
 }
 
 /// Discover git repositories starting from the given directory with workspace awareness
-pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
+pub fn discover_repos(
+    start_dir: &Path,
+    max_depth: usize,
+    ignore_patterns: &[String],
+) -> Result<Vec<Repo>> {
     debug!(
-        "Discovering repos from {} with max depth {}",
+        "discover_repos: start_dir={} max_depth={} ignore_patterns={:?}",
         start_dir.display(),
-        max_depth
+        max_depth,
+        ignore_patterns
     );
 
-    // Find the actual search root - this is the key to fixing Stephen's issue
-    let search_root = find_workspace_root(start_dir, max_depth)?;
+    let search_root = find_workspace_root(start_dir, max_depth, ignore_patterns)?;
     debug!("Using search root: {}", search_root.display());
 
     let mut repos = Vec::new();
@@ -82,7 +86,7 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
     for entry in WalkDir::new(&search_root)
         .max_depth(max_depth)
         .into_iter()
-        .filter_entry(|e| !is_ignored_directory(e.path()))
+        .filter_entry(|e| !is_ignored_directory(e.path(), ignore_patterns))
         .filter_map(|e| match e {
             Ok(entry) => Some(entry),
             Err(err) => {
@@ -97,7 +101,7 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
                 // Skip if this is an ignored directory
-                if is_ignored_directory(repo_root) {
+                if is_ignored_directory(repo_root, ignore_patterns) {
                     debug!("Skipping ignored directory: {}", repo_root.display());
                     continue;
                 }
@@ -127,14 +131,23 @@ pub fn discover_repos(start_dir: &Path, max_depth: usize) -> Result<Vec<Repo>> {
     Ok(repos)
 }
 
-/// Find the appropriate search root based on simple rules
-/// 1. If we're inside a repo (.git exists here): search from parent to include this repo
-/// 2. If we're above repos: search down from here
-/// 3. If we're in random dir: move up until we find a repo, then search from its parent
-fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
-    let mut current = start_dir.to_path_buf();
+/// Find the appropriate search root based on simple rules:
+/// 1. If we're inside a repo (`.git` exists here): search from the parent so the
+///    current repo and its siblings are included.
+/// 2. Otherwise, if repos are found by searching downward: search from here.
+///
+/// We deliberately do NOT walk *up* the directory tree from a repo-less CWD
+/// (the old case 3, which could widen scope all the way to `$HOME`). A repo-less
+/// CWD now finds zero repos and the caller reports "no repositories found"
+/// rather than silently expanding the blast radius ([A9]).
+fn find_workspace_root(
+    start_dir: &Path,
+    max_depth: usize,
+    ignore_patterns: &[String],
+) -> Result<PathBuf> {
+    let current = start_dir.to_path_buf();
 
-    // Case 1: If we're inside a git repository, search from its parent
+    // Case 1: If we're inside a git repository, search from its parent.
     if current.join(".git").exists() {
         if let Some(parent) = current.parent() {
             debug!(
@@ -146,8 +159,8 @@ fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
         }
     }
 
-    // Case 2: Check if we can find repos by searching down from current directory
-    let repos_found_down = count_repos_in_subtree(&current, max_depth)?;
+    // Case 2: Search downward from the current directory.
+    let repos_found_down = count_repos_in_subtree(&current, max_depth, ignore_patterns)?;
     if repos_found_down > 0 {
         debug!(
             "Found {} repos searching down from {}, using as search root",
@@ -157,64 +170,32 @@ fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Result<PathBuf> {
         return Ok(current);
     }
 
-    // Case 3: No repos found downward, so walk up until we find something useful
-    while let Some(parent) = current.parent() {
-        current = parent.to_path_buf();
-
-        // Check if this parent directory itself is a git repo
-        if current.join(".git").exists() {
-            // Found a repo, search from its parent
-            if let Some(grandparent) = current.parent() {
-                debug!(
-                    "Found repo while walking up at {}, searching from parent: {}",
-                    current.display(),
-                    grandparent.display()
-                );
-                return Ok(grandparent.to_path_buf());
-            } else {
-                // Repo is at root level, search from repo itself
-                debug!(
-                    "Found repo at root level {}, searching from there",
-                    current.display()
-                );
-                return Ok(current);
-            }
-        }
-
-        // Check if this parent directory has repos underneath it
-        let repos_found_down = count_repos_in_subtree(&current, max_depth)?;
-        if repos_found_down > 0 {
-            debug!(
-                "Found {} repos while walking up, searching down from: {}",
-                repos_found_down,
-                current.display()
-            );
-            return Ok(current);
-        }
-    }
-
-    // Fallback: use the original start_dir
+    // No upward walk: keep scope anchored at the starting directory.
     debug!(
-        "No repos found, using original start dir: {}",
+        "No repos found under {}, not widening scope",
         start_dir.display()
     );
     Ok(start_dir.to_path_buf())
 }
 
 /// Count git repositories in subtree with given max depth
-fn count_repos_in_subtree(dir: &Path, max_depth: usize) -> Result<usize> {
+fn count_repos_in_subtree(
+    dir: &Path,
+    max_depth: usize,
+    ignore_patterns: &[String],
+) -> Result<usize> {
     let mut count = 0;
 
     for entry in WalkDir::new(dir)
         .max_depth(max_depth)
         .into_iter()
-        .filter_entry(|e| !is_ignored_directory(e.path()))
+        .filter_entry(|e| !is_ignored_directory(e.path(), ignore_patterns))
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
-                if !is_ignored_directory(repo_root) {
+                if !is_ignored_directory(repo_root, ignore_patterns) {
                     count += 1;
                 }
             }
@@ -315,10 +296,15 @@ fn parse_user_from_url(url: &str) -> Result<String> {
     Err(eyre::eyre!("Unsupported remote URL format: {url}"))
 }
 
-/// Check if directory should be ignored during discovery
-fn is_ignored_directory(path: &Path) -> bool {
+/// Check if a directory should be ignored during discovery.
+///
+/// Cache directories are excluded by path substring (this already catches
+/// pre-commit caches under `~/.cache/`). Directory *names* are matched against
+/// the configured `ignore_patterns` ([A27]); the previous `name.starts_with("repo")`
+/// heuristic is gone - it silently hid real repos like `reporting` ([A6]).
+fn is_ignored_directory(path: &Path, ignore_patterns: &[String]) -> bool {
     if let Some(path_str) = path.to_str() {
-        // Ignore cache directories by path - this should catch pre-commit cache
+        // Ignore cache directories by path - this catches the pre-commit cache.
         if path_str.contains("/.cache/")
             || path_str.contains("/.local/")
             || path_str.contains("/.nvm/")
@@ -333,19 +319,7 @@ fn is_ignored_directory(path: &Path) -> bool {
     }
 
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        // Ignore common build/cache directories
-        if matches!(
-            name,
-            "node_modules" | "target" | "build" | ".next" | "dist" | "vendor"
-        ) {
-            return true;
-        }
-
-        // Ignore pre-commit cache directories that start with "repo" and have random suffixes
-        if name.starts_with("repo")
-            && name.len() >= 8
-            && name.chars().skip(4).all(|c| c.is_alphanumeric())
-        {
+        if ignore_patterns.iter().any(|pattern| pattern == name) {
             return true;
         }
     }
@@ -421,6 +395,61 @@ pub fn filter_repos(repos: Vec<Repo>, patterns: &[String]) -> Vec<Repo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::create_minimal_test_repo;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_reporting_named_repo_is_discovered() {
+        // The old `name.starts_with("repo")` heuristic silently hid repos like
+        // `reporting` and `repository` ([A6]); they must now be discovered.
+        let temp = TempDir::new().unwrap();
+        create_minimal_test_repo(temp.path(), "reporting");
+        create_minimal_test_repo(temp.path(), "repository");
+        create_minimal_test_repo(temp.path(), "normal");
+
+        let repos = discover_repos(temp.path(), 3, &[]).unwrap();
+        let names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
+        assert!(names.contains(&"reporting".to_string()));
+        assert!(names.contains(&"repository".to_string()));
+        assert!(names.contains(&"normal".to_string()));
+    }
+
+    #[test]
+    fn test_ignore_patterns_respected() {
+        // A repo directory whose name matches a configured ignore pattern is
+        // skipped ([A27]).
+        let temp = TempDir::new().unwrap();
+        create_minimal_test_repo(temp.path(), "keepme");
+        create_minimal_test_repo(temp.path(), "vendor");
+
+        let repos = discover_repos(temp.path(), 3, &["vendor".to_string()]).unwrap();
+        let names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
+        assert!(names.contains(&"keepme".to_string()));
+        assert!(!names.contains(&"vendor".to_string()));
+    }
+
+    #[test]
+    fn test_is_ignored_directory_uses_patterns() {
+        let patterns = vec!["node_modules".to_string()];
+        assert!(is_ignored_directory(
+            Path::new("/x/node_modules"),
+            &patterns
+        ));
+        // No name heuristic any more: `reporting` is not ignored.
+        assert!(!is_ignored_directory(Path::new("/x/reporting"), &patterns));
+    }
+
+    #[test]
+    fn test_workspace_root_not_widened_above_repoless_dir() {
+        // A repo-less starting directory must not walk up to find repos ([A9]).
+        let temp = TempDir::new().unwrap();
+        create_minimal_test_repo(temp.path(), "sibling");
+        let empty = temp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let repos = discover_repos(&empty, 3, &[]).unwrap();
+        assert_eq!(repos.len(), 0);
+    }
 
     #[test]
     fn test_parse_user_from_url() {

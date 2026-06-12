@@ -115,6 +115,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             patterns,
             commit,
             pr,
+            yes,
             action,
         } => match action {
             None => create::show_matches(cli, config, files, patterns),
@@ -141,6 +142,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                     patterns,
                     commit.clone(),
                     pr.clone(),
+                    *yes,
                     change,
                 )
             }
