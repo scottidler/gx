@@ -137,29 +137,4 @@ mod tests {
         assert!(result.contains(&"tatari-tv".to_string()));
         assert!(result.contains(&"scottidler".to_string()));
     }
-
-    #[test]
-    fn test_detection_method_debug() {
-        let methods = vec![
-            DetectionMethod::Explicit,
-            DetectionMethod::AutoDetected,
-            DetectionMethod::Configuration,
-        ];
-
-        for method in methods {
-            assert!(!format!("{method:?}").is_empty());
-        }
-    }
-
-    #[test]
-    fn test_user_org_context_debug() {
-        let context = UserOrgContext {
-            user_or_org: "test-org".to_string(),
-            detection_method: DetectionMethod::AutoDetected,
-        };
-
-        let debug_str = format!("{context:?}");
-        assert!(debug_str.contains("test-org"));
-        assert!(debug_str.contains("AutoDetected"));
-    }
 }

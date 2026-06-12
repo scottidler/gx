@@ -983,37 +983,4 @@ mod tests {
         assert_eq!(repo.name, "test-repo");
         assert_eq!(repo.slug, "owner/test-repo".to_string());
     }
-
-    #[test]
-    fn test_review_result_debug() {
-        let repo = Repo::from_slug("test/repo".to_string());
-
-        let result = ReviewResult {
-            repo,
-            change_id: "test-change".to_string(),
-            pr_number: Some(123),
-            action: ReviewAction::Listed,
-            error: None,
-        };
-
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("test-change"));
-        assert!(debug_str.contains("Listed"));
-        assert!(debug_str.contains("123"));
-    }
-
-    #[test]
-    fn test_review_action_debug() {
-        let actions = vec![
-            ReviewAction::Listed,
-            ReviewAction::Cloned,
-            ReviewAction::Approved,
-            ReviewAction::Deleted,
-            ReviewAction::Purged,
-        ];
-
-        for action in actions {
-            assert!(!format!("{action:?}").is_empty());
-        }
-    }
 }

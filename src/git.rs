@@ -1677,6 +1677,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_current_branch_name_empty_on_detached_head() {
+        // The detached-HEAD guard ([A30]) keys off an empty branch name.
+        use crate::test_utils::run_git_command;
+        let temp = tempfile::TempDir::new().unwrap();
+        let p = temp.path();
+        run_git_command(&["init", "--quiet"], p);
+        run_git_command(&["config", "user.email", "t@e.com"], p);
+        run_git_command(&["config", "user.name", "T"], p);
+        run_git_command(&["config", "commit.gpgsign", "false"], p);
+        std::fs::write(p.join("a.txt"), "a").unwrap();
+        run_git_command(&["add", "-A"], p);
+        run_git_command(&["commit", "--quiet", "-m", "one"], p);
+        std::fs::write(p.join("b.txt"), "b").unwrap();
+        run_git_command(&["add", "-A"], p);
+        run_git_command(&["commit", "--quiet", "-m", "two"], p);
+
+        // Detach HEAD onto the first commit.
+        run_git_command(&["checkout", "--quiet", "HEAD~1"], p);
+        assert_eq!(get_current_branch_name(p).unwrap(), "");
+    }
+
+    #[test]
     fn test_add_files_literal_pathspec() {
         use crate::test_utils::run_git_command;
         let temp = tempfile::TempDir::new().unwrap();
@@ -1708,66 +1730,47 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        fn setup_test_repo() -> Result<(TempDir, std::path::PathBuf)> {
-            let temp_dir =
-                TempDir::new().map_err(|e| eyre::eyre!("Failed to create temp dir: {}", e))?;
+        /// Set up a git repo for tests. git is a declared requirement (CI has
+        /// it), so this fails loud rather than silently `return`ing ([A31]).
+        fn setup_test_repo() -> (TempDir, std::path::PathBuf) {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let repo_path = temp_dir.path().to_path_buf();
 
-            // Initialize git repo
             let output = Command::new("git")
                 .current_dir(&repo_path)
                 .args(["init"])
                 .output()
-                .map_err(|e| eyre::eyre!("Failed to run git init: {}", e))?;
+                .expect("Failed to run git init");
+            assert!(
+                output.status.success(),
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
 
-            if !output.status.success() {
-                return Err(eyre::eyre!(
-                    "git init failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-
-            // Set up git config
             Command::new("git")
                 .current_dir(&repo_path)
                 .args(["config", "user.email", "test@example.com"])
                 .output()
-                .map_err(|e| eyre::eyre!("Failed to set git email: {}", e))?;
-
+                .expect("Failed to set git email");
             Command::new("git")
                 .current_dir(&repo_path)
                 .args(["config", "user.name", "Test User"])
                 .output()
-                .map_err(|e| eyre::eyre!("Failed to set git name: {}", e))?;
+                .expect("Failed to set git name");
 
-            Ok((temp_dir, repo_path))
+            (temp_dir, repo_path)
         }
 
         #[test]
         fn test_has_uncommitted_changes() {
-            // Skip if git is not available
-            if Command::new("git").arg("--version").output().is_err() {
-                return;
-            }
+            let (_temp_dir, repo_path) = setup_test_repo();
 
-            let Ok((_temp_dir, repo_path)) = setup_test_repo() else {
-                return;
-            };
+            // Empty repo: no uncommitted changes.
+            assert!(!has_uncommitted_changes(&repo_path).unwrap());
 
-            // Initially should have no uncommitted changes (empty repo)
-            if let Ok(has_changes) = has_uncommitted_changes(&repo_path) {
-                // Empty repo might have no changes
-                // This test is more about ensuring the function doesn't crash
-                let _ = has_changes;
-            }
-
-            // Create and add a file
-            if fs::write(repo_path.join("test.txt"), "test content").is_ok() {
-                // Should have uncommitted changes
-                if let Ok(has_changes) = has_uncommitted_changes(&repo_path) {
-                    assert!(has_changes);
-                }
-            }
+            // After writing an untracked file, status reports dirty.
+            fs::write(repo_path.join("test.txt"), "test content").unwrap();
+            assert!(has_uncommitted_changes(&repo_path).unwrap());
         }
     }
 

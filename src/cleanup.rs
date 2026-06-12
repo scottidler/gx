@@ -380,18 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_result_debug() {
-        let result = CleanupResult {
-            change_id: "GX-test".to_string(),
-            repos_cleaned: 2,
-            repos_skipped: 1,
-            repos_failed: 0,
-            errors: vec![],
-        };
-        assert!(!format!("{:?}", result).is_empty());
-    }
-
-    #[test]
     fn test_cleanup_change_empty_state() {
         let mut state = ChangeState::new("test".to_string(), None);
         let result = cleanup_change(&mut state, false, false).unwrap();

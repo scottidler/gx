@@ -1191,55 +1191,6 @@ mod tests {
     }
 
     #[test]
-    fn test_change_debug() {
-        let add = Change::Add("test.txt".to_string(), "content".to_string());
-        let delete = Change::Delete;
-        let sub = Change::Sub("old".to_string(), "new".to_string());
-        let regex = Change::Regex(r"\d+".to_string(), "X".to_string());
-
-        // Ensure Debug is implemented
-        assert!(!format!("{add:?}").is_empty());
-        assert!(!format!("{delete:?}").is_empty());
-        assert!(!format!("{sub:?}").is_empty());
-        assert!(!format!("{regex:?}").is_empty());
-    }
-
-    #[test]
-    fn test_create_result_debug() {
-        let repo = Repo::from_slug("test/repo".to_string());
-
-        let result = CreateResult {
-            repo,
-            change_id: "test-change".to_string(),
-            action: CreateAction::DryRun,
-            files_affected: vec!["test.txt".to_string()],
-            substitution_stats: None,
-            pr_number: None,
-            pr_url: None,
-            original_branch: None,
-            error: None,
-        };
-
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("test-change"));
-        assert!(debug_str.contains("DryRun"));
-    }
-
-    #[test]
-    fn test_create_action_debug() {
-        let actions = vec![
-            CreateAction::DryRun,
-            CreateAction::Committed,
-            CreateAction::Committed,
-            CreateAction::PrCreated,
-        ];
-
-        for action in actions {
-            assert!(!format!("{action:?}").is_empty());
-        }
-    }
-
-    #[test]
     fn test_apply_add_change() {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();

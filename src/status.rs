@@ -75,8 +75,8 @@ pub fn process_status_command(
 
     // 1. Discover repositories
     let start_dir = env::current_dir().context("Failed to get current directory")?;
-    let repos =
-        repo::discover_repos(&start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = repo::discover_repos(&start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
 
     info!("Discovered {} repositories", repos.len());
 
