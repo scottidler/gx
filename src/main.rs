@@ -184,8 +184,8 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 patterns,
                 change_id,
             ),
-            cli::ReviewAction::Purge => {
-                review::process_review_purge_command(cli, config, org.as_deref(), patterns)
+            cli::ReviewAction::Purge { yes } => {
+                review::process_review_purge_command(cli, config, org.as_deref(), patterns, *yes)
             }
         },
         Commands::Rollback { action } => rollback::handle_rollback(action.clone()),

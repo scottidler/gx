@@ -7,7 +7,7 @@ use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
 use crate::state::StateManager;
 use eyre::{Context, Result};
-use log::{debug, info, warn};
+use log::{info, warn};
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -86,7 +86,7 @@ pub fn process_review_ls_command(
     // Process each org and pattern combination
     for context in &user_org_contexts {
         for pattern in &search_patterns {
-            match github::list_prs_by_change_id(&context.user_or_org, pattern) {
+            match github::list_prs_by_change_id(&context.user_or_org, pattern, config) {
                 Ok(prs) => {
                     info!(
                         "Found {} PRs for pattern '{}' in org '{}'",
@@ -190,7 +190,7 @@ pub fn process_review_clone_command(
     // Collect all PRs from all orgs
     let mut all_prs = Vec::new();
     for context in &user_org_contexts {
-        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
             Ok(mut prs) => {
                 info!(
                     "Found {} PRs for change ID '{}' in org '{}'",
@@ -296,7 +296,7 @@ pub fn process_review_approve_command(
     // Collect PRs from all detected orgs
     let mut all_prs = Vec::new();
     for context in &user_org_contexts {
-        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
             Ok(prs) => all_prs.extend(prs),
             Err(e) => {
                 log::warn!(
@@ -346,7 +346,7 @@ pub fn process_review_approve_command(
     let results: Vec<ReviewResult> = pool.install(|| {
         open_prs
             .par_iter()
-            .map(|pr| approve_and_merge_pr(pr, change_id, admin_override, auto_merge))
+            .map(|pr| approve_and_merge_pr(pr, change_id, admin_override, auto_merge, config))
             .collect()
     });
 
@@ -414,7 +414,7 @@ pub fn process_review_delete_command(
     // Collect PRs from all detected orgs
     let mut all_prs = Vec::new();
     for context in &user_org_contexts {
-        match github::list_prs_by_change_id(&context.user_or_org, change_id) {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
             Ok(prs) => all_prs.extend(prs),
             Err(e) => {
                 log::warn!(
@@ -464,7 +464,7 @@ pub fn process_review_delete_command(
     let results: Vec<ReviewResult> = pool.install(|| {
         open_prs
             .par_iter()
-            .map(|pr| delete_pr_and_branch(pr, change_id))
+            .map(|pr| delete_pr_and_branch(pr, change_id, config))
             .collect()
     });
 
@@ -505,8 +505,9 @@ pub fn process_review_purge_command(
     config: &Config,
     org: Option<&str>,
     patterns: &[String],
+    yes: bool,
 ) -> Result<()> {
-    info!("Purging all GX branches and PRs for org: {org:?}");
+    info!("Purging gx branches for org: {org:?}");
 
     // Discover repositories
     let current_dir = std::env::current_dir()?;
@@ -532,17 +533,57 @@ pub fn process_review_purge_command(
         .or_else(|| crate::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
-    // Set up thread pool
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallel_jobs)
         .build()
         .context("Failed to create thread pool")?;
 
-    // Process repositories in parallel
-    let results: Vec<ReviewResult> =
-        pool.install(|| filtered_repos.par_iter().map(purge_gx_branches).collect());
+    // Build the purge plan: per repo, the gx-created (GX-) branches with NO open
+    // PR are deletable; branches that still have an open PR are refused ([A12], Q3).
+    let plan: Vec<PurgePlan> = pool.install(|| {
+        filtered_repos
+            .par_iter()
+            .map(|repo| build_purge_plan(repo, config))
+            .collect()
+    });
 
-    // Display results
+    let total_deletable: usize = plan.iter().map(|p| p.to_delete.len()).sum();
+    let total_blocked: usize = plan.iter().map(|p| p.blocked.len()).sum();
+
+    // Show the resolved plan.
+    println!("Purge plan:");
+    for p in &plan {
+        for b in &p.to_delete {
+            println!("  delete  {} {}", p.repo.slug, b);
+        }
+        for b in &p.blocked {
+            println!(
+                "  skip    {} {} (open PR; run `gx review delete` first)",
+                p.repo.slug, b
+            );
+        }
+        if let Some(err) = &p.error {
+            println!("  error   {}: {}", p.repo.slug, err);
+        }
+    }
+    println!("{total_deletable} branch(es) to delete, {total_blocked} skipped (open PR).");
+
+    if total_deletable == 0 {
+        return Ok(());
+    }
+
+    if !yes && !confirm_purge(total_deletable)? {
+        println!("Aborted; no branches deleted.");
+        return Ok(());
+    }
+
+    // Execute deletions in parallel.
+    let results: Vec<ReviewResult> = pool.install(|| {
+        plan.par_iter()
+            .map(|p| purge_repo_branches(p, config))
+            .collect()
+    });
+
     let opts = StatusOptions {
         verbosity: if cli.verbose {
             crate::config::OutputVerbosity::Detailed
@@ -557,6 +598,108 @@ pub fn process_review_purge_command(
     display_review_summary(&results, &opts);
 
     Ok(())
+}
+
+/// A per-repo purge plan: which gx branches can be deleted, which are blocked by
+/// an open PR, and any error gathering the lists.
+struct PurgePlan {
+    repo: Repo,
+    to_delete: Vec<String>,
+    blocked: Vec<String>,
+    error: Option<String>,
+}
+
+/// Compute the purge plan for one repo: gx-created (`GX-`) branches partitioned
+/// into deletable (no open PR) vs. blocked (open PR).
+fn build_purge_plan(repo: &Repo, config: &Config) -> PurgePlan {
+    let slug = &repo.slug;
+    let branches = match github::list_branches_with_prefix(slug, "GX-", config) {
+        Ok(b) => b,
+        Err(e) => {
+            return PurgePlan {
+                repo: repo.clone(),
+                to_delete: Vec::new(),
+                blocked: Vec::new(),
+                error: Some(format!("Failed to list branches: {e}")),
+            };
+        }
+    };
+    let open_pr_branches = match github::list_open_pr_branches(slug, config) {
+        Ok(b) => b,
+        Err(e) => {
+            return PurgePlan {
+                repo: repo.clone(),
+                to_delete: Vec::new(),
+                blocked: Vec::new(),
+                error: Some(format!("Failed to list open PRs: {e}")),
+            };
+        }
+    };
+
+    let (blocked, to_delete): (Vec<String>, Vec<String>) = branches
+        .into_iter()
+        .partition(|b| open_pr_branches.contains(b));
+
+    PurgePlan {
+        repo: repo.clone(),
+        to_delete,
+        blocked,
+        error: None,
+    }
+}
+
+/// Prompt for confirmation before purging. Fails closed on non-interactive stdin.
+fn confirm_purge(count: usize) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "Refusing to purge {count} branches without confirmation on non-interactive stdin; pass --yes to proceed"
+        ));
+    }
+    print!("Delete {count} gx branch(es)? (y/N): ");
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Delete the deletable branches in one repo's purge plan.
+fn purge_repo_branches(plan: &PurgePlan, config: &Config) -> ReviewResult {
+    let repo = plan.repo.clone();
+    if let Some(err) = &plan.error {
+        return ReviewResult {
+            repo,
+            change_id: "PURGE".to_string(),
+            pr_number: None,
+            action: ReviewAction::Purged,
+            error: Some(err.clone()),
+        };
+    }
+
+    let mut errors = Vec::new();
+    let mut deleted = 0;
+    for branch in &plan.to_delete {
+        match github::delete_remote_branch(&plan.repo.slug, branch, config) {
+            Ok(()) => deleted += 1,
+            Err(e) => errors.push(format!("{branch}: {e}")),
+        }
+    }
+    info!("Purged {} gx branches from {}", deleted, plan.repo.slug);
+
+    ReviewResult {
+        repo,
+        change_id: "PURGE".to_string(),
+        pr_number: None,
+        action: ReviewAction::Purged,
+        error: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        },
+    }
 }
 
 /// Clone a repository for a specific PR
@@ -636,12 +779,14 @@ fn approve_and_merge_pr(
     change_id: &str,
     admin_override: bool,
     auto_merge: bool,
+    config: &Config,
 ) -> ReviewResult {
     let repo = create_repo_from_slug(&pr.repo_slug);
 
     // State is updated once, after the parallel section completes (the caller),
     // to avoid a read-modify-write race across rayon workers ([A10]).
-    match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override, auto_merge) {
+    match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override, auto_merge, config)
+    {
         Ok(()) => {
             info!("Successfully approved and merged PR #{}", pr.number);
             ReviewResult {
@@ -666,15 +811,15 @@ fn approve_and_merge_pr(
 }
 
 /// Delete PR and its branch
-fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
+fn delete_pr_and_branch(pr: &PrInfo, change_id: &str, config: &Config) -> ReviewResult {
     let repo = create_repo_from_slug(&pr.repo_slug);
 
     // State is updated once after the parallel section (the caller) to avoid a
     // read-modify-write race across rayon workers ([A10]).
-    match github::close_pr(&pr.repo_slug, pr.number) {
+    match github::close_pr(&pr.repo_slug, pr.number, config) {
         Ok(()) => {
             // Then delete the remote branch
-            match github::delete_remote_branch(&pr.repo_slug, &pr.branch) {
+            match github::delete_remote_branch(&pr.repo_slug, &pr.branch, config) {
                 Ok(()) => {
                     info!(
                         "Successfully deleted PR #{} and branch {}",
@@ -711,67 +856,6 @@ fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
                 pr_number: Some(pr.number),
                 action: ReviewAction::Deleted,
                 error: Some(format!("Failed to close PR: {e}")),
-            }
-        }
-    }
-}
-
-/// Purge all GX branches from a repository
-fn purge_gx_branches(repo: &Repo) -> ReviewResult {
-    debug!("Purging GX branches from repository: {}", repo.name);
-
-    let repo_slug = &repo.slug;
-    // List all GX branches (assuming they start with "GX-")
-    match github::list_branches_with_prefix(repo_slug, "GX-") {
-        Ok(branches) => {
-            let mut errors = Vec::new();
-            let mut deleted_count = 0;
-
-            for branch in branches {
-                match github::delete_remote_branch(repo_slug, &branch) {
-                    Ok(()) => {
-                        deleted_count += 1;
-                        debug!("Deleted branch: {branch}");
-                    }
-                    Err(e) => {
-                        errors.push(format!("Failed to delete {branch}: {e}"));
-                    }
-                }
-            }
-
-            if errors.is_empty() {
-                info!("Purged {} GX branches from {}", deleted_count, repo.name);
-                ReviewResult {
-                    repo: repo.clone(),
-                    change_id: "PURGE".to_string(),
-                    pr_number: None,
-                    action: ReviewAction::Purged,
-                    error: None,
-                }
-            } else {
-                warn!(
-                    "Purged {} branches but had {} errors in {}",
-                    deleted_count,
-                    errors.len(),
-                    repo.name
-                );
-                ReviewResult {
-                    repo: repo.clone(),
-                    change_id: "PURGE".to_string(),
-                    pr_number: None,
-                    action: ReviewAction::Purged,
-                    error: Some(format!("Partial success: {}", errors.join("; "))),
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to list branches for {}: {}", repo.name, e);
-            ReviewResult {
-                repo: repo.clone(),
-                change_id: "PURGE".to_string(),
-                pr_number: None,
-                action: ReviewAction::Purged,
-                error: Some(format!("Failed to list branches: {e}")),
             }
         }
     }

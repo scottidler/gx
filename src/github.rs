@@ -141,19 +141,44 @@ pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
     Ok(token)
 }
 
-/// Create a pull request using GitHub CLI
-/// Returns the PR number and URL on success
+/// The org/owner portion of a repo slug (`org/repo` -> `org`).
+fn org_of(repo_slug: &str) -> &str {
+    repo_slug.split('/').next().unwrap_or(repo_slug)
+}
+
+/// Build a `gh` command with per-org auth: set `GH_TOKEN` from the org's token
+/// file when one exists, so every gh call uses the same identity instead of a
+/// mix of token files and ambient `gh auth` ([A18]). When no token file is
+/// present we fall back to ambient auth (a `debug!` records this).
+fn gh_command(org: &str, config: &Config) -> Command {
+    let mut cmd = Command::new("gh");
+    match read_token(org, config) {
+        Ok(token) => {
+            cmd.env("GH_TOKEN", token);
+        }
+        Err(e) => {
+            debug!("No token file for {org} ({e}); using ambient gh auth");
+        }
+    }
+    cmd
+}
+
+/// Create a pull request using GitHub CLI.
+/// Returns the PR number and URL on success.
 pub fn create_pr(
     repo_slug: &str,
     branch_name: &str,
     commit_message: &str,
+    base_branch: &str,
     pr: &crate::cli::PR,
+    config: &Config,
 ) -> Result<CreatePrResult> {
-    debug!("Creating PR for repo: {repo_slug}, branch: {branch_name}");
+    debug!("create_pr: repo={repo_slug} branch={branch_name} base={base_branch}");
 
     let title = branch_name.to_string();
-    let body =
-        format!("{commit_message}\n\ndocs: https://github.com/scottidler/gx/blob/main/README.md");
+    let body = config
+        .pr_body_template()
+        .replace("{commit_message}", commit_message);
 
     let mut args = vec![
         "pr",
@@ -167,15 +192,16 @@ pub fn create_pr(
         "--body",
         &body,
         "--base",
-        "main",
+        base_branch,
     ];
 
     if matches!(pr, crate::cli::PR::Draft) {
         args.push("--draft");
     }
 
-    // Use retry logic for network operations
-    let output = retry_command("gh", &args, MAX_RETRIES)?;
+    // Retry network operations, rebuilding the (token-authed) command each try.
+    let org = org_of(repo_slug).to_string();
+    let output = retry_gh(&org, config, &args, MAX_RETRIES)?;
 
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -199,15 +225,21 @@ fn extract_pr_number_from_url(url: &str) -> Option<u64> {
     url.rsplit('/').next()?.parse().ok()
 }
 
-/// Execute a command with retry logic and exponential backoff
-fn retry_command(cmd: &str, args: &[&str], max_retries: u32) -> Result<std::process::Output> {
+/// Execute a `gh` command (token-authed for `org`) with retry + exponential
+/// backoff on retryable network errors.
+fn retry_gh(
+    org: &str,
+    config: &Config,
+    args: &[&str],
+    max_retries: u32,
+) -> Result<std::process::Output> {
     let mut last_error = None;
 
     for attempt in 0..max_retries {
-        let output = Command::new(cmd)
+        let output = gh_command(org, config)
             .args(args)
             .output()
-            .context(format!("Failed to execute {cmd}"))?;
+            .context("Failed to execute gh")?;
 
         if output.status.success() {
             return Ok(output);
@@ -296,6 +328,16 @@ struct GhGraphqlData {
 #[derive(Debug, Deserialize)]
 struct GhGraphqlSearch {
     nodes: Vec<GhGraphqlPrItem>,
+    #[serde(rename = "pageInfo")]
+    page_info: Option<GhPageInfo>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GhPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 /// Raw PR data from GitHub GraphQL API
@@ -322,62 +364,106 @@ struct GhGraphqlRepository {
     name_with_owner: String,
 }
 
-/// List PRs by change ID pattern using GraphQL API
-pub fn list_prs_by_change_id(org: &str, change_id_pattern: &str) -> Result<Vec<PrInfo>> {
-    debug!("Listing PRs for org: {org}, change ID pattern: {change_id_pattern}");
+/// GraphQL query with pagination. The search string is passed as a JSON-encoded
+/// variable (`$q`), never spliced into the query text, closing an injection path
+/// via crafted org/change-id values ([A13]).
+const PR_SEARCH_QUERY: &str = r#"query($q: String!, $cursor: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        headRefName
+        author { login }
+        state
+        url
+        repository { nameWithOwner }
+      }
+    }
+  }
+}"#;
 
-    let query = format!(
-        r#"{{
-          search(query: "org:{} is:pr is:open head:{}", type: ISSUE, first: 100) {{
-            nodes {{
-              ... on PullRequest {{
-                number
-                title
-                headRefName
-                author {{ login }}
-                state
-                url
-                repository {{ nameWithOwner }}
-              }}
-            }}
-          }}
-        }}"#,
-        org, change_id_pattern
-    );
+/// List PRs by change ID pattern using GraphQL, following pagination to
+/// exhaustion (no longer capped at the first 100 results) ([A13]).
+pub fn list_prs_by_change_id(
+    org: &str,
+    change_id_pattern: &str,
+    config: &Config,
+) -> Result<Vec<PrInfo>> {
+    debug!("list_prs_by_change_id: org={org} pattern={change_id_pattern}");
 
-    let output = Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
-        .output()
-        .context("Failed to execute gh api graphql")?;
+    let search = format!("org:{org} is:pr is:open head:{change_id_pattern}");
+    let mut cursor: Option<String> = None;
+    let mut all = Vec::new();
 
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("Failed to search PRs: {}", error));
+    loop {
+        let mut args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={PR_SEARCH_QUERY}"),
+            "-f".to_string(),
+            format!("q={search}"),
+        ];
+        if let Some(ref c) = cursor {
+            args.push("-f".to_string());
+            args.push(format!("cursor={c}"));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let output = gh_command(org, config)
+            .args(&arg_refs)
+            .output()
+            .context("Failed to execute gh api graphql")?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(eyre::eyre!("Failed to search PRs: {}", error));
+        }
+
+        let json_output =
+            String::from_utf8(output.stdout).context("Invalid UTF-8 in gh api graphql output")?;
+
+        let (mut page, page_info) = parse_graphql_prs_page(&json_output, change_id_pattern)?;
+        all.append(&mut page);
+
+        match page_info {
+            Some(info) if info.has_next_page => {
+                cursor = info.end_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            _ => break,
+        }
     }
 
-    let json_output =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in gh api graphql output")?;
-
-    // Filter results to ensure both branch AND title start with the pattern
-    // GitHub's search is a substring match, so we need post-filtering
-    parse_graphql_prs_json_with_pattern(&json_output, change_id_pattern)
+    debug!("list_prs_by_change_id: {} PRs total", all.len());
+    Ok(all)
 }
 
 /// Parse JSON output from gh api graphql (test helper that uses default GX- pattern)
 #[cfg(test)]
 fn parse_graphql_prs_json(json_output: &str) -> Result<Vec<PrInfo>> {
-    parse_graphql_prs_json_with_pattern(json_output, "GX-")
+    Ok(parse_graphql_prs_page(json_output, "GX-")?.0)
 }
 
-/// Parse JSON output from gh api graphql with pattern filtering
-fn parse_graphql_prs_json_with_pattern(json_output: &str, pattern: &str) -> Result<Vec<PrInfo>> {
+/// Parse one GraphQL page: returns the filtered PRs and the page info (for
+/// pagination). The same `GX-`-prefix filtering as before is applied.
+fn parse_graphql_prs_page(
+    json_output: &str,
+    pattern: &str,
+) -> Result<(Vec<PrInfo>, Option<GhPageInfo>)> {
     let trimmed = json_output.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let response: GhGraphqlResponse =
         serde_json::from_str(trimmed).context("Failed to parse GraphQL response JSON")?;
+
+    let page_info = response.data.search.page_info.clone();
 
     let prs: Vec<PrInfo> = response
         .data
@@ -412,7 +498,7 @@ fn parse_graphql_prs_json_with_pattern(json_output: &str, pattern: &str) -> Resu
         prs.len(),
         pattern
     );
-    Ok(prs)
+    Ok((prs, page_info))
 }
 
 /// Approve and merge a PR
@@ -421,11 +507,13 @@ pub fn approve_and_merge_pr(
     pr_number: u64,
     admin_override: bool,
     auto_merge: bool,
+    config: &Config,
 ) -> Result<()> {
     debug!("Approving and merging PR #{pr_number} in {repo_slug}");
+    let org = org_of(repo_slug);
 
     // First approve the PR
-    let approve_output = Command::new("gh")
+    let approve_output = gh_command(org, config)
         .args([
             "pr",
             "review",
@@ -462,7 +550,7 @@ pub fn approve_and_merge_pr(
         merge_args.push("--auto");
     }
 
-    let merge_output = Command::new("gh")
+    let merge_output = gh_command(org, config)
         .args(&merge_args)
         .output()
         .context("Failed to execute gh pr merge")?;
@@ -477,10 +565,10 @@ pub fn approve_and_merge_pr(
 }
 
 /// Close a PR without merging
-pub fn close_pr(repo_slug: &str, pr_number: u64) -> Result<()> {
+pub fn close_pr(repo_slug: &str, pr_number: u64, config: &Config) -> Result<()> {
     debug!("Closing PR #{pr_number} in {repo_slug}");
 
-    let output = Command::new("gh")
+    let output = gh_command(org_of(repo_slug), config)
         .args(["pr", "close", &pr_number.to_string(), "--repo", repo_slug])
         .output()
         .context("Failed to execute gh pr close")?;
@@ -495,10 +583,10 @@ pub fn close_pr(repo_slug: &str, pr_number: u64) -> Result<()> {
 }
 
 /// Delete a remote branch
-pub fn delete_remote_branch(repo_slug: &str, branch_name: &str) -> Result<()> {
+pub fn delete_remote_branch(repo_slug: &str, branch_name: &str, config: &Config) -> Result<()> {
     debug!("Deleting remote branch '{branch_name}' in {repo_slug}");
 
-    let output = Command::new("gh")
+    let output = gh_command(org_of(repo_slug), config)
         .args([
             "api",
             &format!("repos/{repo_slug}/git/refs/heads/{branch_name}"),
@@ -521,13 +609,19 @@ pub fn delete_remote_branch(repo_slug: &str, branch_name: &str) -> Result<()> {
     }
 }
 
-/// List all branches with a specific prefix (for purge operations)
-pub fn list_branches_with_prefix(repo_slug: &str, prefix: &str) -> Result<Vec<String>> {
+/// List all branches with a specific prefix (for purge operations). Paginates
+/// past 100 via `--paginate` so large repos are fully covered ([A12]).
+pub fn list_branches_with_prefix(
+    repo_slug: &str,
+    prefix: &str,
+    config: &Config,
+) -> Result<Vec<String>> {
     debug!("Listing branches with prefix '{prefix}' in {repo_slug}");
 
-    let output = Command::new("gh")
+    let output = gh_command(org_of(repo_slug), config)
         .args([
             "api",
+            "--paginate",
             &format!("repos/{repo_slug}/branches"),
             "--jq",
             &format!(".[] | select(.name | startswith(\"{prefix}\")) | .name"),
@@ -546,6 +640,36 @@ pub fn list_branches_with_prefix(repo_slug: &str, prefix: &str) -> Result<Vec<St
     } else {
         let error = String::from_utf8_lossy(&output.stderr);
         Err(eyre::eyre!("Failed to list branches: {}", error))
+    }
+}
+
+/// Head-ref branch names of all open PRs in a repo (paginated). Used by purge to
+/// refuse deleting a branch that still has an open PR ([A12], design Q3).
+pub fn list_open_pr_branches(repo_slug: &str, config: &Config) -> Result<Vec<String>> {
+    debug!("Listing open-PR head branches in {repo_slug}");
+
+    let output = gh_command(org_of(repo_slug), config)
+        .args([
+            "api",
+            "--paginate",
+            &format!("repos/{repo_slug}/pulls?state=open&per_page=100"),
+            "--jq",
+            ".[].head.ref",
+        ])
+        .output()
+        .context("Failed to execute gh api pulls")?;
+
+    if output.status.success() {
+        let branches = String::from_utf8(output.stdout)
+            .context("Invalid UTF-8 in pulls output")?
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        Ok(branches)
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to list open PRs: {}", error))
     }
 }
 
@@ -693,5 +817,45 @@ mod tests {
         let json = "not valid json";
         let result = parse_graphql_prs_json(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_graphql_page_returns_page_info() {
+        // A page with hasNextPage=true must surface the cursor for pagination ([A13]).
+        let json = r#"{"data":{"search":{
+            "pageInfo": {"hasNextPage": true, "endCursor": "CURSOR123"},
+            "nodes":[{
+                "number": 1,
+                "title": "GX-x: PR",
+                "headRefName": "GX-x",
+                "author": {"login": "u"},
+                "state": "OPEN",
+                "url": "https://github.com/o/r/pull/1",
+                "repository": {"nameWithOwner": "o/r"}
+            }]
+        }}}"#;
+        let (prs, page_info) = parse_graphql_prs_page(json, "GX-").unwrap();
+        assert_eq!(prs.len(), 1);
+        let info = page_info.expect("page info present");
+        assert!(info.has_next_page);
+        assert_eq!(info.end_cursor.as_deref(), Some("CURSOR123"));
+    }
+
+    #[test]
+    fn test_search_query_uses_variables() {
+        // The query is parameterized ($q, $cursor), never string-interpolated ([A13]).
+        assert!(PR_SEARCH_QUERY.contains("$q: String!"));
+        assert!(PR_SEARCH_QUERY.contains("$cursor: String"));
+        assert!(PR_SEARCH_QUERY.contains("hasNextPage"));
+    }
+
+    #[test]
+    fn test_pr_body_template_substitution() {
+        let config = crate::config::Config::default();
+        let body = config
+            .pr_body_template()
+            .replace("{commit_message}", "my commit");
+        assert_eq!(body, "my commit");
+        assert!(!body.contains("scottidler/gx"));
     }
 }

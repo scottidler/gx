@@ -244,6 +244,7 @@ pub fn process_create_command(
                     &change,
                     commit_message.as_deref(),
                     pr.as_ref(),
+                    config,
                 );
 
                 // Fold the result into the change state and save incrementally
@@ -407,6 +408,7 @@ fn process_single_repo(
     change: &Change,
     commit_message: Option<&str>,
     pr: Option<&crate::cli::PR>,
+    config: &Config,
 ) -> CreateResult {
     debug!(
         "process_single_repo: repo={} change_id={change_id}",
@@ -621,7 +623,7 @@ fn process_single_repo(
     // 8. Create the PR against the (already-restored) remote. A PR failure is
     //    surfaced on the result, not swallowed ([A4]; Phase 5 refines).
     let (action, pr_number, pr_url, mut error) = match pr {
-        Some(pr) => match create_pull_request(repo, change_id, commit_message, pr) {
+        Some(pr) => match create_pull_request(repo, change_id, commit_message, pr, config) {
             Ok(result) => (
                 CreateAction::PrCreated,
                 Some(result.number),
@@ -952,15 +954,37 @@ fn create_pull_request(
     change_id: &str,
     commit_message: &str,
     pr: &crate::cli::PR,
+    config: &Config,
 ) -> Result<github::CreatePrResult> {
     let repo_slug = &repo.slug;
-    let result = github::create_pr(repo_slug, change_id, commit_message, pr)
+    let base = resolve_base_branch(repo, config);
+    let result = github::create_pr(repo_slug, change_id, commit_message, &base, pr, config)
         .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
     info!(
         "Created PR #{} for repository: {} - {}",
         result.number, repo_slug, result.url
     );
     Ok(result)
+}
+
+/// Resolve the repo's default base branch: prefer the local head branch, then
+/// the GitHub API's default_branch, falling back to `main` with a warning - a
+/// lookup failure must never drop the PR ([A4]).
+fn resolve_base_branch(repo: &Repo, config: &Config) -> String {
+    if let Ok(branch) = git::get_head_branch(&repo.path) {
+        return branch;
+    }
+    let org = repo.slug.split('/').next().unwrap_or("");
+    if let Ok(token) = github::read_token(org, config) {
+        if let Ok(branch) = github::get_default_branch(&repo.slug, &token) {
+            return branch;
+        }
+    }
+    warn!(
+        "Could not resolve default branch for {}; falling back to main",
+        repo.slug
+    );
+    "main".to_string()
 }
 
 /// Display pattern analysis for substitution operations

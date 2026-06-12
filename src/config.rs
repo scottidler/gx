@@ -45,7 +45,28 @@ pub struct Config {
     #[serde(rename = "remote-status")]
     pub remote_status: Option<RemoteStatusConfig>,
     pub create: Option<CreateConfig>,
+    pub github: Option<GithubConfig>,
 }
+
+/// GitHub-related configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Template for PR bodies. `{commit_message}` is substituted.
+    #[serde(rename = "pr-body-template")]
+    pub pr_body_template: Option<String>,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            pr_body_template: Some(DEFAULT_PR_BODY_TEMPLATE.to_string()),
+        }
+    }
+}
+
+/// Default PR body: just the commit message.
+pub const DEFAULT_PR_BODY_TEMPLATE: &str = "{commit_message}";
 
 /// Configuration for the `create` command.
 #[derive(Debug, Deserialize, Serialize)]
@@ -131,6 +152,7 @@ impl Default for Config {
             logging: None,
             remote_status: Some(RemoteStatusConfig::default()),
             create: Some(CreateConfig::default()),
+            github: Some(GithubConfig::default()),
         }
     }
 }
@@ -192,6 +214,14 @@ impl Config {
             .as_ref()
             .and_then(|c| c.confirm_threshold)
             .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
+    }
+
+    /// Effective PR body template (`{commit_message}` is substituted).
+    pub fn pr_body_template(&self) -> String {
+        self.github
+            .as_ref()
+            .and_then(|g| g.pr_body_template.clone())
+            .unwrap_or_else(|| DEFAULT_PR_BODY_TEMPLATE.to_string())
     }
 
     /// Load configuration with fallback chain

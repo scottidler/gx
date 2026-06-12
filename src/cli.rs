@@ -14,6 +14,18 @@ pub enum PR {
     Draft,
 }
 
+/// Validate a `--change-id`: it must start with `GX-` so the review tooling can
+/// find its PRs by that prefix ([A11]). Rejected at parse time.
+fn validate_change_id(value: &str) -> Result<String, String> {
+    if value.starts_with("GX-") {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "change-id must start with 'GX-' (got '{value}'); gx review finds PRs by the GX- prefix"
+        ))
+    }
+}
+
 static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 static JOBS_HELP: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -245,7 +257,8 @@ EXAMPLES:
         #[arg(
             short = 'x',
             long = "change-id",
-            help = "Change ID for branch/PR (auto-generated if not provided)"
+            help = "Change ID for branch/PR (auto-generated if not provided)",
+            value_parser = validate_change_id
         )]
         change_id: Option<String>,
 
@@ -405,8 +418,16 @@ pub enum ReviewAction {
         #[arg(help = "Change ID to delete")]
         change_id: String,
     },
-    /// Purge all GX branches and PRs
-    Purge,
+    /// Purge gx-created branches with no open PR
+    Purge {
+        /// Skip the confirmation prompt before deleting branches
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before purging"
+        )]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -564,4 +585,24 @@ fn version_compare(version: &str, min_version: &str) -> bool {
     }
 
     v1.len() >= v2.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_change_id_accepts_gx_prefix() {
+        assert_eq!(
+            validate_change_id("GX-2026-06-11").unwrap(),
+            "GX-2026-06-11"
+        );
+    }
+
+    #[test]
+    fn test_validate_change_id_rejects_non_gx() {
+        assert!(validate_change_id("my-change").is_err());
+        assert!(validate_change_id("gx-lowercase").is_err());
+        assert!(validate_change_id("").is_err());
+    }
 }
