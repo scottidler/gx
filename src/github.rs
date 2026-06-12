@@ -386,7 +386,8 @@ fn parse_graphql_prs_json_with_pattern(json_output: &str, pattern: &str) -> Resu
             // GX naming convention: BOTH branch AND title must start with "GX-" to avoid false positives
             // (e.g., branch "gx-alerts" or title mentioning "GX" in the middle)
             // Then filter branch name against the specific pattern for exact matching
-            let has_gx_prefix = gh_pr.head_ref_name.starts_with("GX-") && gh_pr.title.starts_with("GX-");
+            let has_gx_prefix =
+                gh_pr.head_ref_name.starts_with("GX-") && gh_pr.title.starts_with("GX-");
             let matches_pattern = gh_pr.head_ref_name.starts_with(pattern);
             has_gx_prefix && matches_pattern
         })
@@ -404,7 +405,11 @@ fn parse_graphql_prs_json_with_pattern(json_output: &str, pattern: &str) -> Resu
         })
         .collect();
 
-    debug!("Parsed {} PRs from GraphQL response (after filtering for pattern '{}')", prs.len(), pattern);
+    debug!(
+        "Parsed {} PRs from GraphQL response (after filtering for pattern '{}')",
+        prs.len(),
+        pattern
+    );
     Ok(prs)
 }
 
