@@ -195,7 +195,14 @@ fn cleanup_change(
     let repos_to_clean: Vec<_> = state
         .get_repos_needing_cleanup()
         .iter()
-        .map(|r| (r.repo_slug.clone(), r.branch_name.clone(), r.status.clone()))
+        .map(|r| {
+            (
+                r.repo_slug.clone(),
+                r.branch_name.clone(),
+                r.status.clone(),
+                r.local_path.clone(),
+            )
+        })
         .collect();
 
     let mut cleaned = 0;
@@ -203,7 +210,7 @@ fn cleanup_change(
     let mut failed = 0;
     let mut errors = Vec::new();
 
-    for (repo_slug, branch_name, status) in repos_to_clean {
+    for (repo_slug, branch_name, status, recorded_path) in repos_to_clean {
         // Check if we should clean this repo
         if !force && status != RepoChangeStatus::PrMerged {
             info!("Skipping {} - PR not merged", repo_slug);
@@ -211,14 +218,37 @@ fn cleanup_change(
             continue;
         }
 
-        // Try to find local path
-        let local_path = match find_repo_locally(&repo_slug) {
-            Some(p) => p,
-            None => {
-                info!("Skipping {} - local repo not found", repo_slug);
-                skipped += 1;
-                continue;
+        // Resolve the repo via its recorded local_path first ([A16]); fall back
+        // to a CWD search only when no path was recorded. A recorded-but-missing
+        // path is reported as a failure, not silently skipped.
+        let local_path = match recorded_path {
+            Some(path) => {
+                let path = std::path::PathBuf::from(&path);
+                if path.join(".git").exists() {
+                    path
+                } else {
+                    warn!(
+                        "Recorded path for {} no longer a git repo: {}",
+                        repo_slug,
+                        path.display()
+                    );
+                    errors.push(format!(
+                        "{}: recorded path missing: {}",
+                        repo_slug,
+                        path.display()
+                    ));
+                    failed += 1;
+                    continue;
+                }
             }
+            None => match find_repo_locally(&repo_slug) {
+                Some(p) => p,
+                None => {
+                    info!("Skipping {} - local repo not found", repo_slug);
+                    skipped += 1;
+                    continue;
+                }
+            },
         };
 
         // Delete local branch
@@ -309,12 +339,44 @@ fn find_repo_locally(repo_slug: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ChangeState, RepoChangeStatus};
+    use crate::test_utils::run_git_command;
     use tempfile::TempDir;
 
     #[test]
     fn test_find_repo_locally_not_found() {
         let result = find_repo_locally("nonexistent/repo");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_uses_recorded_local_path() {
+        // cleanup_change must resolve repos via the recorded local_path, so it
+        // works from any CWD (not just one containing the repo) ([A16]).
+        let repo = TempDir::new().unwrap();
+        let p = repo.path();
+        run_git_command(&["init", "--quiet"], p);
+        run_git_command(&["config", "user.email", "t@e.com"], p);
+        run_git_command(&["config", "user.name", "T"], p);
+        run_git_command(&["config", "commit.gpgsign", "false"], p);
+        std::fs::write(p.join("README.md"), "# r").unwrap();
+        run_git_command(&["add", "-A"], p);
+        run_git_command(&["commit", "--quiet", "-m", "init"], p);
+        run_git_command(&["branch", "GX-cleanup"], p);
+        assert!(crate::git::branch_exists_locally(p, "GX-cleanup").unwrap());
+
+        let mut state = ChangeState::new("GX-cleanup".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-cleanup".to_string());
+        {
+            let rs = state.repositories.get_mut("org/repo").unwrap();
+            rs.local_path = Some(p.to_string_lossy().to_string());
+            rs.status = RepoChangeStatus::PrMerged;
+        }
+
+        // force=true so it cleans even though we didn't go through a real merge.
+        let result = cleanup_change(&mut state, false, true).unwrap();
+        assert_eq!(result.repos_cleaned, 1);
+        assert!(!crate::git::branch_exists_locally(p, "GX-cleanup").unwrap());
     }
 
     #[test]

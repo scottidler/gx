@@ -5,14 +5,15 @@
 
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 /// State of a change operation across repositories
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChangeState {
     /// Unique change identifier (e.g., "GX-2024-01-15-abc123")
     pub change_id: String,
@@ -29,8 +30,9 @@ pub struct ChangeState {
     /// Commit message used for this change
     pub commit_message: Option<String>,
 
-    /// Repositories affected by this change
-    pub repositories: HashMap<String, RepoChangeState>,
+    /// Repositories affected by this change (BTreeMap for deterministic
+    /// serialization order).
+    pub repositories: BTreeMap<String, RepoChangeState>,
 
     /// Overall status of the change
     pub status: ChangeStatus,
@@ -38,6 +40,7 @@ pub struct ChangeState {
 
 /// Status of an individual repository in a change
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoChangeState {
     /// Repository slug (e.g., "org/repo-name")
     pub repo_slug: String,
@@ -113,7 +116,7 @@ impl ChangeState {
             created_at: now,
             updated_at: now,
             commit_message: None,
-            repositories: HashMap::new(),
+            repositories: BTreeMap::new(),
             status: ChangeStatus::InProgress,
         }
     }
@@ -295,11 +298,12 @@ impl StateManager {
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        if let Ok(state) = serde_json::from_str::<ChangeState>(&content) {
-                            states.push(state);
+                    Ok(content) => match serde_json::from_str::<ChangeState>(&content) {
+                        Ok(state) => states.push(state),
+                        Err(e) => {
+                            warn!("Skipping unparsable state file {}: {}", path.display(), e);
                         }
-                    }
+                    },
                     Err(e) => {
                         warn!("Failed to read state file {}: {}", path.display(), e);
                     }
@@ -343,13 +347,77 @@ impl StateManager {
     }
 }
 
-/// Get the state directory path
+/// Get the state directory path (`$XDG_DATA_HOME/gx/changes`), migrating from
+/// the legacy `~/.gx/changes` on first use ([A22], design Q4).
 fn get_state_dir() -> Result<PathBuf> {
-    let home_dir = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| eyre::eyre!("Could not determine home directory"))?;
+    let new_dir = crate::config::xdg_data_dir()
+        .ok_or_else(|| eyre::eyre!("Could not determine data dir (set HOME or XDG_DATA_HOME)"))?
+        .join("gx")
+        .join("changes");
 
-    Ok(PathBuf::from(home_dir).join(".gx").join("changes"))
+    if !new_dir.exists() {
+        migrate_legacy_state(&new_dir);
+    }
+
+    Ok(new_dir)
+}
+
+/// One-time migration: copy any legacy `~/.gx/changes/*.json` into the new XDG
+/// location, then rename the whole `~/.gx` aside (not deleted) as a backup.
+fn migrate_legacy_state(new_dir: &std::path::Path) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let legacy_gx = home.join(".gx");
+    let legacy_changes = legacy_gx.join("changes");
+    if !legacy_changes.exists() {
+        return;
+    }
+
+    if let Err(e) = fs::create_dir_all(new_dir) {
+        warn!("Migration: failed to create {}: {}", new_dir.display(), e);
+        return;
+    }
+
+    let entries = match fs::read_dir(&legacy_changes) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                "Migration: failed to read {}: {}",
+                legacy_changes.display(),
+                e
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Some(name) = path.file_name() {
+                if let Err(e) = fs::copy(&path, new_dir.join(name)) {
+                    warn!("Migration: failed to copy {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
+    // Rename the legacy dir aside as a one-time backup (not deleted).
+    let stamp = Utc::now().format("%Y%m%d%H%M%S");
+    let backup = home.join(format!(".gx.migrated-{stamp}"));
+    match fs::rename(&legacy_gx, &backup) {
+        Ok(()) => info!(
+            "Migrated change state from {} to {}; legacy dir backed up at {}",
+            legacy_changes.display(),
+            new_dir.display(),
+            backup.display()
+        ),
+        Err(e) => warn!(
+            "Migrated change state to {} but failed to rename legacy {}: {}",
+            new_dir.display(),
+            legacy_gx.display(),
+            e
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +644,57 @@ mod tests {
 
         let repo = state.repositories.get("org/repo").unwrap();
         assert_eq!(repo.status, RepoChangeStatus::CleanedUp);
+    }
+
+    #[test]
+    fn test_deny_unknown_fields() {
+        // A state file with an unexpected field must fail to parse, not silently
+        // drop data ([A22]).
+        let json = r#"{
+            "change_id": "x",
+            "description": null,
+            "created_at": "2026-06-11T00:00:00Z",
+            "updated_at": "2026-06-11T00:00:00Z",
+            "commit_message": null,
+            "repositories": {},
+            "status": "InProgress",
+            "bogus_field": 1
+        }"#;
+        let parsed: Result<ChangeState, _> = serde_json::from_str(json);
+        assert!(parsed.is_err(), "unknown field must be rejected");
+    }
+
+    #[test]
+    fn test_repositories_serialize_in_sorted_order() {
+        // BTreeMap gives deterministic, sorted key order in the JSON ([A22]).
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/zebra".to_string(), "GX-test".to_string());
+        state.add_repository("org/alpha".to_string(), "GX-test".to_string());
+        state.add_repository("org/mango".to_string(), "GX-test".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let alpha = json.find("org/alpha").unwrap();
+        let mango = json.find("org/mango").unwrap();
+        let zebra = json.find("org/zebra").unwrap();
+        assert!(alpha < mango && mango < zebra, "keys must serialize sorted");
+    }
+
+    #[test]
+    fn test_original_branch_is_recorded() {
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-test".to_string());
+        state
+            .repositories
+            .get_mut("org/repo")
+            .unwrap()
+            .original_branch = Some("main".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ChangeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.repositories.get("org/repo").unwrap().original_branch,
+            Some("main".to_string())
+        );
     }
 
     #[test]

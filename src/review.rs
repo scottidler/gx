@@ -45,7 +45,7 @@ pub fn process_review_ls_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth)
+    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
@@ -166,7 +166,7 @@ pub fn process_review_clone_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth)
+    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
@@ -282,7 +282,7 @@ pub fn process_review_approve_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth)
+    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     let user_org_contexts =
@@ -350,6 +350,21 @@ pub fn process_review_approve_command(
             .collect()
     });
 
+    // Single race-free state update: load once, apply all outcomes, save once ([A10]).
+    if let Ok(manager) = StateManager::new() {
+        if let Ok(Some(mut state)) = manager.load(change_id) {
+            for result in &results {
+                match &result.error {
+                    None => state.mark_merged(&result.repo.slug),
+                    Some(e) => state.mark_failed(&result.repo.slug, e.clone()),
+                }
+            }
+            if let Err(e) = manager.save(&state) {
+                warn!("Failed to save change state after approve: {e}");
+            }
+        }
+    }
+
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
@@ -385,7 +400,7 @@ pub fn process_review_delete_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth)
+    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     let user_org_contexts =
@@ -453,6 +468,20 @@ pub fn process_review_delete_command(
             .collect()
     });
 
+    // Single race-free state update: load once, mark closed, save once ([A10]).
+    if let Ok(manager) = StateManager::new() {
+        if let Ok(Some(mut state)) = manager.load(change_id) {
+            for result in &results {
+                if result.error.is_none() {
+                    state.mark_closed(&result.repo.slug);
+                }
+            }
+            if let Err(e) = manager.save(&state) {
+                warn!("Failed to save change state after delete: {e}");
+            }
+        }
+    }
+
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
@@ -487,7 +516,8 @@ pub fn process_review_purge_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = discover_repos(start_dir, max_depth).context("Failed to discover repositories")?;
+    let repos = discover_repos(start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
 
     let filtered_repos = filter_repos(repos, patterns);
 
@@ -609,20 +639,11 @@ fn approve_and_merge_pr(
 ) -> ReviewResult {
     let repo = create_repo_from_slug(&pr.repo_slug);
 
+    // State is updated once, after the parallel section completes (the caller),
+    // to avoid a read-modify-write race across rayon workers ([A10]).
     match github::approve_and_merge_pr(&pr.repo_slug, pr.number, admin_override, auto_merge) {
         Ok(()) => {
             info!("Successfully approved and merged PR #{}", pr.number);
-
-            // Update state tracking to mark PR as merged
-            if let Ok(manager) = StateManager::new() {
-                if let Ok(Some(mut state)) = manager.load(change_id) {
-                    state.mark_merged(&pr.repo_slug);
-                    if let Err(e) = manager.save(&state) {
-                        warn!("Failed to update state after merge: {}", e);
-                    }
-                }
-            }
-
             ReviewResult {
                 repo,
                 change_id: change_id.to_string(),
@@ -633,15 +654,6 @@ fn approve_and_merge_pr(
         }
         Err(e) => {
             warn!("Failed to approve and merge PR #{}: {}", pr.number, e);
-
-            // Update state tracking to mark failure
-            if let Ok(manager) = StateManager::new() {
-                if let Ok(Some(mut state)) = manager.load(change_id) {
-                    state.mark_failed(&pr.repo_slug, e.to_string());
-                    let _ = manager.save(&state);
-                }
-            }
-
             ReviewResult {
                 repo,
                 change_id: change_id.to_string(),
@@ -657,17 +669,10 @@ fn approve_and_merge_pr(
 fn delete_pr_and_branch(pr: &PrInfo, change_id: &str) -> ReviewResult {
     let repo = create_repo_from_slug(&pr.repo_slug);
 
-    // First close the PR
+    // State is updated once after the parallel section (the caller) to avoid a
+    // read-modify-write race across rayon workers ([A10]).
     match github::close_pr(&pr.repo_slug, pr.number) {
         Ok(()) => {
-            // Update state tracking to mark PR as closed
-            if let Ok(manager) = StateManager::new() {
-                if let Ok(Some(mut state)) = manager.load(change_id) {
-                    state.mark_closed(&pr.repo_slug);
-                    let _ = manager.save(&state);
-                }
-            }
-
             // Then delete the remote branch
             match github::delete_remote_branch(&pr.repo_slug, &pr.branch) {
                 Ok(()) => {

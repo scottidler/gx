@@ -181,8 +181,10 @@ pub fn create_pr(
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         debug!("PR created: {url}");
 
-        // Extract PR number from URL (e.g., https://github.com/org/repo/pull/123)
-        let number = extract_pr_number_from_url(&url).unwrap_or(0);
+        // Extract PR number from URL (e.g., https://github.com/org/repo/pull/123).
+        // A parse failure is a real error, never a stored PR #0 ([A19]).
+        let number = extract_pr_number_from_url(&url)
+            .ok_or_else(|| eyre::eyre!("Could not parse PR number from URL: {url}"))?;
 
         Ok(CreatePrResult { number, url })
     } else {

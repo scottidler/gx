@@ -128,6 +128,8 @@ pub struct CreateResult {
     pub substitution_stats: Option<SubstitutionStats>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
+    /// The branch the repo was on before the change (for state tracking).
+    pub original_branch: Option<String>,
     pub error: Option<String>,
 }
 
@@ -198,10 +200,22 @@ pub fn process_create_command(
         }
     }
 
-    // Initialize state tracking if we're going to make changes (not dry run)
+    // Initialize state tracking if we're going to make changes (not dry run).
     let change_state = if commit_message.is_some() {
         let state = ChangeState::new(change_id.clone(), commit_message.clone());
         Some(Mutex::new(state))
+    } else {
+        None
+    };
+    // One state manager, shared for incremental saves after each repo ([A3]).
+    let state_manager = if commit_message.is_some() {
+        match StateManager::new() {
+            Ok(manager) => Some(manager),
+            Err(e) => {
+                warn!("Failed to create state manager: {e}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -232,10 +246,22 @@ pub fn process_create_command(
                     pr.as_ref(),
                 );
 
-                // Update state tracking if enabled
+                // Fold the result into the change state and save incrementally
+                // (inside the same lock) so a crash mid-fleet keeps prior repos'
+                // state on disk ([A3]).
                 if let Some(ref state_mutex) = change_state {
                     if let Ok(mut state) = state_mutex.lock() {
                         update_change_state(&mut state, &result, pr.as_ref());
+                        if matches!(
+                            result.action,
+                            CreateAction::Committed | CreateAction::PrCreated
+                        ) {
+                            if let Some(ref manager) = state_manager {
+                                if let Err(e) = manager.save(&state) {
+                                    warn!("Failed to save change state: {e}");
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -244,27 +270,10 @@ pub fn process_create_command(
             .collect()
     });
 
-    // Save state if we made changes
     if let Some(state_mutex) = change_state {
         if let Ok(state) = state_mutex.into_inner() {
-            // Only save if there were actual changes (not all dry runs)
-            let has_changes = results
-                .iter()
-                .any(|r| matches!(r.action, CreateAction::Committed | CreateAction::PrCreated));
-
-            if has_changes {
-                match StateManager::new() {
-                    Ok(manager) => {
-                        if let Err(e) = manager.save(&state) {
-                            warn!("Failed to save change state: {}", e);
-                        } else {
-                            info!("Saved change state for {}", state.change_id);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to create state manager: {}", e);
-                    }
-                }
+            if !state.repositories.is_empty() {
+                info!("Saved change state for {}", state.change_id);
             }
         }
     }
@@ -354,6 +363,7 @@ fn update_change_state(
             if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
                 repo_state.local_path = Some(result.repo.path.to_string_lossy().to_string());
                 repo_state.files_modified = result.files_affected.clone();
+                repo_state.original_branch = result.original_branch.clone();
             }
 
             // If PR was created, update PR info using the new set_pr_info method
@@ -380,6 +390,7 @@ fn dry_run_error(repo: &Repo, change_id: &str, error: String) -> CreateResult {
         substitution_stats: None,
         pr_number: None,
         pr_url: None,
+        original_branch: None,
         error: Some(error),
     }
 }
@@ -566,6 +577,7 @@ fn process_single_repo(
             substitution_stats,
             pr_number: None,
             pr_url: None,
+            original_branch: Some(original_branch.clone()),
             error: None,
         };
     }
@@ -600,6 +612,7 @@ fn process_single_repo(
                 substitution_stats,
                 pr_number: None,
                 pr_url: None,
+                original_branch: Some(original_branch.clone()),
                 error: Some(format!("Committed and pushed, but finalize failed: {e}")),
             };
         }
@@ -645,6 +658,7 @@ fn process_single_repo(
         substitution_stats,
         pr_number,
         pr_url,
+        original_branch: Some(original_branch.clone()),
         error,
     }
 }
@@ -1178,6 +1192,7 @@ mod tests {
             substitution_stats: None,
             pr_number: None,
             pr_url: None,
+            original_branch: None,
             error: None,
         };
 
