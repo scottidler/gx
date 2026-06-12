@@ -1506,6 +1506,62 @@ pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
     }
 }
 
+/// Convert raw bytes from git output into a `PathBuf`.
+///
+/// On Unix, git paths are arbitrary byte sequences; we preserve them exactly via
+/// `OsStr::from_bytes`. On other platforms we fall back to a lossy conversion.
+fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+/// List the files in the git index along with their octal mode strings.
+///
+/// Uses `git ls-files --stage -z` and parses the NUL-delimited records so that
+/// non-UTF-8 filenames and paths containing newlines are handled correctly. Each
+/// returned entry is `(mode, relative_path)` where `mode` is the raw octal mode
+/// string git reports (e.g. `"100644"`, `"120000"` for symlinks, `"160000"` for
+/// submodule gitlinks).
+pub fn list_index_files(repo_path: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>> {
+    debug!("list_index_files: repo_path={}", repo_path.display());
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["ls-files", "--stage", "-z"])
+        .output()
+        .context("Failed to execute git ls-files --stage -z")?;
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("Failed to list index files: {}", error));
+    }
+
+    let mut entries = Vec::new();
+    for record in output.stdout.split(|&b| b == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        // Each record is `<mode> <object> <stage>\t<path>`.
+        let Some(tab) = record.iter().position(|&b| b == b'\t') else {
+            continue;
+        };
+        let (meta, path_with_tab) = record.split_at(tab);
+        let path_bytes = &path_with_tab[1..]; // drop the leading tab
+        let meta_str = String::from_utf8_lossy(meta);
+        let mode = meta_str.split(' ').next().unwrap_or("").to_string();
+        entries.push((mode, bytes_to_path(path_bytes)));
+    }
+
+    debug!("list_index_files: found {} entries", entries.len());
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

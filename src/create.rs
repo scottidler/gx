@@ -22,6 +22,7 @@ pub struct SubstitutionStats {
     pub files_changed: usize,
     pub files_no_matches: usize,
     pub files_no_change: usize,
+    pub files_skipped_binary: usize,
     pub total_matches: usize,
 }
 
@@ -61,12 +62,10 @@ pub fn show_matches(
         let mut matched_files = Vec::new();
 
         if !files.is_empty() {
-            for file_pattern in files {
-                if let Ok(files_found) = file::find_files_in_repo(&repo.path, file_pattern) {
-                    for file in files_found {
-                        matched_files.push(file.display().to_string());
-                        total_files += 1;
-                    }
+            if let Ok(files_found) = file::FileSet::matching_any(&repo.path, files) {
+                for file in files_found {
+                    matched_files.push(file.display().to_string());
+                    total_files += 1;
                 }
             }
             matched_files.sort();
@@ -650,7 +649,9 @@ fn apply_add_change(
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
 ) -> Result<()> {
-    let full_path = repo_path.join(file_path);
+    // Validate and resolve the path; `gx add` is the one write path that does
+    // not flow through FileSet, so it enforces the same policy directly ([A32]).
+    let full_path = file::validate_new_file_path(repo_path, file_path)?;
 
     // Check if file already exists
     if full_path.exists() {
@@ -692,17 +693,8 @@ fn apply_delete_change(
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
 ) -> Result<()> {
-    let mut all_files = Vec::new();
-
-    // Find files matching all patterns
-    for pattern in file_patterns {
-        let files = file::find_files_in_repo(repo_path, pattern)?;
-        all_files.extend(files);
-    }
-
-    // Remove duplicates
-    all_files.sort();
-    all_files.dedup();
+    // Find tracked files matching all patterns (deduped + sorted).
+    let all_files = file::FileSet::matching_any(repo_path, file_patterns)?;
 
     for file_path in all_files {
         let full_path = repo_path.join(&file_path);
@@ -711,10 +703,10 @@ fn apply_delete_change(
             continue;
         }
 
-        // Read content for diff
-        let content = std::fs::read_to_string(&full_path).with_context(|| {
-            format!("Failed to read file for deletion: {}", full_path.display())
-        })?;
+        // Read content for diff; skip non-UTF-8 (binary) files ([A21]).
+        let Some(content) = file::read_utf8_or_skip(&full_path)? else {
+            continue;
+        };
 
         // Create backup for rollback
         let backup_path = file::backup_file(&full_path)?;
@@ -758,19 +750,10 @@ fn apply_substitution_change(
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
 ) -> Result<SubstitutionStats> {
-    let mut all_files = Vec::new();
     let mut stats = SubstitutionStats::default();
 
-    // Find files matching all patterns
-    for file_pattern in file_patterns {
-        let files = file::find_files_in_repo(repo_path, file_pattern)?;
-        all_files.extend(files);
-    }
-
-    // Remove duplicates
-    all_files.sort();
-    all_files.dedup();
-
+    // Find tracked files matching all patterns (deduped + sorted).
+    let all_files = file::FileSet::matching_any(repo_path, file_patterns)?;
     stats.files_scanned = all_files.len();
 
     for file_path in all_files {
@@ -782,7 +765,11 @@ fn apply_substitution_change(
 
         // Try to apply substitution
         match file::apply_substitution_to_file(&full_path, pattern, replacement, 3)? {
-            diff::SubstitutionResult::Changed(updated_content, diff) => {
+            diff::SubstitutionResult::Changed {
+                content: updated_content,
+                diff,
+                matches,
+            } => {
                 // Create backup for rollback
                 let backup_path = file::backup_file(&full_path)?;
 
@@ -812,12 +799,9 @@ fn apply_substitution_change(
                 );
 
                 stats.files_changed += 1;
-                // Count matches in the original content
-                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                stats.total_matches += original_content.matches(pattern).count();
+                stats.total_matches += matches;
             }
             diff::SubstitutionResult::NoMatches => {
-                // Pattern didn't match anything in this file
                 debug!(
                     "No matches found for pattern '{}' in {}",
                     pattern,
@@ -825,17 +809,17 @@ fn apply_substitution_change(
                 );
                 stats.files_no_matches += 1;
             }
-            diff::SubstitutionResult::NoChange => {
-                // Pattern matched but replacement resulted in no changes
+            diff::SubstitutionResult::NoChange { matches } => {
                 debug!(
                     "Pattern '{}' matched but no changes resulted in {}",
                     pattern,
                     file_path.display()
                 );
                 stats.files_no_change += 1;
-                // Count matches even though no changes were made
-                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                stats.total_matches += original_content.matches(pattern).count();
+                stats.total_matches += matches;
+            }
+            diff::SubstitutionResult::SkippedBinary => {
+                stats.files_skipped_binary += 1;
             }
         }
     }
@@ -853,19 +837,10 @@ fn apply_regex_change(
     files_affected: &mut Vec<String>,
     diff_parts: &mut Vec<String>,
 ) -> Result<SubstitutionStats> {
-    let mut all_files = Vec::new();
     let mut stats = SubstitutionStats::default();
 
-    // Find files matching all patterns
-    for file_pattern in file_patterns {
-        let files = file::find_files_in_repo(repo_path, file_pattern)?;
-        all_files.extend(files);
-    }
-
-    // Remove duplicates
-    all_files.sort();
-    all_files.dedup();
-
+    // Find tracked files matching all patterns (deduped + sorted).
+    let all_files = file::FileSet::matching_any(repo_path, file_patterns)?;
     stats.files_scanned = all_files.len();
 
     for file_path in all_files {
@@ -877,7 +852,11 @@ fn apply_regex_change(
 
         // Try to apply regex substitution
         match file::apply_regex_to_file(&full_path, pattern, replacement, 3)? {
-            diff::SubstitutionResult::Changed(updated_content, diff) => {
+            diff::SubstitutionResult::Changed {
+                content: updated_content,
+                diff,
+                matches,
+            } => {
                 // Create backup for rollback
                 let backup_path = file::backup_file(&full_path)?;
 
@@ -907,14 +886,9 @@ fn apply_regex_change(
                 );
 
                 stats.files_changed += 1;
-                // Count regex matches in the original content
-                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                if let Ok(regex) = regex::Regex::new(pattern) {
-                    stats.total_matches += regex.find_iter(&original_content).count();
-                }
+                stats.total_matches += matches;
             }
             diff::SubstitutionResult::NoMatches => {
-                // Pattern didn't match anything in this file
                 debug!(
                     "No matches found for regex pattern '{}' in {}",
                     pattern,
@@ -922,19 +896,17 @@ fn apply_regex_change(
                 );
                 stats.files_no_matches += 1;
             }
-            diff::SubstitutionResult::NoChange => {
-                // Pattern matched but replacement resulted in no changes
+            diff::SubstitutionResult::NoChange { matches } => {
                 debug!(
                     "Regex pattern '{}' matched but no changes resulted in {}",
                     pattern,
                     file_path.display()
                 );
                 stats.files_no_change += 1;
-                // Count matches even though no changes were made
-                let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                if let Ok(regex) = regex::Regex::new(pattern) {
-                    stats.total_matches += regex.find_iter(&original_content).count();
-                }
+                stats.total_matches += matches;
+            }
+            diff::SubstitutionResult::SkippedBinary => {
+                stats.files_skipped_binary += 1;
             }
         }
     }
@@ -1082,6 +1054,12 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
         .map(|s| s.total_matches)
         .sum::<usize>();
 
+    let files_skipped_binary = results
+        .iter()
+        .filter_map(|r| r.substitution_stats.as_ref())
+        .map(|s| s.files_skipped_binary)
+        .sum::<usize>();
+
     if total_files_scanned > 0 {
         if opts.use_emoji {
             println!("\n🔍 Pattern Analysis:");
@@ -1095,6 +1073,9 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
             }
             if files_no_change > 0 {
                 println!("   🔄 Files matched but unchanged: {files_no_change}");
+            }
+            if files_skipped_binary > 0 {
+                println!("   ⏭️  Binary files skipped: {files_skipped_binary}");
             }
 
             if files_changed == 0 && total_files_scanned > 0 {
@@ -1112,6 +1093,9 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
             }
             if files_no_change > 0 {
                 println!("   Files matched but unchanged: {files_no_change}");
+            }
+            if files_skipped_binary > 0 {
+                println!("   Binary files skipped: {files_skipped_binary}");
             }
 
             if files_changed == 0 && total_files_scanned > 0 {
@@ -1209,8 +1193,22 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::run_git_command;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Initialize a git repo and commit all current files (fail-loud).
+    fn init_git_repo(repo_path: &Path) {
+        let init = run_git_command(&["init", "--quiet"], repo_path);
+        assert!(init.status.success(), "git init failed");
+        run_git_command(&["config", "user.email", "test@example.com"], repo_path);
+        run_git_command(&["config", "user.name", "Test User"], repo_path);
+        run_git_command(&["config", "commit.gpgsign", "false"], repo_path);
+        let add = run_git_command(&["add", "-A"], repo_path);
+        assert!(add.status.success(), "git add failed");
+        let commit = run_git_command(&["commit", "--quiet", "-m", "init"], repo_path);
+        assert!(commit.status.success(), "git commit failed");
+    }
 
     #[test]
     fn test_generate_change_id() {
@@ -1331,6 +1329,7 @@ mod tests {
         fs::write(repo_path.join("file1.txt"), "content1").unwrap();
         fs::write(repo_path.join("file2.txt"), "content2").unwrap();
         fs::write(repo_path.join("file3.md"), "markdown").unwrap();
+        init_git_repo(repo_path);
 
         let mut transaction = Transaction::new();
         let mut files_affected = Vec::new();
@@ -1364,6 +1363,7 @@ mod tests {
 
         // Create test file
         fs::write(repo_path.join("test.txt"), "Hello world\nHello again").unwrap();
+        init_git_repo(repo_path);
 
         let mut transaction = Transaction::new();
         let mut files_affected = Vec::new();

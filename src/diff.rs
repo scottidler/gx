@@ -6,12 +6,20 @@ use similar::{ChangeTag, TextDiff};
 /// Result of a substitution operation
 #[derive(Debug, Clone)]
 pub enum SubstitutionResult {
-    /// Content was changed (updated_content, diff)
-    Changed(String, String),
+    /// Content was changed. Carries the updated content, the rendered diff, and
+    /// the number of matches counted in the *original* content (see [A8]).
+    Changed {
+        content: String,
+        diff: String,
+        matches: usize,
+    },
     /// Pattern was valid but found no matches
     NoMatches,
-    /// Pattern found matches but replacement resulted in no changes
-    NoChange,
+    /// Pattern found matches but replacement resulted in no changes. Carries the
+    /// match count from the original content.
+    NoChange { matches: usize },
+    /// File was not valid UTF-8 (binary); skipped rather than corrupted (see [A21]).
+    SkippedBinary,
 }
 
 /// Generate a colored diff between original and updated content
@@ -73,12 +81,18 @@ pub fn apply_substitution(
     if !content.contains(pattern) {
         return SubstitutionResult::NoMatches;
     }
+    // Count matches against the *original* content (the fix for [A8]).
+    let matches = content.matches(pattern).count();
     let updated = content.replace(pattern, replacement);
     if updated == content {
-        return SubstitutionResult::NoChange;
+        return SubstitutionResult::NoChange { matches };
     }
     let diff = generate_diff(content, &updated, buffer);
-    SubstitutionResult::Changed(updated, diff)
+    SubstitutionResult::Changed {
+        content: updated,
+        diff,
+        matches,
+    }
 }
 
 /// Apply a regex substitution to content and return result
@@ -92,12 +106,18 @@ pub fn apply_regex_substitution(
     if !regex.is_match(content) {
         return Ok(SubstitutionResult::NoMatches);
     }
+    // Count matches against the *original* content (the fix for [A8]).
+    let matches = regex.find_iter(content).count();
     let updated = regex.replace_all(content, replacement).to_string();
     if updated == content {
-        return Ok(SubstitutionResult::NoChange);
+        return Ok(SubstitutionResult::NoChange { matches });
     }
     let diff = generate_diff(content, &updated, buffer);
-    Ok(SubstitutionResult::Changed(updated, diff))
+    Ok(SubstitutionResult::Changed {
+        content: updated,
+        diff,
+        matches,
+    })
 }
 
 #[cfg(test)]
@@ -161,10 +181,16 @@ mod tests {
 
         // Test successful substitution
         let result = apply_substitution(content, "Hello", "Hi", 1);
-        assert!(matches!(result, SubstitutionResult::Changed(_, _)));
-        if let SubstitutionResult::Changed(updated, diff) = result {
+        assert!(matches!(result, SubstitutionResult::Changed { .. }));
+        if let SubstitutionResult::Changed {
+            content: updated,
+            diff,
+            matches,
+        } = result
+        {
             assert_eq!(updated, "Hi world\nThis is a test\nHi again");
             assert!(!diff.is_empty());
+            assert_eq!(matches, 2);
         }
 
         // Test no match
@@ -185,10 +211,16 @@ mod tests {
             apply_regex_substitution(content, r"version \d+\.\d+\.\d+", "version X.X.X", 1);
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert!(matches!(result, SubstitutionResult::Changed(_, _)));
-        if let SubstitutionResult::Changed(updated, diff) = result {
+        assert!(matches!(result, SubstitutionResult::Changed { .. }));
+        if let SubstitutionResult::Changed {
+            content: updated,
+            diff,
+            matches,
+        } = result
+        {
             assert_eq!(updated, "version X.X.X\nother line\nversion X.X.X");
             assert!(!diff.is_empty());
+            assert_eq!(matches, 2);
         }
 
         // Test no match

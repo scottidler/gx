@@ -1,34 +1,189 @@
 use crate::diff;
+use crate::git;
 use eyre::{Context, Result};
 
-use log::debug;
+use log::{debug, trace, warn};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 
-/// Find files matching a glob pattern within a repository
-pub fn find_files_in_repo(repo_path: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    let search_pattern = repo_path.join(pattern).to_string_lossy().to_string();
-    let mut matches = Vec::new();
+/// The set of files gx is allowed to mutate in a repository.
+///
+/// Candidates come from git's index (`git ls-files --stage`), i.e. **tracked
+/// files only** (see design Q6). This makes `.git/` contents, gitignored files,
+/// untracked files, and submodule internals structurally unreachable. User
+/// glob patterns are matched against the returned *relative* paths, so glob
+/// metacharacters in the repo's absolute path can no longer corrupt matching
+/// ([A1], [A26]).
+pub struct FileSet;
 
-    debug!("Searching for files with pattern: {search_pattern}");
+impl FileSet {
+    /// Tracked, regular-file candidates (relative paths) for a repository.
+    ///
+    /// Submodule gitlinks (mode `160000`) and symlinks (mode `120000`) are
+    /// excluded: a symlink would let a substitution write through to a target
+    /// outside the worktree, and delete/restore semantics differ.
+    pub fn candidates(repo_path: &Path) -> Result<Vec<PathBuf>> {
+        debug!("FileSet::candidates: repo_path={}", repo_path.display());
+        let entries = git::list_index_files(repo_path)?;
+        let mut candidates = Vec::with_capacity(entries.len());
 
-    for entry in glob::glob(&search_pattern).context("Failed to create glob pattern")? {
-        match entry {
-            Ok(path) => {
-                if path.is_file() {
-                    if let Ok(relative_path) = path.strip_prefix(repo_path) {
-                        matches.push(relative_path.to_path_buf());
-                        debug!("Found matching file: {}", relative_path.display());
-                    }
-                }
+        for (mode, path) in entries {
+            if mode == "160000" || mode == "120000" {
+                trace!(
+                    "FileSet::candidates: skipping {} (mode {mode})",
+                    path.display()
+                );
+                continue;
             }
-            Err(e) => {
-                debug!("Error processing glob entry: {e}");
+            // Defense in depth: a tracked path must never contain a `.git`
+            // component. git would never list one, but assert it anyway ([A1]).
+            if path
+                .components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new(".git"))
+            {
+                warn!(
+                    "FileSet::candidates: refusing candidate with .git component: {}",
+                    path.display()
+                );
+                continue;
             }
+            candidates.push(path);
+        }
+
+        debug!("FileSet::candidates: {} candidates", candidates.len());
+        Ok(candidates)
+    }
+
+    /// Candidates matching any of the supplied glob patterns, deduplicated and
+    /// sorted. Patterns are matched against relative paths with
+    /// `require_literal_separator` so `*` does not cross directory boundaries
+    /// (`**` does), matching shell/gitignore expectations.
+    pub fn matching_any(repo_path: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+        debug!(
+            "FileSet::matching_any: repo_path={} patterns={:?}",
+            repo_path.display(),
+            patterns
+        );
+        let candidates = Self::candidates(repo_path)?;
+        let compiled = patterns
+            .iter()
+            .map(|p| glob::Pattern::new(p).with_context(|| format!("Invalid glob pattern: {p}")))
+            .collect::<Result<Vec<_>>>()?;
+
+        let opts = glob::MatchOptions {
+            require_literal_separator: true,
+            ..Default::default()
+        };
+
+        let mut matched: Vec<PathBuf> = candidates
+            .into_iter()
+            .filter(|path| compiled.iter().any(|pat| pat.matches_path_with(path, opts)))
+            .collect();
+        matched.sort();
+        matched.dedup();
+
+        debug!("FileSet::matching_any: {} matched", matched.len());
+        Ok(matched)
+    }
+}
+
+/// Atomically write bytes to `path`: write to a uniquely named temp file in the
+/// target's own directory, fsync, then rename over the target. A crash or torn
+/// write can never leave a truncated file in place ([A21]). The temp file lives
+/// in the same directory so the final rename stays on one filesystem.
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "Failed to create parent directories for: {}",
+            path.display()
+        )
+    })?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("Failed to create temp file in: {}", parent.display()))?;
+    tmp.write_all(content)
+        .with_context(|| format!("Failed to write temp file for: {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("Failed to fsync temp file for: {}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|e| eyre::eyre!("Failed to persist temp file to {}: {}", path.display(), e))?;
+
+    debug!(
+        "atomic_write: wrote {} bytes to {}",
+        content.len(),
+        path.display()
+    );
+    Ok(())
+}
+
+/// Validate a relative path for `gx add` and resolve it to an absolute path
+/// inside `repo_path`. This is the one write path that does not flow through
+/// [`FileSet`], so it enforces the same policy directly ([A32]): reject absolute
+/// paths, `..` components, and any `.git` component, and reject paths that would
+/// escape the worktree through a symlinked parent.
+pub fn validate_new_file_path(repo_path: &Path, file_path: &str) -> Result<PathBuf> {
+    debug!(
+        "validate_new_file_path: repo_path={} file_path={file_path}",
+        repo_path.display()
+    );
+
+    let rel = Path::new(file_path);
+    if rel.is_absolute() {
+        return Err(eyre::eyre!(
+            "File path must be relative, got absolute: {file_path}"
+        ));
+    }
+    for comp in rel.components() {
+        match comp {
+            Component::ParentDir => {
+                return Err(eyre::eyre!("File path must not contain '..': {file_path}"));
+            }
+            Component::Normal(s) if s == std::ffi::OsStr::new(".git") => {
+                return Err(eyre::eyre!("File path must not target .git: {file_path}"));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(eyre::eyre!("File path must be relative: {file_path}"));
+            }
+            _ => {}
         }
     }
 
-    Ok(matches)
+    let full = repo_path.join(rel);
+    let repo_canon = repo_path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize repo path: {}", repo_path.display()))?;
+
+    // Walk up to the deepest *existing* ancestor and canonicalize it; if it
+    // resolves outside the repo, a symlinked parent is escaping the worktree.
+    let mut ancestor = full.as_path();
+    let existing = loop {
+        if ancestor.exists() {
+            break Some(ancestor);
+        }
+        match ancestor.parent() {
+            Some(parent) => ancestor = parent,
+            None => break None,
+        }
+    };
+    if let Some(existing) = existing {
+        let existing_canon = existing
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize: {}", existing.display()))?;
+        if !existing_canon.starts_with(&repo_canon) {
+            return Err(eyre::eyre!(
+                "File path escapes repository via symlink: {file_path}"
+            ));
+        }
+    }
+
+    Ok(full)
 }
 
 /// Apply a string substitution to a file
@@ -38,8 +193,9 @@ pub fn apply_substitution_to_file(
     replacement: &str,
     buffer: usize,
 ) -> Result<crate::diff::SubstitutionResult> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let Some(content) = read_utf8_or_skip(file_path)? else {
+        return Ok(diff::SubstitutionResult::SkippedBinary);
+    };
 
     Ok(diff::apply_substitution(
         &content,
@@ -56,26 +212,31 @@ pub fn apply_regex_to_file(
     replacement: &str,
     buffer: usize,
 ) -> Result<crate::diff::SubstitutionResult> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    let Some(content) = read_utf8_or_skip(file_path)? else {
+        return Ok(diff::SubstitutionResult::SkippedBinary);
+    };
 
     diff::apply_regex_substitution(&content, pattern, replacement, buffer)
 }
 
-/// Write content to a file, creating parent directories if needed
-pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create parent directories for: {}",
-                file_path.display()
-            )
-        })?;
+/// Read a file as UTF-8, returning `Ok(None)` (with a `warn!`) when the file is
+/// not valid UTF-8 so callers can skip binary files instead of corrupting them
+/// or aborting the whole repository ([A21]).
+pub fn read_utf8_or_skip(file_path: &Path) -> Result<Option<String>> {
+    let bytes = fs::read(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(Some(content)),
+        Err(_) => {
+            warn!("Skipping non-UTF-8 (binary) file: {}", file_path.display());
+            Ok(None)
+        }
     }
+}
 
-    fs::write(file_path, content)
-        .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
-
+/// Write content to a file atomically, creating parent directories if needed.
+pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
+    atomic_write(file_path, content.as_bytes())?;
     debug!("Wrote content to file: {}", file_path.display());
     Ok(())
 }
@@ -193,229 +354,4 @@ pub fn find_backup_files_recursive(repo_path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_find_files_in_repo() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo_path = temp_dir.path();
-
-        // Create test files
-        fs::write(repo_path.join("file1.txt"), "content1").unwrap();
-        fs::write(repo_path.join("file2.txt"), "content2").unwrap();
-        fs::write(repo_path.join("file3.md"), "markdown").unwrap();
-        fs::create_dir_all(repo_path.join("subdir")).unwrap();
-        fs::write(repo_path.join("subdir").join("file4.txt"), "content4").unwrap();
-
-        let result = find_files_in_repo(repo_path, "*.txt");
-        assert!(result.is_ok());
-
-        let files = result.unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files.iter().any(|f| f.to_string_lossy() == "file1.txt"));
-        assert!(files.iter().any(|f| f.to_string_lossy() == "file2.txt"));
-    }
-
-    #[test]
-    fn test_cleanup_backup_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
-        let backup_path = temp_dir.path().join("test.txt.backup");
-
-        // Create original file and backup
-        fs::write(&file_path, "original content").unwrap();
-        fs::write(&backup_path, "backup content").unwrap();
-
-        assert!(backup_path.exists());
-
-        // Test cleanup
-        let result = cleanup_backup_file(&backup_path);
-        assert!(result.is_ok());
-        assert!(!backup_path.exists()); // Backup should be removed
-        assert!(file_path.exists()); // Original should remain
-    }
-
-    #[test]
-    fn test_cleanup_backup_file_nonexistent() {
-        let temp_dir = TempDir::new().unwrap();
-        let backup_path = temp_dir.path().join("nonexistent.backup");
-
-        // Test cleanup of non-existent file (should not error)
-        let result = cleanup_backup_file(&backup_path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_find_backup_files_recursive() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo_path = temp_dir.path();
-
-        // Create nested structure with backup files
-        fs::create_dir_all(repo_path.join("src").join("utils")).unwrap();
-        fs::write(repo_path.join("file1.txt.backup"), "backup1").unwrap();
-        fs::write(repo_path.join("src").join("file2.rs.backup"), "backup2").unwrap();
-        fs::write(
-            repo_path.join("src").join("utils").join("file3.ts.backup"),
-            "backup3",
-        )
-        .unwrap();
-
-        // Create .git directory with backup files (should be ignored)
-        fs::create_dir_all(repo_path.join(".git")).unwrap();
-        fs::write(repo_path.join(".git").join("config.backup"), "git backup").unwrap();
-
-        let backup_files = find_backup_files_recursive(repo_path).unwrap();
-        assert_eq!(backup_files.len(), 3); // Should not include .git/config.backup
-
-        let backup_names: Vec<_> = backup_files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap())
-            .collect();
-        assert!(backup_names.contains(&"file1.txt.backup"));
-        assert!(backup_names.contains(&"file2.rs.backup"));
-        assert!(backup_names.contains(&"file3.ts.backup"));
-        assert!(!backup_names.contains(&"config.backup"));
-    }
-
-    #[test]
-    fn test_find_files_in_repo_recursive() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo_path = temp_dir.path();
-
-        // Create nested structure
-        fs::create_dir_all(repo_path.join("src").join("utils")).unwrap();
-        fs::write(repo_path.join("src").join("main.rs"), "fn main() {}").unwrap();
-        fs::write(
-            repo_path.join("src").join("utils").join("helper.rs"),
-            "// helper",
-        )
-        .unwrap();
-
-        let result = find_files_in_repo(repo_path, "**/*.rs");
-        assert!(result.is_ok());
-
-        let files = result.unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files
-            .iter()
-            .any(|f| f.to_string_lossy().contains("main.rs")));
-        assert!(files
-            .iter()
-            .any(|f| f.to_string_lossy().contains("helper.rs")));
-    }
-
-    #[test]
-    fn test_apply_substitution_to_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "Hello world\nThis is a test\nHello again").unwrap();
-
-        let result = apply_substitution_to_file(&file_path, "Hello", "Hi", 1);
-        assert!(result.is_ok());
-
-        let result = result.unwrap();
-        assert!(matches!(
-            result,
-            crate::diff::SubstitutionResult::Changed(_, _)
-        ));
-
-        if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
-            assert_eq!(updated, "Hi world\nThis is a test\nHi again");
-            assert!(!diff.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_apply_regex_to_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "version 1.2.3\nother line\nversion 4.5.6").unwrap();
-
-        let result = apply_regex_to_file(&file_path, r"version \d+\.\d+\.\d+", "version X.X.X", 1);
-        assert!(result.is_ok());
-
-        let result = result.unwrap();
-        assert!(matches!(
-            result,
-            crate::diff::SubstitutionResult::Changed(_, _)
-        ));
-
-        if let crate::diff::SubstitutionResult::Changed(updated, diff) = result {
-            assert_eq!(updated, "version X.X.X\nother line\nversion X.X.X");
-            assert!(!diff.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_create_file_with_content() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("new_file.txt");
-
-        let result = create_file_with_content(&file_path, "Hello world", 1);
-        assert!(result.is_ok());
-
-        let (content, diff) = result.unwrap();
-        assert_eq!(content, "Hello world\n");
-        assert!(!diff.is_empty());
-        assert!(file_path.exists());
-
-        let file_content = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(file_content, "Hello world\n");
-    }
-
-    #[test]
-    fn test_delete_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("to_delete.txt");
-        fs::write(&file_path, "content").unwrap();
-
-        assert!(file_path.exists());
-
-        let result = delete_file(&file_path);
-        assert!(result.is_ok());
-        assert!(!file_path.exists());
-    }
-
-    #[test]
-    fn test_write_file_content_with_nested_dirs() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("nested").join("dir").join("file.txt");
-
-        let result = write_file_content(&file_path, "nested content");
-        assert!(result.is_ok());
-        assert!(file_path.exists());
-
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "nested content");
-    }
-
-    #[test]
-    fn test_backup_and_restore() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("original.txt");
-        let original_content = "original content";
-        fs::write(&file_path, original_content).unwrap();
-
-        // Create backup
-        let result = backup_file(&file_path);
-        assert!(result.is_ok());
-        let backup_path = result.unwrap();
-        assert!(backup_path.exists());
-
-        // Modify original
-        fs::write(&file_path, "modified content").unwrap();
-        let modified_content = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(modified_content, "modified content");
-
-        // Restore from backup
-        let result = restore_from_backup(&backup_path, &file_path);
-        assert!(result.is_ok());
-        assert!(!backup_path.exists()); // Backup should be cleaned up
-
-        let restored_content = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(restored_content, original_content);
-    }
-}
+mod tests;
