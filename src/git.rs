@@ -193,11 +193,51 @@ fn get_detached_head_info(repo: &Repo) -> Option<String> {
     }
 }
 
-/// Get status changes by parsing git status --porcelain output
-fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
+/// Parse `git status --porcelain=v1` output text into change counts.
+///
+/// The single counting rule used everywhere ([A20]). Porcelain v1 lines are
+/// `XY <path>` where `X` is the index (staged) status and `Y` the worktree
+/// status:
+/// - `??` -> untracked
+/// - index `A` -> added; index `M`/`D`/`C` -> staged; index `R` -> renamed
+/// - worktree `M` -> modified; worktree `D` -> deleted
+pub fn parse_porcelain_status(text: &str) -> StatusChanges {
+    let mut changes = StatusChanges::default();
+
+    for line in text.lines() {
+        if line.len() < 2 {
+            continue;
+        }
+        let mut chars = line.chars();
+        let index_status = chars.next().unwrap_or(' ');
+        let worktree_status = chars.next().unwrap_or(' ');
+
+        if index_status == '?' && worktree_status == '?' {
+            changes.untracked += 1;
+            continue;
+        }
+
+        match index_status {
+            'A' => changes.added += 1,
+            'M' | 'D' | 'C' => changes.staged += 1,
+            'R' => changes.renamed += 1,
+            _ => {}
+        }
+        match worktree_status {
+            'M' => changes.modified += 1,
+            'D' => changes.deleted += 1,
+            _ => {}
+        }
+    }
+
+    changes
+}
+
+/// Run `git status --porcelain=v1` in `repo_path` and return the output text.
+fn run_status_porcelain(repo_path: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(&repo.path)
+        .arg(repo_path)
         .arg("status")
         .arg("--porcelain=v1")
         .output()
@@ -208,44 +248,14 @@ fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
         return Err(eyre::eyre!("git status failed: {}", stderr));
     }
 
-    let status_output =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in git status output")?;
+    // We only parse the leading `XY` status columns, never the path, so a lossy
+    // conversion is safe and avoids aborting on a non-UTF-8 filename ([A21]).
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
 
-    let mut changes = StatusChanges::default();
-
-    for line in status_output.lines() {
-        if line.len() < 2 {
-            continue;
-        }
-
-        let index_status = line.chars().next().unwrap_or(' ');
-        let worktree_status = line.chars().nth(1).unwrap_or(' ');
-
-        // Parse index (staged) changes
-        match index_status {
-            'A' => changes.staged += 1,
-            'M' => changes.staged += 1,
-            'D' => changes.staged += 1,
-            'R' => changes.renamed += 1,
-            'C' => changes.staged += 1, // Copied
-            _ => {}
-        }
-
-        // Parse worktree (unstaged) changes
-        match worktree_status {
-            'M' => changes.modified += 1,
-            'D' => changes.deleted += 1,
-            '?' => changes.untracked += 1,
-            _ => {}
-        }
-
-        // Handle special cases
-        if index_status == 'A' && worktree_status == ' ' {
-            changes.added += 1;
-            changes.staged -= 1; // Don't double count
-        }
-    }
-
+/// Get status changes by parsing git status --porcelain output
+fn get_status_changes(repo: &Repo) -> Result<StatusChanges> {
+    let changes = parse_porcelain_status(&run_status_porcelain(&repo.path)?);
     debug!("Status for {}: {:?}", repo.name, changes);
     Ok(changes)
 }
@@ -925,52 +935,7 @@ fn is_same_repo(remote_url: &str, expected_slug: &str) -> bool {
 
 /// Get status changes for a repository path (helper function for clone)
 fn get_status_changes_for_path(repo_path: &std::path::Path) -> Result<StatusChanges> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "status",
-            "--porcelain=v1",
-        ])
-        .output()
-        .context("Failed to run git status")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("git status failed: {}", stderr));
-    }
-
-    let status_output =
-        String::from_utf8(output.stdout).context("Invalid UTF-8 in git status output")?;
-
-    let mut changes = StatusChanges::default();
-
-    for line in status_output.lines() {
-        if line.len() < 2 {
-            continue;
-        }
-
-        let status_chars: Vec<char> = line.chars().take(2).collect();
-        let index_status = status_chars[0];
-        let worktree_status = status_chars[1];
-
-        // Count different types of changes
-        match (index_status, worktree_status) {
-            ('A', _) => changes.added += 1,
-            ('M', _) | (_, 'M') => changes.modified += 1,
-            ('D', _) | (_, 'D') => changes.deleted += 1,
-            ('R', _) => changes.renamed += 1,
-            ('?', '?') => changes.untracked += 1,
-            _ => {}
-        }
-
-        // Count staged changes
-        if index_status != ' ' && index_status != '?' {
-            changes.staged += 1;
-        }
-    }
-
-    Ok(changes)
+    Ok(parse_porcelain_status(&run_status_porcelain(repo_path)?))
 }
 
 // Enhanced git operations for create/review functionality
@@ -1083,10 +1048,13 @@ pub fn add_files(repo_path: &std::path::Path, files: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    // Use literal pathspecs (`:(literal)<path>`) so a tracked filename
+    // containing glob metacharacters cannot be re-expanded by git ([A26]).
     let repo_path_str = repo_path.to_string_lossy().to_string();
+    let literal_specs: Vec<String> = files.iter().map(|f| format!(":(literal){f}")).collect();
     let mut args: Vec<&str> = vec!["-C", &repo_path_str, "add", "-A", "--"];
-    for file in files {
-        args.push(file.as_str());
+    for spec in &literal_specs {
+        args.push(spec.as_str());
     }
 
     let output = Command::new("git")
@@ -1381,32 +1349,27 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
     }
 }
 
-/// Pull latest changes from the remote repository
+/// Pull latest changes from the remote repository, fast-forward only.
+///
+/// A non-fast-forward result is a per-repo error rather than a surprise merge
+/// commit ([A14]). The dead `Already up to date` stderr sniff is gone - that
+/// message goes to stdout on a zero exit ([A28]).
 pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
     let output = Command::new("git")
         .current_dir(repo_path)
-        .args(["pull"])
+        .args(["pull", "--ff-only"])
         .output()
-        .map_err(|e| eyre::eyre!("Failed to run git pull: {}", e))?;
+        .map_err(|e| eyre::eyre!("Failed to run git pull --ff-only: {}", e))?;
 
     if output.status.success() {
-        debug!(
-            "Successfully pulled latest changes in '{}'",
-            repo_path.display()
-        );
+        debug!("Successfully pulled (ff-only) in '{}'", repo_path.display());
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Don't fail if there's nothing to pull
-        if stderr.contains("Already up to date") || stderr.contains("Already up-to-date") {
-            debug!(
-                "Repository is already up to date: '{}'",
-                repo_path.display()
-            );
-            Ok(())
-        } else {
-            Err(eyre::eyre!("Failed to pull latest changes: {}", stderr))
-        }
+        Err(eyre::eyre!(
+            "Failed to fast-forward pull (run `git pull` manually to resolve): {}",
+            stderr
+        ))
     }
 }
 
@@ -1683,23 +1646,59 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_porcelain_output() {
-        // This would require mocking git commands or using a real git repo
-        // We'd need to refactor get_status_changes to accept string input for testing
-        // This is a placeholder for the actual test implementation
+    fn test_parse_porcelain_status_table() {
+        // (input, [modified, added, deleted, renamed, untracked, staged])
+        let cases: &[(&str, [u32; 6])] = &[
+            ("", [0, 0, 0, 0, 0, 0]),
+            ("?? new.txt", [0, 0, 0, 0, 1, 0]),
+            (" M mod.txt", [1, 0, 0, 0, 0, 0]),
+            ("M  staged.txt", [0, 0, 0, 0, 0, 1]),
+            ("A  added.txt", [0, 1, 0, 0, 0, 0]),
+            (" D del.txt", [0, 0, 1, 0, 0, 0]),
+            ("R  old.txt -> new.txt", [0, 0, 0, 1, 0, 0]),
+            ("MM both.txt", [1, 0, 0, 0, 0, 1]),
+            ("?? a\n M b\nA  c\n D d", [1, 1, 1, 0, 1, 0]),
+        ];
+        for (input, expected) in cases {
+            let c = parse_porcelain_status(input);
+            assert_eq!(
+                [
+                    c.modified,
+                    c.added,
+                    c.deleted,
+                    c.renamed,
+                    c.untracked,
+                    c.staged
+                ],
+                *expected,
+                "input: {input:?}"
+            );
+        }
+    }
 
-        // For now, just test that StatusChanges works correctly
-        let changes = StatusChanges {
-            modified: 1,
-            untracked: 1,
-            added: 1,
-            ..Default::default()
-        };
+    #[test]
+    fn test_add_files_literal_pathspec() {
+        use crate::test_utils::run_git_command;
+        let temp = tempfile::TempDir::new().unwrap();
+        let p = temp.path();
+        run_git_command(&["init", "--quiet"], p);
+        run_git_command(&["config", "user.email", "t@e.com"], p);
+        run_git_command(&["config", "user.name", "T"], p);
+        run_git_command(&["config", "commit.gpgsign", "false"], p);
 
-        assert!(!changes.is_empty());
-        assert_eq!(changes.modified, 1);
-        assert_eq!(changes.untracked, 1);
-        assert_eq!(changes.added, 1);
+        // A tracked file whose name contains glob metacharacters.
+        std::fs::write(p.join("f[1].txt"), "orig").unwrap();
+        run_git_command(&["add", "-A"], p);
+        run_git_command(&["commit", "--quiet", "-m", "init"], p);
+        std::fs::write(p.join("f[1].txt"), "changed").unwrap();
+
+        // Literal pathspec stages the file whose name IS `f[1].txt` (a glob
+        // pathspec would instead try to match `f1.txt` and stage nothing).
+        add_files(p, &["f[1].txt".to_string()]).unwrap();
+
+        let staged = run_git_command(&["diff", "--cached", "--name-only"], p);
+        let names = String::from_utf8_lossy(&staged.stdout);
+        assert!(names.contains("f[1].txt"), "staged: {names:?}");
     }
 
     // Rollback tests - these would need a real git repository to test properly
