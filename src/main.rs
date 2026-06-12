@@ -30,7 +30,7 @@ mod utils;
 pub mod test_utils;
 
 use cli::{Cli, Commands};
-use config::Config;
+use config::{xdg_data_dir, Config};
 
 fn setup_logging() -> Result<()> {
     // During tests, use a temp directory to avoid polluting production logs
@@ -40,7 +40,7 @@ fn setup_logging() -> Result<()> {
         temp_dir.join(format!("gx-test-{}.log", std::process::id()))
     } else {
         // Production logging location
-        let log_dir = dirs::data_local_dir()
+        let log_dir = xdg_data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("gx")
             .join("logs");
