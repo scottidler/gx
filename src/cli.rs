@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::LazyLock;
 
 /// Pull request type
@@ -12,6 +11,31 @@ pub enum PR {
     /// Create a draft pull request
     #[value(name = "draft")]
     Draft,
+}
+
+/// Log verbosity, mirroring `log::LevelFilter`. Case-insensitive on the CLI.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub fn to_filter(self) -> log::LevelFilter {
+        match self {
+            LogLevel::Off => log::LevelFilter::Off,
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }
 
 /// Validate a `--change-id`: it must start with `GX-` so the review tooling can
@@ -26,7 +50,6 @@ fn validate_change_id(value: &str) -> Result<String, String> {
     }
 }
 
-static HELP_TEXT: LazyLock<String> = LazyLock::new(get_tool_validation_help);
 static JOBS_HELP: LazyLock<String> = LazyLock::new(|| {
     format!(
         "Number of parallel operations [default: {}]",
@@ -58,13 +81,23 @@ fn get_effective_max_depth_default() -> usize {
 #[command(
     name = "gx",
     about = "git operations across multiple repositories",
-    version = env!("GIT_DESCRIBE"),
-    after_help = HELP_TEXT.as_str()
+    version = env!("GIT_DESCRIBE")
 )]
 pub struct Cli {
     /// Working directory (only changes from current directory if specified)
     #[arg(long, help = "Working directory for operations")]
     pub cwd: Option<PathBuf>,
+
+    /// Log verbosity (replaces RUST_LOG)
+    #[arg(
+        short = 'l',
+        long = "log-level",
+        value_enum,
+        ignore_case = true,
+        default_value = "info",
+        help = "Log verbosity: off|error|warn|info|debug|trace"
+    )]
+    pub log_level: LogLevel,
 
     /// Path to config file
     #[arg(short, long, help = "Path to config file")]
@@ -385,6 +418,19 @@ EXAMPLES:
         #[arg(long)]
         force: bool,
     },
+
+    /// Check required tools and report orphaned gx artifacts
+    #[command(after_help = "EXAMPLES:
+  gx doctor            # Check git/gh versions and list orphaned artifacts
+  gx doctor --purge    # Also remove orphaned recovery/backup artifacts (via rkvr)")]
+    Doctor {
+        /// Remove orphaned recovery/backup artifacts (via rkvr, not rm)
+        #[arg(
+            long,
+            help = "Remove orphaned recovery/backup artifacts via rkvr"
+        )]
+        purge: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -483,108 +529,6 @@ pub enum CreateAction {
         #[arg(help = "Replacement text")]
         replacement: String,
     },
-}
-
-/// Generate tool validation help text
-fn get_tool_validation_help() -> String {
-    let mut help = String::new();
-
-    // Check git version
-    let git_status = check_tool_version("git", "--version", "2.20.0");
-    help.push_str("REQUIRED TOOLS:\n");
-    help.push_str(&format!(
-        "  {} {:<3} {:>12}\n",
-        git_status.status_icon, "git", git_status.version
-    ));
-
-    // Check gh version
-    let gh_status = check_tool_version("gh", "--version", "2.0.0");
-    help.push_str(&format!(
-        "  {} {:<3} {:>12}\n",
-        gh_status.status_icon, "gh", gh_status.version
-    ));
-
-    help.push_str("\nLogs are written to: ~/.local/share/gx/logs/gx.log");
-    help
-}
-
-#[derive(Debug)]
-struct ToolStatus {
-    version: String,
-    status_icon: String,
-}
-
-/// Check if a tool is installed and meets minimum version requirements
-fn check_tool_version(tool: &str, version_arg: &str, min_version: &str) -> ToolStatus {
-    match Command::new(tool).arg(version_arg).output() {
-        Ok(output) if output.status.success() => {
-            let version_output = String::from_utf8_lossy(&output.stdout);
-            let version = extract_version_from_output(tool, &version_output);
-
-            let meets_requirement = if let Some(stripped) = version.strip_prefix("v") {
-                version_compare(stripped, min_version)
-            } else {
-                version_compare(&version, min_version)
-            };
-
-            ToolStatus {
-                version: if version.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    version
-                },
-                status_icon: if meets_requirement { "✅" } else { "⚠️" }.to_string(),
-            }
-        }
-        _ => ToolStatus {
-            version: "not found".to_string(),
-            status_icon: "❌".to_string(),
-        },
-    }
-}
-
-/// Extract version number from tool output
-fn extract_version_from_output(tool: &str, output: &str) -> String {
-    match tool {
-        "git" => {
-            // git version 2.34.1
-            if let Some(line) = output.lines().next() {
-                if let Some(version_part) = line.split_whitespace().nth(2) {
-                    return version_part.to_string();
-                }
-            }
-        }
-        "gh" => {
-            // gh version 2.40.1 (2023-12-13)
-            if let Some(line) = output.lines().next() {
-                if let Some(version_part) = line.split_whitespace().nth(2) {
-                    return version_part.to_string();
-                }
-            }
-        }
-        _ => {}
-    }
-    "unknown".to_string()
-}
-
-/// Simple version comparison (assumes semantic versioning)
-fn version_compare(version: &str, min_version: &str) -> bool {
-    let parse_version =
-        |v: &str| -> Vec<u32> { v.split('.').map(|part| part.parse().unwrap_or(0)).collect() };
-
-    let v1 = parse_version(version);
-    let v2 = parse_version(min_version);
-
-    for (a, b) in v1.iter().zip(v2.iter()) {
-        if a > b {
-            return true;
-        }
-        if a < b {
-            return false;
-        }
-    }
-
-    v1.len() >= v2.len()
 }
 
 #[cfg(test)]

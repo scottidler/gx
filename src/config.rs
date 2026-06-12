@@ -232,7 +232,9 @@ impl Config {
                 .context(format!("Failed to load config from {}", path.display()));
         }
 
-        // Try primary location: ~/.config/<project>/<project>.yml
+        // Primary (and only) location: $XDG_CONFIG_HOME/<project>/<project>.yml.
+        // There is deliberately NO `./<project>.yml` CWD fallback - any directory
+        // could otherwise reconfigure the tool (e.g. redirect token-path) ([A23]).
         if let Some(config_dir) = xdg_config_dir() {
             let project_name = env!("CARGO_PKG_NAME");
             let primary_config = config_dir
@@ -252,22 +254,6 @@ impl Config {
             }
         }
 
-        // Try fallback location: ./<project>.yml
-        let project_name = env!("CARGO_PKG_NAME");
-        let fallback_config = PathBuf::from(format!("{project_name}.yml"));
-        if fallback_config.exists() {
-            match Self::load_from_file(&fallback_config) {
-                Ok(config) => return Ok(config),
-                Err(e) => {
-                    log::warn!(
-                        "Failed to load config from {}: {}",
-                        fallback_config.display(),
-                        e
-                    );
-                }
-            }
-        }
-
         // No config file found, use defaults
         log::info!("No config file found, using defaults");
         Ok(Self::default())
@@ -282,3 +268,6 @@ impl Config {
         Ok(config)
     }
 }
+
+#[cfg(test)]
+mod tests;

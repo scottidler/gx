@@ -7,6 +7,7 @@ pub mod clone;
 pub mod config;
 pub mod create;
 pub mod diff;
+pub mod doctor;
 pub mod file;
 pub mod git;
 pub mod github;

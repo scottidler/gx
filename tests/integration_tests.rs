@@ -17,14 +17,23 @@ fn test_main_help_output() {
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("--jobs"));
     assert!(stdout.contains("--depth"));
+    assert!(stdout.contains("--log-level"));
 
-    // Should show tool validation
+    // Tool validation moved to `gx doctor` (no subprocess spawns during --help).
+    assert!(stdout.contains("doctor"));
+
+    // Should show log location (rendered at runtime).
+    assert!(stdout.contains("Logs are written to:"));
+}
+
+#[test]
+fn test_doctor_reports_required_tools() {
+    let output = run_gx_command(&["doctor"], std::env::current_dir().unwrap().as_path());
+    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("REQUIRED TOOLS:"));
     assert!(stdout.contains("git"));
     assert!(stdout.contains("gh"));
-
-    // Should show log location
-    assert!(stdout.contains("Logs are written to:"));
+    assert!(stdout.contains("ORPHANED ARTIFACTS:"));
 }
 
 #[test]

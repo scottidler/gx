@@ -1,4 +1,3 @@
-use clap::Parser;
 use eyre::{Context, Result};
 use log::info;
 use std::env;
@@ -12,6 +11,7 @@ mod clone;
 mod config;
 mod create;
 mod diff;
+mod doctor;
 mod file;
 mod git;
 mod github;
@@ -33,7 +33,7 @@ pub mod test_utils;
 use cli::{Cli, Commands};
 use config::{xdg_data_dir, Config};
 
-fn setup_logging() -> Result<()> {
+fn setup_logging(level: cli::LogLevel) -> Result<()> {
     // During tests, use a temp directory to avoid polluting production logs
     let log_file = if cfg!(test) {
         // Create a temp file for test logging
@@ -51,7 +51,8 @@ fn setup_logging() -> Result<()> {
         log_dir.join("gx.log")
     };
 
-    // Setup env_logger with file output
+    // Setup env_logger with file output. The level comes from --log-level only;
+    // RUST_LOG is no longer consulted ([A24]).
     let target = Box::new(
         fs::OpenOptions::new()
             .create(true)
@@ -60,7 +61,8 @@ fn setup_logging() -> Result<()> {
             .context("Failed to open log file")?,
     );
 
-    env_logger::Builder::from_default_env()
+    env_logger::Builder::new()
+        .filter_level(level.to_filter())
         .target(env_logger::Target::Pipe(target))
         .init();
 
@@ -204,15 +206,24 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             *include_remote,
             *force,
         ),
+        Commands::Doctor { purge } => doctor::run_doctor(*purge),
     }
 }
 
 fn main() -> Result<()> {
-    // Setup logging first
-    setup_logging().context("Failed to setup logging")?;
+    use clap::{CommandFactory, FromArgMatches};
 
-    // Parse CLI arguments
-    let cli = Cli::parse();
+    // Render the log path at runtime from the same XDG source the logger uses,
+    // so --help never drifts and we don't spawn subprocesses during parsing ([A24]).
+    let after_help = format!(
+        "Logs are written to: {}\nRun `gx doctor` to check required tools.",
+        doctor::log_path().display()
+    );
+    let matches = Cli::command().after_help(after_help).get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
+
+    // Set up logging from the parsed --log-level.
+    setup_logging(cli.log_level).context("Failed to setup logging")?;
 
     // ONLY change directory if user explicitly provided --cwd
     if let Some(cwd) = &cli.cwd {
