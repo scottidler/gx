@@ -1,5 +1,6 @@
 //! gx library crate for testing support
 
+pub mod bare;
 pub mod checkout;
 pub mod cleanup;
 pub mod cli;

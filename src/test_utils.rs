@@ -129,6 +129,70 @@ pub fn create_minimal_test_repo(base_path: &Path, repo_name: &str) -> PathBuf {
     repo_path
 }
 
+/// Create a bare-container layout under `base_path`: a `.bare/` shared db, a
+/// `.git` pointer file (`gitdir: ./.bare`), and a default `main` worktree, with
+/// origin set to `remote_slug`. Returns the container directory path.
+///
+/// The transient source repo the bare clone is seeded from lives in its own
+/// TempDir (dropped on return), so it never pollutes a discovery scan of
+/// `base_path`.
+pub fn create_bare_container(base_path: &Path, repo_name: &str, remote_slug: &str) -> PathBuf {
+    // 1. A throwaway source repo with a single commit on `main`.
+    let source_tmp = TempDir::new().expect("Failed to create source temp dir");
+    let source = source_tmp.path().join("source");
+    fs::create_dir_all(&source).expect("Failed to create source dir");
+    run_git_command(&["init", "--quiet", "-b", "main"], &source);
+    run_git_command(&["config", "user.email", "test@example.com"], &source);
+    run_git_command(&["config", "user.name", "Test User"], &source);
+    run_git_command(&["config", "commit.gpgsign", "false"], &source);
+    fs::write(source.join("README.md"), format!("# {repo_name}")).expect("Failed to write README");
+    run_git_command(&["add", "README.md"], &source);
+    run_git_command(&["commit", "--quiet", "-m", "Initial commit"], &source);
+
+    // 2. Container directory holding a bare clone at `.bare` plus the pointer.
+    let container = base_path.join(repo_name);
+    fs::create_dir_all(&container).expect("Failed to create container dir");
+    let bare = container.join(".bare");
+    run_git_command(
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            source.to_str().expect("source path is valid utf-8"),
+            bare.to_str().expect("bare path is valid utf-8"),
+        ],
+        base_path,
+    );
+    fs::write(container.join(".git"), "gitdir: ./.bare\n").expect("Failed to write .git pointer");
+
+    // 3. Point origin at the intended slug and materialize the default worktree.
+    let container_str = container.to_str().expect("container path is valid utf-8");
+    run_git_command(
+        &[
+            "-C",
+            container_str,
+            "config",
+            "remote.origin.url",
+            &format!("git@github.com:{remote_slug}.git"),
+        ],
+        base_path,
+    );
+    run_git_command(
+        &[
+            "-C",
+            container_str,
+            "worktree",
+            "add",
+            "--quiet",
+            "main",
+            "main",
+        ],
+        base_path,
+    );
+
+    container
+}
+
 /// Create a comprehensive test workspace with 5 diverse repositories for multi-repo testing
 pub fn create_comprehensive_test_workspace() -> TempDir {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");

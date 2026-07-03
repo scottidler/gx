@@ -4,6 +4,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+mod bare;
 mod checkout;
 mod cleanup;
 mod cli;

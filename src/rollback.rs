@@ -18,7 +18,9 @@ fn validate_recovery_state(state: &RecoveryState) -> (Vec<String>, Vec<String>) 
             "Repository path no longer exists: {}",
             repo.display()
         ));
-    } else if !repo.join(".git").exists() {
+    } else if !crate::bare::is_git_path(repo) {
+        // Layout-aware: a flat repo (`.git` dir), a linked worktree (`.git`
+        // pointer file), or a bare container all count as a git repository.
         errors.push(format!("Not a git repository: {}", repo.display()));
     }
 

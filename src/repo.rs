@@ -18,34 +18,32 @@ impl Repo {
             .unwrap_or("unknown")
             .to_string();
 
-        // Extract git config information to determine slug
-        // If we can't determine the user/org, fall back to a reasonable default
-        let slug = match extract_origin_url(&path).and_then(|url| extract_user_from_remote(&url)) {
-            Ok(user) => format!("{user}/{name}"),
-            Err(_) => {
-                // Fallback: try to infer from parent directory structure
-                // If repo is at /path/to/user/repo, use user/repo
-                // Otherwise use unknown/repo
-                if let Some(parent) = path.parent() {
-                    if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
-                        // Skip common directory names that aren't user/org names
-                        if !["repos", "src", "code", "projects", "workspace", "git"]
-                            .contains(&parent_name)
-                        {
-                            format!("{parent_name}/{name}")
-                        } else {
-                            format!("unknown/{name}")
-                        }
-                    } else {
-                        format!("unknown/{name}")
-                    }
-                } else {
-                    format!("unknown/{name}")
-                }
-            }
-        };
-
+        // A flat repo probes origin at its own root and infers a fallback slug
+        // from its own parent directory.
+        let slug = resolve_slug(&name, &path, path.parent());
         Ok(Self { path, name, slug })
+    }
+
+    /// Construct a `Repo` for a bare container. The logical name is the
+    /// *container* directory's name, but git operations run in the container's
+    /// default `worktree` (which becomes `self.path`), because the container
+    /// root is not a work tree. A bare container is ONE logical repo.
+    pub fn from_container(container: &Path, worktree: PathBuf) -> Result<Self> {
+        let name = container
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Probe origin inside the worktree (the container root has no work
+        // tree); infer the fallback slug from the *container's* parent, so a
+        // container behaves like a flat repo of the same name.
+        let slug = resolve_slug(&name, &worktree, container.parent());
+        Ok(Self {
+            path: worktree,
+            name,
+            slug,
+        })
     }
 
     /// Create a fake repo from slug for filtering purposes (used in clone command)
@@ -86,7 +84,9 @@ pub fn discover_repos(
     for entry in WalkDir::new(&search_root)
         .max_depth(max_depth)
         .into_iter()
-        .filter_entry(|e| !is_ignored_directory(e.path(), ignore_patterns))
+        .filter_entry(|e| {
+            !is_ignored_directory(e.path(), ignore_patterns) && !is_inside_bare_container(e.path())
+        })
         .filter_map(|e| match e {
             Ok(entry) => Some(entry),
             Err(err) => {
@@ -97,6 +97,32 @@ pub fn discover_repos(
         })
     {
         let path = entry.path();
+
+        // A bare container is ONE logical repo: emit its default worktree and
+        // do NOT descend into its internals (its worktrees/.bare are pruned by
+        // `is_inside_bare_container` above, so they are never separate repos).
+        if entry.file_type().is_dir() && crate::bare::is_bare_container(path) {
+            if is_ignored_directory(path, ignore_patterns) {
+                debug!("Skipping ignored bare container: {}", path.display());
+                continue;
+            }
+            match crate::bare::default_worktree(path)
+                .and_then(|worktree| Repo::from_container(path, worktree))
+            {
+                Ok(repo) => {
+                    debug!(
+                        "Found bare container: {} (default worktree {})",
+                        repo.slug,
+                        repo.path.display()
+                    );
+                    repos.push(repo);
+                }
+                Err(e) => {
+                    debug!("Skipping bare container at {}: {}", path.display(), e);
+                }
+            }
+            continue;
+        }
 
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
@@ -189,10 +215,19 @@ fn count_repos_in_subtree(
     for entry in WalkDir::new(dir)
         .max_depth(max_depth)
         .into_iter()
-        .filter_entry(|e| !is_ignored_directory(e.path(), ignore_patterns))
+        .filter_entry(|e| {
+            !is_ignored_directory(e.path(), ignore_patterns) && !is_inside_bare_container(e.path())
+        })
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
+        // A bare container counts as exactly one repo, same as a flat repo.
+        if entry.file_type().is_dir() && crate::bare::is_bare_container(path) {
+            if !is_ignored_directory(path, ignore_patterns) {
+                count += 1;
+            }
+            continue;
+        }
         if path.file_name() == Some(std::ffi::OsStr::new(".git")) && path.is_dir() {
             if let Some(repo_root) = path.parent() {
                 if !is_ignored_directory(repo_root, ignore_patterns) {
@@ -205,25 +240,63 @@ fn count_repos_in_subtree(
     Ok(count)
 }
 
-/// Extract origin URL from git config
+/// True if `path`'s parent is a bare container, i.e. `path` is one of a
+/// container's internal entries (`.git`, `.bare/`, or a worktree dir). Used to
+/// prune the walk so a container's worktrees are never discovered as separate
+/// repos - the container is emitted once as its default worktree instead.
+fn is_inside_bare_container(path: &Path) -> bool {
+    path.parent()
+        .map(crate::bare::is_bare_container)
+        .unwrap_or(false)
+}
+
+/// Derive a repo slug (`user/name`) from origin, falling back to parent-dir
+/// inference. `origin_probe` is the path git runs in to read origin;
+/// `fallback_parent` is the directory whose name seeds the fallback slug.
+fn resolve_slug(name: &str, origin_probe: &Path, fallback_parent: Option<&Path>) -> String {
+    match extract_origin_url(origin_probe).and_then(|url| extract_user_from_remote(&url)) {
+        Ok(user) => format!("{user}/{name}"),
+        Err(_) => {
+            // Fallback: infer from the parent directory structure. If the repo
+            // is at /path/to/user/repo, use user/repo; otherwise unknown/repo.
+            if let Some(parent_name) = fallback_parent
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+            {
+                // Skip common directory names that aren't user/org names.
+                if !["repos", "src", "code", "projects", "workspace", "git"].contains(&parent_name)
+                {
+                    format!("{parent_name}/{name}")
+                } else {
+                    format!("unknown/{name}")
+                }
+            } else {
+                format!("unknown/{name}")
+            }
+        }
+    }
+}
+
+/// Extract origin URL for a repo path, layout-aware.
+///
+/// A flat repo has a `.git` *directory* with a `config` file we read directly
+/// (fast, no subprocess). A linked worktree or bare container has a `.git`
+/// *pointer file*, so `.git/config` does not exist there; fall back to asking
+/// git (`git remote get-url origin`), which resolves the shared config.
 fn extract_origin_url(repo_path: &Path) -> Result<String> {
-    let config_path = repo_path.join(".git").join("config");
+    let dot_git = repo_path.join(".git");
+    if dot_git.is_dir() {
+        let config_path = dot_git.join("config");
+        if let Ok(config_content) = std::fs::read_to_string(&config_path) {
+            if let Some(url) = extract_remote_url_from_config(&config_content, "origin") {
+                return Ok(url);
+            }
+        }
+    }
 
-    // Try to read git config
-    let config_content = std::fs::read_to_string(&config_path).map_err(|_| {
-        eyre::eyre!(
-            "Repository at {} has no .git/config file",
-            repo_path.display()
-        )
-    })?;
-
-    // Extract origin URL (required)
-    extract_remote_url_from_config(&config_content, "origin").ok_or_else(|| {
-        eyre::eyre!(
-            "Repository at {} has no remote origin configured",
-            repo_path.display()
-        )
-    })
+    // Linked worktree, bare container, or a flat repo whose config parse missed
+    // origin: ask git directly.
+    crate::bare::origin_url(repo_path)
 }
 
 /// Extract user from remote URL

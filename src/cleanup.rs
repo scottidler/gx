@@ -224,7 +224,9 @@ fn cleanup_change(
         let local_path = match recorded_path {
             Some(path) => {
                 let path = std::path::PathBuf::from(&path);
-                if path.join(".git").exists() {
+                // Layout-aware: accept a flat repo (`.git` dir), a linked
+                // worktree (`.git` pointer file), or a bare container.
+                if crate::bare::is_git_path(&path) {
                     path
                 } else {
                     warn!(
