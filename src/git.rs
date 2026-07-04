@@ -668,9 +668,21 @@ pub fn clone_or_update_repo(repo_slug: &str, user_or_org: &str, token: &str) -> 
     // Check if existing repo has correct remote
     match get_remote_origin(&target_dir) {
         Ok(origin) if is_same_repo(&origin, repo_slug) => {
-            // Update existing repo: get default branch, checkout, pull
+            // Update existing repo: get default branch, checkout, pull.
             debug!("Updating existing repo: {repo_slug}");
-            update_existing_repo(&target_dir, repo_slug, token)
+            let update_path = match resolve_update_work_tree(&target_dir) {
+                Ok(path) => path,
+                Err(e) => {
+                    return CloneResult {
+                        repo_slug: repo_slug.to_string(),
+                        action: CloneAction::Updated,
+                        error: Some(format!(
+                            "bare container has no usable default worktree: {e}"
+                        )),
+                    };
+                }
+            };
+            update_existing_repo(&update_path, repo_slug, token)
         }
         Ok(origin) => {
             // Different remote URL
@@ -789,6 +801,20 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
 }
 
 /// Update an existing repository
+/// The work tree that `git status`/`checkout`/`pull` must run in when updating an
+/// existing repo. A bare container is ONE logical repo == its default worktree;
+/// the container root is NOT a work tree, so those commands would fail there
+/// (`fatal: this operation must be run in a work tree`). A flat checkout is
+/// itself. `get_remote_origin` resolves fine at a container root, but the update
+/// path must be routed to the worktree - mirroring what discovery already does.
+fn resolve_update_work_tree(target_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    if crate::bare::is_bare_container(target_dir) {
+        crate::bare::default_worktree(target_dir)
+    } else {
+        Ok(target_dir.to_path_buf())
+    }
+}
+
 fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &str) -> CloneResult {
     debug!(
         "Updating existing repo: {} at {}",
@@ -1632,6 +1658,40 @@ pub fn list_index_files(repo_path: &std::path::Path) -> Result<Vec<(String, std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_update_work_tree_routes_bare_container_to_worktree() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // A bare container: the update path must resolve to the default (main)
+        // worktree, NOT the container root - the root is not a work tree, so
+        // git status/checkout/pull there fail with exit 128 (the shipped bug).
+        let container =
+            crate::test_utils::create_bare_container(temp.path(), "gx", "scottidler/gx");
+
+        // Document the bug this guards against: git status at the ROOT fails.
+        let at_root = crate::test_utils::run_git_command(&["status", "--porcelain"], &container);
+        assert!(
+            !at_root.status.success(),
+            "container root is not a work tree - proves why the update path must resolve the worktree"
+        );
+
+        let resolved = resolve_update_work_tree(&container).unwrap();
+        assert!(
+            resolved.ends_with("main"),
+            "bare container must resolve to its default worktree, got {resolved:?}"
+        );
+        // And git status SUCCEEDS in the resolved worktree (the fix).
+        let at_worktree = crate::test_utils::run_git_command(&["status", "--porcelain"], &resolved);
+        assert!(
+            at_worktree.status.success(),
+            "git status must succeed in the resolved default worktree"
+        );
+
+        // A flat checkout resolves to itself.
+        let flat = crate::test_utils::create_minimal_test_repo(temp.path(), "flat");
+        assert_eq!(resolve_update_work_tree(&flat).unwrap(), flat);
+    }
 
     #[test]
     fn test_status_changes_is_empty() {
