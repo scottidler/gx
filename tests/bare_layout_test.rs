@@ -2,7 +2,7 @@
 //! bare container. A container must count as ONE logical repo (its default
 //! worktree), never fan out over its N worktrees.
 
-use gx::repo::discover_repos;
+use gx::repo::{discover_repos, Layout};
 use gx::test_utils::{create_bare_container, create_minimal_test_repo};
 use tempfile::TempDir;
 
@@ -25,6 +25,30 @@ fn test_bare_container_counts_as_one_repo() {
     assert!(names.contains(&"gx"));
     assert!(!names.contains(&"main"));
     assert!(!names.contains(&".bare"));
+
+    // Layout is known at discovery: flat repos are Flat, the container is
+    // Bare - the mixed fixture yields exactly the two-layout set {Flat, Bare}.
+    let layouts: Vec<Layout> = repos.iter().map(|r| r.layout).collect();
+    assert!(layouts.contains(&Layout::Flat));
+    assert!(layouts.contains(&Layout::Bare));
+    assert!(!layouts.contains(&Layout::Unknown));
+    assert_eq!(
+        layouts.iter().filter(|l| **l == Layout::Flat).count(),
+        2,
+        "both flat repos classified Flat"
+    );
+    assert_eq!(
+        layouts.iter().filter(|l| **l == Layout::Bare).count(),
+        1,
+        "the container classified Bare exactly once"
+    );
+
+    let flat_a = repos.iter().find(|r| r.name == "flat-a").unwrap();
+    assert_eq!(flat_a.layout, Layout::Flat);
+    let flat_b = repos.iter().find(|r| r.name == "flat-b").unwrap();
+    assert_eq!(flat_b.layout, Layout::Flat);
+    let gx_repo = repos.iter().find(|r| r.name == "gx").unwrap();
+    assert_eq!(gx_repo.layout, Layout::Bare);
 }
 
 #[test]
@@ -47,6 +71,9 @@ fn test_bare_container_repo_points_at_default_worktree() {
 
     // Slug is resolved from origin, exactly as a flat repo of the same name.
     assert_eq!(repo.slug, "scottidler/gx");
+
+    // A bare container's repo is always classified Bare.
+    assert_eq!(repo.layout, Layout::Bare);
 
     // git actually runs at that path (the container root would fail here).
     let output = gx::test_utils::run_git_command(&["status", "--porcelain"], &repo.path);

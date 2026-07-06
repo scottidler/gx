@@ -3,11 +3,25 @@ use log::debug;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Structural layout of a discovered repo - known at discovery time from which
+/// constructor ran, never re-derived downstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// `.git` is a directory; the repo root is a work tree.
+    Flat,
+    /// The repo IS the default worktree of a bare container (`path` is that
+    /// worktree, not the `.bare` root).
+    Bare,
+    /// Synthetic repo (`from_slug`); no filesystem to classify.
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub struct Repo {
     pub path: PathBuf,
     pub name: String,
     pub slug: String, // Always determinable from git config or panic
+    pub layout: Layout,
 }
 
 impl Repo {
@@ -21,7 +35,12 @@ impl Repo {
         // A flat repo probes origin at its own root and infers a fallback slug
         // from its own parent directory.
         let slug = resolve_slug(&name, &path, path.parent());
-        Ok(Self { path, name, slug })
+        Ok(Self {
+            path,
+            name,
+            slug,
+            layout: Layout::Flat,
+        })
     }
 
     /// Construct a `Repo` for a bare container. The logical name is the
@@ -43,6 +62,7 @@ impl Repo {
             path: worktree,
             name,
             slug,
+            layout: Layout::Bare,
         })
     }
 
@@ -59,6 +79,7 @@ impl Repo {
             path: PathBuf::from(&name),
             name,
             slug,
+            layout: Layout::Unknown,
         }
     }
 }
@@ -111,9 +132,10 @@ pub fn discover_repos(
             {
                 Ok(repo) => {
                     debug!(
-                        "Found bare container: {} (default worktree {})",
+                        "Found bare container: {} (default worktree {}, layout={:?})",
                         repo.slug,
-                        repo.path.display()
+                        repo.path.display(),
+                        repo.layout
                     );
                     repos.push(repo);
                 }
@@ -135,7 +157,12 @@ pub fn discover_repos(
                 // Try to create repo, skip if it fails (e.g., invalid git config)
                 match Repo::new(repo_root.to_path_buf()) {
                     Ok(repo) => {
-                        debug!("Found repo: {} at {}", repo.name, repo.path.display());
+                        debug!(
+                            "Found repo: {} at {} (layout={:?})",
+                            repo.name,
+                            repo.path.display(),
+                            repo.layout
+                        );
                         repos.push(repo);
                     }
                     Err(e) => {
@@ -541,6 +568,30 @@ mod tests {
         // Test unsupported format should return error
         let result = parse_user_from_url("https://gitlab.com/org/repo.git");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_sets_flat_layout() {
+        let temp = TempDir::new().unwrap();
+        create_minimal_test_repo(temp.path(), "flat-repo");
+        let repo = Repo::new(temp.path().join("flat-repo")).unwrap();
+        assert_eq!(repo.layout, Layout::Flat);
+    }
+
+    #[test]
+    fn test_from_slug_sets_unknown_layout() {
+        let repo = Repo::from_slug("tatari-tv/frontend".to_string());
+        assert_eq!(repo.layout, Layout::Unknown);
+    }
+
+    #[test]
+    fn test_from_container_sets_bare_layout() {
+        let temp = TempDir::new().unwrap();
+        let container =
+            crate::test_utils::create_bare_container(temp.path(), "gx", "scottidler/gx");
+        let worktree = crate::bare::default_worktree(&container).unwrap();
+        let repo = Repo::from_container(&container, worktree).unwrap();
+        assert_eq!(repo.layout, Layout::Bare);
     }
 
     #[test]
