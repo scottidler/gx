@@ -3,12 +3,56 @@ use crate::create::{CreateAction, CreateResult};
 use crate::git::{
     CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus,
 };
+use crate::repo::Layout;
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
 use std::io::{self, Write};
 use std::path::Path;
 use unicode_display_width::width as unicode_width;
+
+/// Catppuccin Mocha palette roles, matching Scott's starship prompt
+/// (`custom.path`/`custom.branch`) verbatim. Applied ONLY on the
+/// `layout_view() == Some` (currently `gx status` only) render path - the
+/// `None` path keeps its existing cyan/magenta styling untouched.
+const LAYOUT_SLUG_RGB: (u8, u8, u8) = (203, 166, 247);
+const LAYOUT_BRANCH_RGB: (u8, u8, u8) = (166, 227, 161);
+const LAYOUT_MATCHED_LEAF_RGB: (u8, u8, u8) = (142, 116, 173);
+const LAYOUT_DIVERGED_RGB: (u8, u8, u8) = (250, 179, 135);
+
+/// Render classification for a repo-identity column, derived at render time
+/// from structural `Layout` plus the worktree leaf name vs the checked-out
+/// branch - both already in hand, no extra git calls. Pure and directly
+/// unit-testable (no stdout), unlike the printed-output rendering it drives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutView<'a> {
+    /// Normal flat clone (also covers `Layout::Unknown` and a `Bare` repo
+    /// whose leaf name could not be determined, e.g. non-UTF-8): render
+    /// exactly as before this feature.
+    Flat,
+    /// A bare-container worktree whose directory leaf matches the checked-out
+    /// branch. The branch column is suppressed - the leaf already says it.
+    WorktreeMatched { leaf: &'a str },
+    /// A bare-container worktree whose directory leaf differs from the
+    /// checked-out branch (including detached HEAD, which is always
+    /// `HEAD@<sha>` per `git.rs`, never `None`). The branch column is shown.
+    WorktreeDiverged { leaf: &'a str },
+}
+
+/// Classify how a status row's repo-identity column should render. Pure
+/// function, no stdout - the alignment bug's earlier test could not bite
+/// because it only validated printed output against the width crate.
+pub fn classify_view<'a>(
+    layout: Layout,
+    leaf: Option<&'a str>,
+    branch: Option<&str>,
+) -> LayoutView<'a> {
+    match (layout, leaf, branch) {
+        (Layout::Bare, Some(l), Some(b)) if l == b => LayoutView::WorktreeMatched { leaf: l },
+        (Layout::Bare, Some(l), _) => LayoutView::WorktreeDiverged { leaf: l },
+        _ => LayoutView::Flat,
+    }
+}
 
 /// Calculate display width for emoji strings using Unicode Standard width calculation
 /// This uses unicode-display-width which provides consistent results across environments
@@ -51,6 +95,16 @@ pub trait UnifiedDisplay {
     fn get_repo(&self) -> &crate::repo::Repo;
     fn get_emoji(&self, opts: &StatusOptions) -> String;
     fn get_error(&self) -> Option<&str>;
+
+    /// Opt-in seam for layout-aware rendering. `None` (the default) means
+    /// this verb does not participate - `display_unified_format` takes the
+    /// existing rendering path, byte-identical to before this feature. Only
+    /// `RepoStatus` overrides this: `get_branch()` is a real checked-out
+    /// branch there, whereas checkout/create/review overload it with a
+    /// `change_id` that would misclassify against the leaf.
+    fn layout_view(&self) -> Option<LayoutView<'_>> {
+        None
+    }
 }
 
 /// Implementation of UnifiedDisplay for RepoStatus
@@ -164,6 +218,14 @@ impl UnifiedDisplay for RepoStatus {
 
     fn get_error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    fn layout_view(&self) -> Option<LayoutView<'_>> {
+        Some(classify_view(
+            self.repo.layout,
+            self.repo.path.file_name().and_then(|n| n.to_str()),
+            self.branch.as_deref(),
+        ))
     }
 }
 
@@ -743,21 +805,96 @@ fn format_repo_path_with_colors(_repo_path: &Path, repo_slug: &str, use_colors: 
     }
 }
 
-/// Display a single item using unified formatting
-pub fn display_unified_format<T: UnifiedDisplay>(
+/// Format the repo-identity column for the layout-aware (`Some(view)`)
+/// render path: connector glyph + leaf glued onto the slug, Catppuccin
+/// palette applied only here. Pure, unit-testable independent of stdout.
+fn format_layout_identity(repo_slug: &str, view: &LayoutView<'_>, use_colors: bool) -> String {
+    let colored_slug = || -> String {
+        let (r, g, b) = LAYOUT_SLUG_RGB;
+        repo_slug.truecolor(r, g, b).bold().to_string()
+    };
+
+    match view {
+        LayoutView::Flat => {
+            if use_colors {
+                colored_slug()
+            } else {
+                repo_slug.to_string()
+            }
+        }
+        LayoutView::WorktreeMatched { leaf } => {
+            if use_colors {
+                let (cr, cg, cb) = LAYOUT_BRANCH_RGB;
+                let (lr, lg, lb) = LAYOUT_MATCHED_LEAF_RGB;
+                format!(
+                    "{}{}{}",
+                    colored_slug(),
+                    "\u{2261}".truecolor(cr, cg, cb),
+                    leaf.truecolor(lr, lg, lb)
+                )
+            } else {
+                format!("{repo_slug}\u{2261}{leaf}")
+            }
+        }
+        LayoutView::WorktreeDiverged { leaf } => {
+            if use_colors {
+                let (dr, dg, db) = LAYOUT_DIVERGED_RGB;
+                format!(
+                    "{}{}{}",
+                    colored_slug(),
+                    "\u{2248}".truecolor(dr, dg, db),
+                    leaf.truecolor(dr, dg, db)
+                )
+            } else {
+                format!("{repo_slug}\u{2248}{leaf}")
+            }
+        }
+    }
+}
+
+/// Format the branch column for the layout-aware (`Some(view)`) render path:
+/// blank for a matched worktree (the leaf already carries the signal via the
+/// `\u{2261}` glue), the real branch (bold Catppuccin green) otherwise. Width
+/// stays on the plain string (`width`), never the colored/glued form, so
+/// `AlignmentWidths` needs no change regardless of how the glyphs measure.
+fn format_layout_branch(
+    branch: &str,
+    view: &LayoutView<'_>,
+    use_colors: bool,
+    width: usize,
+) -> String {
+    match view {
+        LayoutView::WorktreeMatched { .. } => format!("{:>width$}", "", width = width),
+        LayoutView::Flat | LayoutView::WorktreeDiverged { .. } => {
+            if use_colors {
+                let (r, g, b) = LAYOUT_BRANCH_RGB;
+                format!(
+                    "{:>width$}",
+                    branch.truecolor(r, g, b).bold(),
+                    width = width
+                )
+            } else {
+                format!("{:>width$}", branch, width = width)
+            }
+        }
+    }
+}
+
+/// Render one item's status/result line, pure (no I/O) so it is directly
+/// unit-testable. `display_unified_format` prints exactly this string.
+///
+/// `layout_view() == None` (checkout/create/review, and any future verb that
+/// does not opt in) takes the original rendering path, byte-identical to
+/// before this feature. `Some(view)` (currently `RepoStatus` only) takes the
+/// Catppuccin/connector-glyph path instead.
+fn render_unified_line<T: UnifiedDisplay>(
     item: &T,
     opts: &StatusOptions,
     widths: &AlignmentWidths,
-) {
-    // Branch (right-justified)
+) -> String {
     let branch = item.get_branch().unwrap_or("unknown");
-    let branch_display = if opts.use_colors {
-        format!("{:>width$}", branch.magenta(), width = widths.branch_width)
-    } else {
-        format!("{:>width$}", branch, width = widths.branch_width)
-    };
 
-    // Commit SHA (fixed width) - special handling for ReviewResult
+    // Commit SHA (fixed width) - identical on both paths.
     let commit_display = item.get_commit_sha().unwrap_or("-------");
     let sha_display = if opts.use_colors {
         format!(
@@ -769,17 +906,39 @@ pub fn display_unified_format<T: UnifiedDisplay>(
         format!("{:width$}", commit_display, width = widths.sha_width)
     };
 
-    // Emoji/Status indicator (left-aligned)
+    // Emoji/Status indicator (left-aligned) - identical on both paths.
     let emoji = item.get_emoji(opts);
     let emoji_display = pad_to_width(&emoji, widths.emoji_width);
 
-    // Repository path/slug
     let repo = item.get_repo();
-    let repo_slug = &repo.slug;
-    let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
 
-    // Final format: <branch> <sha> <emoji> <repo>
-    println!("{branch_display} {sha_display} {emoji_display} {repo_display}");
+    match item.layout_view() {
+        None => {
+            let branch_display = if opts.use_colors {
+                format!("{:>width$}", branch.magenta(), width = widths.branch_width)
+            } else {
+                format!("{:>width$}", branch, width = widths.branch_width)
+            };
+            let repo_display =
+                format_repo_path_with_colors(&repo.path, &repo.slug, opts.use_colors);
+            format!("{branch_display} {sha_display} {emoji_display} {repo_display}")
+        }
+        Some(view) => {
+            let branch_display =
+                format_layout_branch(branch, &view, opts.use_colors, widths.branch_width);
+            let repo_display = format_layout_identity(&repo.slug, &view, opts.use_colors);
+            format!("{branch_display} {sha_display} {emoji_display} {repo_display}")
+        }
+    }
+}
+
+/// Display a single item using unified formatting
+pub fn display_unified_format<T: UnifiedDisplay>(
+    item: &T,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) {
+    println!("{}", render_unified_line(item, opts, widths));
 
     // Handle error display
     if let Some(error) = item.get_error() {
@@ -1066,4 +1225,375 @@ pub fn display_status_result_immediate(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::{RemoteStatus, RepoStatus, StatusChanges};
+    use crate::repo::{Layout, Repo};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // `colored`'s truecolor output falls back to the nearest 4-bit ANSI color
+    // unless `COLORTERM=truecolor`/`24bit`, and its "should colorize" state
+    // is a process-global - both need serializing across tests that touch
+    // them, same pattern as the platform-path env tests (rust.md).
+    static COLOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_truecolor_forced<T>(f: impl FnOnce() -> T) -> T {
+        let guard = COLOR_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("COLORTERM").ok();
+        unsafe { std::env::set_var("COLORTERM", "truecolor") };
+        colored::control::set_override(true);
+
+        let result = f();
+
+        colored::control::unset_override();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("COLORTERM", v) },
+            None => unsafe { std::env::remove_var("COLORTERM") },
+        }
+        drop(guard);
+        result
+    }
+
+    fn ansi_fg(bold: bool, rgb: (u8, u8, u8)) -> String {
+        let (r, g, b) = rgb;
+        if bold {
+            format!("\x1B[1;38;2;{r};{g};{b}m")
+        } else {
+            format!("\x1B[38;2;{r};{g};{b}m")
+        }
+    }
+
+    fn bare_repo_status(leaf: &str, branch: Option<&str>) -> RepoStatus {
+        RepoStatus {
+            repo: Repo {
+                path: PathBuf::from(format!("/repos/tatari-tv/clyde/{leaf}")),
+                name: "clyde".to_string(),
+                slug: "tatari-tv/clyde".to_string(),
+                layout: Layout::Bare,
+            },
+            branch: branch.map(str::to_string),
+            commit_sha: Some("a1b2c3d".to_string()),
+            is_clean: true,
+            changes: StatusChanges::default(),
+            remote_status: RemoteStatus::UpToDate,
+            error: None,
+        }
+    }
+
+    fn flat_repo_status(branch: &str) -> RepoStatus {
+        RepoStatus {
+            repo: Repo {
+                path: PathBuf::from("/repos/scottidler/otto"),
+                name: "otto".to_string(),
+                slug: "scottidler/otto".to_string(),
+                layout: Layout::Flat,
+            },
+            branch: Some(branch.to_string()),
+            commit_sha: Some("e4f5a6b".to_string()),
+            is_clean: true,
+            changes: StatusChanges::default(),
+            remote_status: RemoteStatus::UpToDate,
+            error: None,
+        }
+    }
+
+    fn checkout_result_fixture() -> CheckoutResult {
+        CheckoutResult {
+            repo: Repo::from_slug("scottidler/otto".to_string()),
+            branch_name: "feature-x".to_string(),
+            commit_sha: Some("e4f5a6b".to_string()),
+            action: CheckoutAction::CheckedOutSynced,
+            error: None,
+        }
+    }
+
+    fn create_result_fixture() -> CreateResult {
+        CreateResult {
+            repo: Repo::from_slug("scottidler/otto".to_string()),
+            change_id: "GX-1234".to_string(),
+            action: CreateAction::Committed,
+            files_affected: Vec::new(),
+            substitution_stats: None,
+            pr_number: None,
+            pr_url: None,
+            original_branch: None,
+            error: None,
+        }
+    }
+
+    // ---- classify_view: pure classifier, all states + edges ----
+
+    #[test]
+    fn classify_view_matched_when_bare_leaf_equals_branch() {
+        assert_eq!(
+            classify_view(Layout::Bare, Some("main"), Some("main")),
+            LayoutView::WorktreeMatched { leaf: "main" }
+        );
+    }
+
+    #[test]
+    fn classify_view_diverged_when_bare_leaf_differs_from_branch() {
+        assert_eq!(
+            classify_view(Layout::Bare, Some("main"), Some("feature-x")),
+            LayoutView::WorktreeDiverged { leaf: "main" }
+        );
+    }
+
+    #[test]
+    fn classify_view_diverged_on_detached_head() {
+        // git.rs:190 always returns Some("HEAD@<sha>"), never None, for a
+        // detached HEAD.
+        assert_eq!(
+            classify_view(Layout::Bare, Some("main"), Some("HEAD@abc1234")),
+            LayoutView::WorktreeDiverged { leaf: "main" }
+        );
+    }
+
+    #[test]
+    fn classify_view_flat_when_bare_leaf_is_none() {
+        // A non-UTF-8 leaf reaches this function exactly as `leaf = None`
+        // (`file_name().and_then(to_str)` yields `None` upstream) - safe
+        // degrade to plain rendering.
+        assert_eq!(
+            classify_view(Layout::Bare, None, Some("main")),
+            LayoutView::Flat
+        );
+        assert_eq!(classify_view(Layout::Bare, None, None), LayoutView::Flat);
+    }
+
+    #[test]
+    fn classify_view_flat_for_flat_layout_regardless_of_leaf_branch() {
+        assert_eq!(
+            classify_view(Layout::Flat, Some("main"), Some("main")),
+            LayoutView::Flat
+        );
+        assert_eq!(
+            classify_view(Layout::Flat, Some("x"), Some("y")),
+            LayoutView::Flat
+        );
+    }
+
+    #[test]
+    fn classify_view_flat_for_unknown_layout() {
+        assert_eq!(
+            classify_view(Layout::Unknown, Some("main"), Some("main")),
+            LayoutView::Flat
+        );
+    }
+
+    // ---- render: status rows, use_colors=false (glyph carries the signal) ----
+
+    #[test]
+    fn status_matched_no_color_glues_leaf_and_blanks_branch() {
+        let result = bare_repo_status("main", Some("main"));
+        let opts = StatusOptions {
+            verbosity: OutputVerbosity::Summary,
+            use_emoji: true,
+            use_colors: false,
+        };
+        let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+        let line = render_unified_line(&result, &opts, &widths);
+
+        assert!(!line.contains('\u{1b}'), "zero ANSI expected: {line}");
+        assert!(line.contains("tatari-tv/clyde\u{2261}main"));
+        let branch_field = line
+            .get(..widths.branch_width)
+            .expect("branch column is ascii-only in this fixture");
+        assert_eq!(branch_field.trim(), "", "matched branch column is blank");
+    }
+
+    #[test]
+    fn status_diverged_no_color_glues_leaf_and_shows_branch() {
+        let result = bare_repo_status("main", Some("feature-x"));
+        let opts = StatusOptions {
+            verbosity: OutputVerbosity::Summary,
+            use_emoji: true,
+            use_colors: false,
+        };
+        let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+        let line = render_unified_line(&result, &opts, &widths);
+
+        assert!(!line.contains('\u{1b}'), "zero ANSI expected: {line}");
+        assert!(line.contains("tatari-tv/clyde\u{2248}main"));
+        assert!(
+            line.contains("feature-x"),
+            "diverged branch is shown: {line}"
+        );
+    }
+
+    #[test]
+    fn status_diverged_detached_head_shows_head_at_sha() {
+        let result = bare_repo_status("main", Some("HEAD@abc1234"));
+        let opts = StatusOptions {
+            verbosity: OutputVerbosity::Summary,
+            use_emoji: true,
+            use_colors: false,
+        };
+        let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+        let line = render_unified_line(&result, &opts, &widths);
+
+        assert!(line.contains("tatari-tv/clyde\u{2248}main"));
+        assert!(line.contains("HEAD@abc1234"));
+    }
+
+    #[test]
+    fn status_flat_no_color_has_neither_glyph() {
+        let result = flat_repo_status("main");
+        let opts = StatusOptions {
+            verbosity: OutputVerbosity::Summary,
+            use_emoji: true,
+            use_colors: false,
+        };
+        let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+        let line = render_unified_line(&result, &opts, &widths);
+
+        assert!(!line.contains('\u{2261}') && !line.contains('\u{2248}'));
+        assert!(line.contains("scottidler/otto"));
+        assert!(line.contains("main"));
+    }
+
+    // ---- render: status rows, use_colors=true (Catppuccin roles) ----
+
+    #[test]
+    fn status_matched_color_applies_slug_connector_and_leaf_roles() {
+        with_truecolor_forced(|| {
+            let result = bare_repo_status("main", Some("main"));
+            let opts = StatusOptions {
+                verbosity: OutputVerbosity::Summary,
+                use_emoji: true,
+                use_colors: true,
+            };
+            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+            let line = render_unified_line(&result, &opts, &widths);
+
+            assert!(
+                line.contains(&ansi_fg(true, LAYOUT_SLUG_RGB)),
+                "slug is bold purple: {line}"
+            );
+            assert!(
+                line.contains(&ansi_fg(false, LAYOUT_BRANCH_RGB)),
+                "connector is non-bold green: {line}"
+            );
+            assert!(
+                line.contains(&ansi_fg(false, LAYOUT_MATCHED_LEAF_RGB)),
+                "matched leaf is non-bold dull-mauve: {line}"
+            );
+            assert!(line.contains('\u{2261}'));
+        });
+    }
+
+    #[test]
+    fn status_diverged_color_applies_slug_branch_and_peach_roles() {
+        with_truecolor_forced(|| {
+            let result = bare_repo_status("main", Some("feature-x"));
+            let opts = StatusOptions {
+                verbosity: OutputVerbosity::Summary,
+                use_emoji: true,
+                use_colors: true,
+            };
+            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+            let line = render_unified_line(&result, &opts, &widths);
+
+            assert!(
+                line.contains(&ansi_fg(true, LAYOUT_SLUG_RGB)),
+                "slug is bold purple: {line}"
+            );
+            assert!(
+                line.contains(&ansi_fg(true, LAYOUT_BRANCH_RGB)),
+                "trailing branch is bold green: {line}"
+            );
+            assert!(
+                line.contains(&ansi_fg(false, LAYOUT_DIVERGED_RGB)),
+                "connector + diverged leaf are non-bold peach: {line}"
+            );
+            assert!(line.contains('\u{2248}'));
+        });
+    }
+
+    // ---- render: layout_view() seam - checkout/create/review unaffected ----
+
+    #[test]
+    fn review_result_layout_view_defaults_to_none() {
+        // ReviewResult never overrides the seam; the default trait method
+        // must still say "not participating".
+        let result = ReviewResult {
+            repo: Repo::from_slug("scottidler/otto".to_string()),
+            change_id: "GX-1234".to_string(),
+            pr_number: None,
+            action: ReviewAction::Listed,
+            error: None,
+        };
+        assert!(UnifiedDisplay::layout_view(&result).is_none());
+    }
+
+    #[test]
+    fn checkout_result_render_byte_identical_to_pre_change_formula() {
+        let result = checkout_result_fixture();
+        assert!(UnifiedDisplay::layout_view(&result).is_none());
+
+        for use_colors in [true, false] {
+            let opts = StatusOptions {
+                verbosity: OutputVerbosity::Summary,
+                use_emoji: true,
+                use_colors,
+            };
+            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+            let rendered = render_unified_line(&result, &opts, &widths);
+            let expected = pre_change_formula(&result, &opts, &widths);
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    #[test]
+    fn create_result_render_byte_identical_to_pre_change_formula() {
+        let result = create_result_fixture();
+        assert!(UnifiedDisplay::layout_view(&result).is_none());
+
+        for use_colors in [true, false] {
+            let opts = StatusOptions {
+                verbosity: OutputVerbosity::Summary,
+                use_emoji: true,
+                use_colors,
+            };
+            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+            let rendered = render_unified_line(&result, &opts, &widths);
+            let expected = pre_change_formula(&result, &opts, &widths);
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    /// Recomputes the pre-Phase-2 `None`-path rendering formula by hand, so a
+    /// regression in the branch-on-`layout_view()` refactor fails a test
+    /// rather than silently changing checkout/create/review output.
+    fn pre_change_formula<T: UnifiedDisplay>(
+        item: &T,
+        opts: &StatusOptions,
+        widths: &AlignmentWidths,
+    ) -> String {
+        let branch = item.get_branch().unwrap_or("unknown");
+        let branch_display = if opts.use_colors {
+            format!("{:>width$}", branch.magenta(), width = widths.branch_width)
+        } else {
+            format!("{:>width$}", branch, width = widths.branch_width)
+        };
+        let commit_display = item.get_commit_sha().unwrap_or("-------");
+        let sha_display = if opts.use_colors {
+            format!(
+                "{:width$}",
+                commit_display.bright_black(),
+                width = widths.sha_width
+            )
+        } else {
+            format!("{:width$}", commit_display, width = widths.sha_width)
+        };
+        let emoji = item.get_emoji(opts);
+        let emoji_display = pad_to_width(&emoji, widths.emoji_width);
+        let repo = item.get_repo();
+        let repo_display = format_repo_path_with_colors(&repo.path, &repo.slug, opts.use_colors);
+        format!("{branch_display} {sha_display} {emoji_display} {repo_display}")
+    }
 }

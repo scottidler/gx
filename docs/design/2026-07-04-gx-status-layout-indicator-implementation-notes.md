@@ -53,3 +53,93 @@
 
 ### Open questions
 - None.
+
+## Phase 2: Three-state rendering (status only) + starship palette
+
+### Design decisions
+- Added `LayoutView<'a>` + `classify_view` to `src/output.rs` exactly per the
+  doc's API Design section (`Flat`/`WorktreeMatched{leaf}`/
+  `WorktreeDiverged{leaf}`, and the identical match arms) - pure, no I/O,
+  directly unit-testable (`src/output.rs:classify_view`).
+- Added `layout_view()` to the `UnifiedDisplay` trait with a default `None`
+  body, overridden ONLY in `impl UnifiedDisplay for RepoStatus`
+  (`src/output.rs:UnifiedDisplay::layout_view`, `RepoStatus::layout_view`) -
+  `CheckoutResult`, `CreateResult`, `ReviewResult`, and the pre-existing
+  (currently unused) `&RepoStatus`/`&CheckoutResult`/`&CreateResult`/
+  `&ReviewResult` impls all keep the default, per the doc's explicit "only
+  `RepoStatus` overrides it."
+- Added the four Catppuccin Mocha RGB consts (`LAYOUT_SLUG_RGB`,
+  `LAYOUT_BRANCH_RGB`, `LAYOUT_MATCHED_LEAF_RGB`, `LAYOUT_DIVERGED_RGB`) as
+  module-level consts in `src/output.rs`, matching the doc's table verbatim.
+- Refactored `display_unified_format` to delegate to a new pure
+  `render_unified_line<T>` that branches on `item.layout_view()`: `None`
+  calls the original inline formula unchanged (still using
+  `format_repo_path_with_colors` for the repo-identity column, magenta for
+  the branch column); `Some(view)` calls two new pure helpers,
+  `format_layout_identity` (connector glyph + leaf glued onto the slug,
+  Catppuccin palette) and `format_layout_branch` (blank for
+  `WorktreeMatched`, bold-green branch otherwise) -
+  `src/output.rs:render_unified_line,format_layout_identity,format_layout_branch`.
+  `display_unified_format` itself is now a two-line shell: call the pure
+  renderer, `println!` it, then the untouched error-line handling. This
+  return-data-not-side-effects split is what makes the render tests possible
+  without capturing stdout.
+- SHA and emoji columns are computed once, before the `None`/`Some` branch,
+  and used identically on both paths - the doc's color table names only
+  slug/branch/connector/leaf, so SHA (`bright_black`) and emoji styling are
+  intentionally unchanged for status rows.
+- Verified manually with a real mixed fixture (`cargo build --release`, a
+  temp workspace with one flat repo and two bare containers - one
+  leaf==branch, one leaf!=branch): `gx status`, `gx status --no-color`, and
+  `CLICOLOR_FORCE=1 COLORTERM=truecolor gx status` all matched the doc's
+  worked example exactly, including the exact
+  `\x1b[1;38;2;203;166;247m` (slug) / `\x1b[38;2;166;227;161m` (`\u{2261}`) /
+  `\x1b[38;2;142;116;173m` (matched leaf) / `\x1b[1;38;2;166;227;161m` (shown
+  branch) / `\x1b[38;2;250;179;135m` (`\u{2248}` + diverged leaf) ANSI
+  sequences; `gx checkout` against the same workspace rendered unchanged
+  (plain cyan slug, no glyph).
+- Updated `README.md` and `gx.yml`'s `output:` section with the `\u{2261}`/
+  `\u{2248}` scheme, per the doc's Phase 2 rollout note.
+
+### Deviations
+- **Test placement: inline `#[cfg(test)] mod tests { ... }` at the bottom of
+  `src/output.rs`, not a `src/output/tests.rs` submodule file.**
+  `~/repos/.claude/rules/rust.md` states tests should live in their own
+  submodule file; however every existing source file in this repo (including
+  `src/repo.rs`, edited by Phase 1 of this very design doc) uses the inline
+  `mod tests { ... }` block. Matched the repo's actual, consistent, 100%
+  convention over the aspirational global rule, per the phase-implementer
+  instruction to match surrounding code's style. Same effect (tests exist,
+  are colocated, and run under `cargo test`); correct seam for this specific
+  codebase.
+- **`colored`'s truecolor output silently downgrades to the nearest 4-bit
+  ANSI color without `COLORTERM=truecolor`/`24bit`, and its "should colorize"
+  flag is a process-global that defaults to off when stdout isn't a TTY (as
+  it isn't under `cargo test`).** Neither behavior is mentioned in the design
+  doc's color table. Render tests that assert exact RGB ANSI sequences force
+  `colored::control::set_override(true)` and `COLORTERM=truecolor` for their
+  duration (restored after, guarded by a `Mutex` to serialize against other
+  tests touching the same process-global state - the same env-var-lock
+  pattern `rust.md` mandates for platform-path tests). This is a test-harness
+  detail, not a behavior change: a real terminal that advertises truecolor
+  gets the exact RGB values in production; one that doesn't gets `colored`'s
+  own nearest-color degrade, exactly as the pre-existing magenta/cyan/
+  bright_black status/checkout output already did before this feature.
+
+### Tradeoffs
+- Pure-formatter-plus-thin-`println!`-shell (`render_unified_line` /
+  `format_layout_identity` / `format_layout_branch`) vs. testing
+  `display_unified_format` by capturing stdout: chose the pure-function split
+  because it matches the repo's "return data, not side effects" convention,
+  makes the render tests deterministic and parallel-safe, and is the only way
+  the doc's own stated rationale for a pure classifier ("the alignment bug's
+  test could not bite because it validated printed output") is actually
+  honored for the printed-line assertions too.
+- `format_layout_branch`/`format_layout_identity` as free functions taking
+  `&LayoutView<'_>` vs. methods on `LayoutView`: kept them as free functions
+  in `output.rs` since they also need `use_colors`/`width`/the raw
+  `repo_slug`/`branch` strings that don't belong on the pure classification
+  type; keeps `LayoutView` a plain data enum with no rendering knowledge.
+
+### Open questions
+- None.

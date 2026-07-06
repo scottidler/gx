@@ -15,6 +15,13 @@ repo-discovery:
 # Output preferences
 output:
   verbosity: summary  # compact, summary, detailed, or full (default: summary)
+  # `gx status` marks bare-container worktrees with a connector glyph glued
+  # onto the repo slug (always on, not a toggle - layout is ground truth):
+  #   slug≡leaf   folder name matches the checked-out branch (branch column blank)
+  #   slug≈leaf   folder name disagrees with the checked-out branch (branch shown)
+  #   slug        a normal flat clone (unchanged)
+  # `gx checkout`/`create`/`review` are unaffected - their branch column is a
+  # change ID, not a checked-out branch.
 
 # Logging
 logging:
