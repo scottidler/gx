@@ -135,9 +135,9 @@ pub enum Commands {
   ✅  Clean repository     📁  Repository header   📊  Summary stats
 
 REMOTE STATUS:
-  🟢  Up to date with remote    ⬆️N  Ahead by N commits
-  ⬇️N  Behind by N commits      🔀  Diverged (ahead+behind)
-  📍  No remote branch          ⚠️git Remote check error (git command failed)
+  🟢  Up to date with remote    ↑N  Ahead by N commits
+  ↓N  Behind by N commits       🔀  Diverged (ahead+behind)
+  📍  No remote branch          🚨git Remote check error (git command failed)
 
 EXAMPLES:
   gx status                     # Show all repositories
@@ -182,7 +182,7 @@ EXAMPLES:
     #[command(after_help = "CHECKOUT LEGEND:
   🔄  Checked out and synced with remote    ✨  Created new branch from remote
   📦  Stashed uncommitted changes           ❌  Checkout failed (error)
-  ⚠️   Has untracked files                  📊  Summary stats
+  🚨  Has untracked files                  📊  Summary stats
 
 EXAMPLES:
   gx checkout                       # Checkout default branch in all repos
@@ -237,7 +237,7 @@ EXAMPLES:
     /// Clone repositories from GitHub user/org
     #[command(after_help = "CLONE LEGEND:
   📥  Cloned new repository               🔄  Updated existing repository
-  📍  Checked out default branch          ⚠️  Clone/update failed
+  📍  Checked out default branch          🚨  Clone/update failed
   🏠  Directory exists but not git repo   🔗  Different remote URL detected
   📦  Stashed uncommitted changes         📊  Summary stats
 
@@ -271,7 +271,8 @@ EXAMPLES:
     #[command(after_help = "CREATE LEGEND:
   📝  Files modified        ➕  Files added         ❌  Files deleted
   🔄  Branch created        📥  PR created          📊  Summary stats
-  👁️  Dry run (preview)     💾  Changes committed   ❌  Error occurred
+  👀  Dry run (would change)  ➖  Dry run (no change)
+  💾  Changes committed        ❌  Error occurred
 
 EXAMPLES:
   gx create --files '*.json'                                    # Show matching files (dry-run)
@@ -390,7 +391,7 @@ EXAMPLES:
     /// Clean up branches after PR merge
     #[command(after_help = "CLEANUP LEGEND:
   🧹  Local branch deleted     🌐  Remote branch deleted
-  ⏭️   Already cleaned          ⚠️   Still has open PR
+  ⏭️   Already cleaned          🚨  Still has open PR
   ❌  Cleanup failed            📊  Summary stats
 
 EXAMPLES:

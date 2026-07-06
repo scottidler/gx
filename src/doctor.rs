@@ -59,7 +59,7 @@ fn check_tool_version(tool: &str, min_version: &str) -> ToolStatus {
                 } else {
                     version
                 },
-                status_icon: if meets { "✅" } else { "⚠️" }.to_string(),
+                status_icon: if meets { "✅" } else { "🚨" }.to_string(),
             }
         }
         _ => ToolStatus {

@@ -28,8 +28,8 @@ pub struct StatusChanges {
 #[derive(Debug, Clone)]
 pub enum RemoteStatus {
     UpToDate,           // ✅ Local and remote are in sync
-    Ahead(u32),         // ⬆️  Local is ahead by N commits
-    Behind(u32),        // ⬇️  Local is behind by N commits
+    Ahead(u32),         // ↑  Local is ahead by N commits
+    Behind(u32),        // ↓  Local is behind by N commits
     Diverged(u32, u32), // 🔀 Local ahead by N, behind by M
     NoRemote,           // 📍 No remote tracking branch
     NoUpstream,         // 📍 No upstream branch configured

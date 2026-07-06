@@ -66,8 +66,8 @@ fn test_cli_flags_help_consistency() {
     // Verify remote status legend is present
     assert!(stdout.contains("REMOTE STATUS:"));
     assert!(stdout.contains("🟢  Up to date with remote"));
-    assert!(stdout.contains("⬇️N  Behind by N commits"));
-    assert!(stdout.contains("⬆️N  Ahead by N commits"));
+    assert!(stdout.contains("↓N  Behind by N commits"));
+    assert!(stdout.contains("↑N  Ahead by N commits"));
 }
 
 /// Test that both new flags can be used together

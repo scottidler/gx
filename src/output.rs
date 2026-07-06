@@ -121,20 +121,8 @@ impl UnifiedDisplay for RepoStatus {
                         "=".to_string()
                     }
                 }
-                RemoteStatus::Ahead(n) => {
-                    if opts.use_emoji {
-                        format!("⬆️ {n}")
-                    } else {
-                        format!("↑{n}")
-                    }
-                }
-                RemoteStatus::Behind(n) => {
-                    if opts.use_emoji {
-                        format!("⬇️ {n}")
-                    } else {
-                        format!("↓{n}")
-                    }
-                }
+                RemoteStatus::Ahead(n) => format!("↑{n}"),
+                RemoteStatus::Behind(n) => format!("↓{n}"),
                 RemoteStatus::Diverged(ahead, behind) => {
                     if opts.use_emoji {
                         format!("🔀 {ahead}↑{behind}↓")
@@ -165,7 +153,7 @@ impl UnifiedDisplay for RepoStatus {
                 }
                 RemoteStatus::Error(e) => {
                     if opts.use_emoji {
-                        format!("⚠️ {}", e.chars().take(3).collect::<String>())
+                        format!("🚨 {}", e.chars().take(3).collect::<String>())
                     } else {
                         format!("!{}", e.chars().take(3).collect::<String>())
                     }
@@ -225,7 +213,7 @@ impl UnifiedDisplay for CheckoutResult {
                 }
                 CheckoutAction::HasUntracked => {
                     if opts.use_emoji {
-                        "⚠️".to_string()
+                        "🚨".to_string()
                     } else {
                         "WARN".to_string()
                     }
@@ -307,20 +295,8 @@ impl UnifiedDisplay for &RepoStatus {
                         "=".to_string()
                     }
                 }
-                RemoteStatus::Ahead(n) => {
-                    if opts.use_emoji {
-                        format!("⬆️ {n}")
-                    } else {
-                        format!("↑{n}")
-                    }
-                }
-                RemoteStatus::Behind(n) => {
-                    if opts.use_emoji {
-                        format!("⬇️ {n}")
-                    } else {
-                        format!("↓{n}")
-                    }
-                }
+                RemoteStatus::Ahead(n) => format!("↑{n}"),
+                RemoteStatus::Behind(n) => format!("↓{n}"),
                 RemoteStatus::Diverged(ahead, behind) => {
                     if opts.use_emoji {
                         format!("🔀 {ahead}↑{behind}↓")
@@ -351,7 +327,7 @@ impl UnifiedDisplay for &RepoStatus {
                 }
                 RemoteStatus::Error(e) => {
                     if opts.use_emoji {
-                        format!("⚠️ {}", e.chars().take(3).collect::<String>())
+                        format!("🚨 {}", e.chars().take(3).collect::<String>())
                     } else {
                         format!("!{}", e.chars().take(3).collect::<String>())
                     }
@@ -411,7 +387,7 @@ impl UnifiedDisplay for &CheckoutResult {
                 }
                 CheckoutAction::HasUntracked => {
                     if opts.use_emoji {
-                        "⚠️".to_string()
+                        "🚨".to_string()
                     } else {
                         "WARN".to_string()
                     }
@@ -459,7 +435,7 @@ impl UnifiedDisplay for CreateResult {
 
                     if opts.use_emoji {
                         if has_changes {
-                            "✏️".to_string() // Would change
+                            "👀".to_string() // Would change
                         } else {
                             "➖".to_string() // No changes (skipped)
                         }
@@ -527,7 +503,7 @@ impl UnifiedDisplay for &CreateResult {
 
                     if opts.use_emoji {
                         if has_changes {
-                            "✏️".to_string() // Would change
+                            "👀".to_string() // Would change
                         } else {
                             "➖".to_string() // No changes (skipped)
                         }
@@ -934,7 +910,7 @@ pub fn display_clone_result_immediate(result: &CloneResult) -> Result<()> {
     match &result.error {
         Some(err) => {
             println!(
-                "⚠️  {} Failed: {}",
+                "🚨  {} Failed: {}",
                 result.repo_slug.red().bold(),
                 err.red()
             );
@@ -1025,31 +1001,32 @@ fn calculate_max_possible_emoji_width() -> usize {
         "🎯",
         "➕",
         "📍",
-        // Ahead/behind patterns (4-7 width) - now with spaces
-        "⬆️ 1",
-        "⬆️ 99",
-        "⬆️ 999",
-        "⬆️ 9999", // Up to 4 digits
-        "⬇️ 1",
-        "⬇️ 99",
-        "⬇️ 999",
-        "⬇️ 9999", // Up to 4 digits
+        // Ahead/behind patterns - bare width-1 arrows (crate width == terminal width)
+        "↑1",
+        "↑99",
+        "↑999",
+        "↑9999", // Up to 4 digits
+        "↓1",
+        "↓99",
+        "↓999",
+        "↓9999", // Up to 4 digits
         // Diverged patterns (7-11 width) - most complex, now with space
         "🔀 1↑1↓",
         "🔀 99↑99↓",
         "🔀 999↑999↓", // Up to 3 digits each
         // Error patterns (6-7 width)
-        "⚠️ git",
-        "⚠️ tim",
-        "⚠️ net",
-        "⚠️ abc",
+        "🚨 git",
+        "🚨 tim",
+        "🚨 net",
+        "🚨 abc",
         // Checkout patterns (2 width)
         "📥",
         "✨",
         "📦",
-        "⚠️",
+        "🚨",
         // Create patterns (2 width)
-        "👁️",
+        "👀",
+        "➖",
         "💾",
         // Review patterns (2 width)
         "📋",

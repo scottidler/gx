@@ -1124,7 +1124,7 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
     if opts.use_emoji {
         println!("\n📊 {total} repositories processed:");
         if dry_runs_with_changes > 0 {
-            println!("   ✏️  {dry_runs_with_changes} would change");
+            println!("   👀  {dry_runs_with_changes} would change");
         }
         if dry_runs_no_changes > 0 {
             println!("   ➖ {dry_runs_no_changes} no matches");

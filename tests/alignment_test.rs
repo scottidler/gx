@@ -8,9 +8,9 @@ fn test_emoji_alignment_consistency() {
     // Create test repos with different emoji statuses
     let test_repos = vec![
         create_test_status("🟢", "scottidler/test1"),  // 2 width
-        create_test_status("⬇️1", "scottidler/test2"), // 3 width
-        create_test_status("⬆️12", "scottidler/test3"), // 4 width
-        create_test_status("⚠️ git", "scottidler/test4"), // 6 width
+        create_test_status("↓1", "scottidler/test2"),  // 2 width
+        create_test_status("↑12", "scottidler/test3"), // 3 width
+        create_test_status("🚨 git", "scottidler/test4"), // 6 width
         create_test_status("🔀3↑2↓", "scottidler/test5"), // 6 width
     ];
 
@@ -54,9 +54,9 @@ fn create_test_status(emoji_type: &str, repo_slug: &str) -> RepoStatus {
     // Create different remote statuses to generate different emojis
     let remote_status = match emoji_type {
         "🟢" => RemoteStatus::UpToDate,
-        "⬇️1" => RemoteStatus::Behind(1),
-        "⬆️12" => RemoteStatus::Ahead(12),
-        "⚠️ git" => RemoteStatus::Error("git ls-remote failed".to_string()),
+        "↓1" => RemoteStatus::Behind(1),
+        "↑12" => RemoteStatus::Ahead(12),
+        "🚨 git" => RemoteStatus::Error("git ls-remote failed".to_string()),
         "🔀3↑2↓" => RemoteStatus::Diverged(3, 2),
         _ => RemoteStatus::UpToDate,
     };
@@ -78,9 +78,9 @@ fn test_emoji_display_width_calculation() {
     // Test individual width calculations using unicode-display-width values
     let test_cases = vec![
         ("🟢", 2),
-        ("⬇️1", 3),    // unicode-display-width: emoji (2) + digit (1) = 3
-        ("⬆️12", 4),   // unicode-display-width: emoji (2) + "12" (2) = 4
-        ("⚠️ git", 6), // Actual calculated width: emoji (2) + " git" (4) = 6
+        ("↓1", 2),     // bare arrow (1) + digit (1) = 2; crate width matches terminal
+        ("↑12", 3),    // bare arrow (1) + "12" (2) = 3; crate width matches terminal
+        ("🚨 git", 6), // emoji (2) + " git" (4) = 6
         ("🔀3↑2↓", 6),
     ];
 
