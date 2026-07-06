@@ -952,11 +952,15 @@ pub fn display_unified_format<T: UnifiedDisplay>(
 }
 
 /// Display a ReviewResult with PR number information
-pub fn display_review_result(
+/// Renders a single `ReviewResult` line (plus an optional error line) to a
+/// String. Review has its own layout - `<change_id> <PR#> <emoji> <repo>` - and
+/// does NOT flow through `render_unified_line`; keeping this pure lets the
+/// byte-identical regression test bite on review's real renderer.
+fn render_review_line(
     result: &ReviewResult,
     opts: &StatusOptions,
     widths: &AlignmentWidths,
-) {
+) -> String {
     // Branch (right-justified) - show change ID
     let branch_display = if opts.use_colors {
         format!(
@@ -986,7 +990,7 @@ pub fn display_review_result(
     let repo_display = format_repo_path_with_colors(&repo.path, repo_slug, opts.use_colors);
 
     // Final format: <change_id> <PR#> <emoji> <repo>
-    println!("{branch_display} {pr_display} {emoji_display} {repo_display}");
+    let mut out = format!("{branch_display} {pr_display} {emoji_display} {repo_display}");
 
     // Handle error display
     if let Some(error) = &result.error {
@@ -995,8 +999,19 @@ pub fn display_review_result(
         } else {
             format!("  Error: {error}")
         };
-        println!("{error_msg}");
+        out.push('\n');
+        out.push_str(&error_msg);
     }
+
+    out
+}
+
+pub fn display_review_result(
+    result: &ReviewResult,
+    opts: &StatusOptions,
+    widths: &AlignmentWidths,
+) {
+    println!("{}", render_review_line(result, opts, widths));
 }
 
 /// Display multiple items using unified formatting
@@ -1325,6 +1340,16 @@ mod tests {
         }
     }
 
+    fn review_result_fixture() -> ReviewResult {
+        ReviewResult {
+            repo: Repo::from_slug("scottidler/otto".to_string()),
+            change_id: "GX-1234".to_string(),
+            pr_number: None,
+            action: ReviewAction::Listed,
+            error: None,
+        }
+    }
+
     // ---- classify_view: pure classifier, all states + edges ----
 
     #[test]
@@ -1564,6 +1589,69 @@ mod tests {
             let expected = pre_change_formula(&result, &opts, &widths);
             assert_eq!(rendered, expected);
         }
+    }
+
+    #[test]
+    fn review_result_render_byte_identical_to_pre_change_formula() {
+        // Review renders through its own `render_review_line`, NOT the modified
+        // `render_unified_line`, so it never carries the layout marker. This
+        // recomputes review's `<change_id> <PR#> <emoji> <repo>` layout by hand
+        // and asserts the real renderer matches it, in both color modes - a
+        // future format edit fails here rather than silently changing output.
+        let result = review_result_fixture();
+        assert!(UnifiedDisplay::layout_view(&result).is_none());
+
+        for use_colors in [true, false] {
+            let opts = StatusOptions {
+                verbosity: OutputVerbosity::Summary,
+                use_emoji: true,
+                use_colors,
+            };
+            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+            let rendered = render_review_line(&result, &opts, &widths);
+            let expected = pre_change_review_formula(&result, &opts, &widths);
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    /// Recomputes review's `<change_id> <PR#> <emoji> <repo>` layout by hand
+    /// (independent of `render_review_line`), so a regression in review's
+    /// renderer fails a test rather than silently changing its output.
+    fn pre_change_review_formula(
+        result: &ReviewResult,
+        opts: &StatusOptions,
+        widths: &AlignmentWidths,
+    ) -> String {
+        let branch_display = if opts.use_colors {
+            format!(
+                "{:>width$}",
+                result.change_id.magenta(),
+                width = widths.branch_width
+            )
+        } else {
+            format!("{:>width$}", result.change_id, width = widths.branch_width)
+        };
+        let pr_ref = result.pr_reference();
+        let pr_display = if opts.use_colors {
+            format!("{:width$}", pr_ref.bright_black(), width = widths.sha_width)
+        } else {
+            format!("{:width$}", pr_ref, width = widths.sha_width)
+        };
+        let emoji = result.get_emoji(opts);
+        let emoji_display = pad_to_width(&emoji, widths.emoji_width);
+        let repo = &result.repo;
+        let repo_display = format_repo_path_with_colors(&repo.path, &repo.slug, opts.use_colors);
+        let mut out = format!("{branch_display} {pr_display} {emoji_display} {repo_display}");
+        if let Some(error) = &result.error {
+            let error_msg = if opts.use_colors {
+                format!("  Error: {}", error.red())
+            } else {
+                format!("  Error: {error}")
+            };
+            out.push('\n');
+            out.push_str(&error_msg);
+        }
+        out
     }
 
     /// Recomputes the pre-Phase-2 `None`-path rendering formula by hand, so a

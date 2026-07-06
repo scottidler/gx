@@ -143,3 +143,44 @@
 
 ### Open questions
 - None.
+
+## Post-audit: review byte-identical render test
+
+The implementation audit (review-panel, Mode 2) flagged one cheap-win: the
+acceptance criterion lists `ReviewResult` render as byte-identical "(render
+tests)," but review's byte-identity rested only on git-verified-unchanged proof
+plus a `layout_view() == None` assertion, with no byte-for-byte render test like
+checkout/create have.
+
+### Design decisions
+- Review renders through its OWN `display_review_result` (`src/output.rs`), a
+  separate renderer that never flows through the Phase-2-modified
+  `render_unified_line`. A byte-identical test *through `render_unified_line`*
+  (mirroring checkout/create) would exercise a path review never uses in
+  production - a non-biting test. So the close extracts a pure
+  `render_review_line` from `display_review_result` (mirroring the
+  `render_unified_line` + thin-`println!` split Phase 2 established) and tests
+  THAT, review's real renderer.
+
+### Deviations
+- The doc's Non-Goal declares review "byte-identical to today." This change
+  touches `display_review_result` but is a pure extract-refactor: the printed
+  output is unchanged (proven by the new test recomputing review's
+  `<change_id> <PR#> <emoji> <repo>` layout by hand and asserting equality in
+  both color modes). Output byte-identity holds; only the internal factoring
+  changed to make the criterion testable.
+
+### Tradeoffs
+- Extract-and-test vs. a doc note that byte-identity is git-proven: chose the
+  extraction because it gives review the same biting regression guard
+  checkout/create have (siblings behave identically) and makes the acceptance
+  criterion literally true, at the cost of one pure refactor on a Non-Goal
+  surface. The alternative (doc note only) leaves a future edit to
+  `display_review_result` able to silently change review output.
+
+### Bite check
+- Swapping the `pr`/`emoji` column order in `render_review_line` fails
+  `review_result_render_byte_identical_to_pre_change_formula`; reverting passes.
+
+### Open questions
+- None.
