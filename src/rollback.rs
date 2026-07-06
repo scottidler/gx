@@ -146,7 +146,7 @@ fn execute_recovery(transaction_id: &str, force: bool) -> Result<()> {
         }
 
         if !warnings.is_empty() {
-            println!("{}", "⚠️  Validation warnings:".yellow().bold());
+            println!("{}", "🚨  Validation warnings:".yellow().bold());
             for warning in &warnings {
                 println!("   {} {}", "•".yellow(), warning.yellow());
             }
@@ -319,7 +319,7 @@ fn cleanup_recovery_states(
     } else {
         println!(
             "{}",
-            format!("⚠️  Cleaned up {cleaned_count} recovery states, {failed_count} failed")
+            format!("🚨  Cleaned up {cleaned_count} recovery states, {failed_count} failed")
                 .yellow()
                 .bold()
         );

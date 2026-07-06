@@ -391,7 +391,7 @@ EXAMPLES:
     /// Clean up branches after PR merge
     #[command(after_help = "CLEANUP LEGEND:
   🧹  Local branch deleted     🌐  Remote branch deleted
-  ⏭️   Already cleaned          🚨  Still has open PR
+  ⏩  Already cleaned          🚨  Still has open PR
   ❌  Cleanup failed            📊  Summary stats
 
 EXAMPLES:

@@ -1048,11 +1048,11 @@ fn display_pattern_analysis(results: &[CreateResult], opts: &StatusOptions) {
                 println!("   🔄 Files matched but unchanged: {files_no_change}");
             }
             if files_skipped_binary > 0 {
-                println!("   ⏭️  Binary files skipped: {files_skipped_binary}");
+                println!("   ⏩  Binary files skipped: {files_skipped_binary}");
             }
 
             if files_changed == 0 && total_files_scanned > 0 {
-                println!("   ⚠️  No files were modified by the pattern");
+                println!("   🚨  No files were modified by the pattern");
             }
         } else {
             println!("\nPattern Analysis:");

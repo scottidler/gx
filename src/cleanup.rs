@@ -141,7 +141,7 @@ fn cleanup_all_merged(
 
     println!("\n📊 Cleanup summary:");
     println!("   🧹 {} branches cleaned", total_cleaned);
-    println!("   ⏭️  {} skipped", total_skipped);
+    println!("   ⏩  {} skipped", total_skipped);
     if total_failed > 0 {
         println!("   ❌ {} failed", total_failed);
     }
@@ -168,7 +168,7 @@ fn cleanup_single_change(
     // Print summary
     println!("\n📊 Cleanup for {}:", change_id);
     println!("   🧹 {} branches cleaned", result.repos_cleaned);
-    println!("   ⏭️  {} skipped", result.repos_skipped);
+    println!("   ⏩  {} skipped", result.repos_skipped);
     if result.repos_failed > 0 {
         println!("   ❌ {} failed", result.repos_failed);
         for error in &result.errors {
