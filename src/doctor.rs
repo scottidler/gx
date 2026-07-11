@@ -104,6 +104,7 @@ fn report_orphans(purge: bool) -> Result<()> {
     let now = Utc::now();
 
     let mut orphans = Vec::new();
+    let mut failed = Vec::new();
     for state in &states {
         let repo_gone = !state.repo_path.exists();
         let stale = DateTime::parse_from_rfc3339(&state.created_at)
@@ -112,8 +113,23 @@ fn report_orphans(purge: bool) -> Result<()> {
             })
             .unwrap_or(false);
         if repo_gone || stale {
+            // A stale / repo-gone file ages out as an orphan even if it carries
+            // failed steps — nothing left to converge against.
             let reason = if repo_gone { "repo missing" } else { "stale" };
             orphans.push((state.transaction_id.clone(), reason));
+        } else if state.has_failed_steps() {
+            // Live and recent, but a rollback left failed steps: this is
+            // retained evidence, NOT a purge candidate.
+            failed.push((state.transaction_id.clone(), state.failed_step_count()));
+        }
+    }
+
+    println!("\nRECOVERY (FAILED STEPS):");
+    if failed.is_empty() {
+        println!("  none");
+    } else {
+        for (tx_id, count) in &failed {
+            println!("  {tx_id} ({count} failed step(s); re-run: gx rollback execute {tx_id})");
         }
     }
 

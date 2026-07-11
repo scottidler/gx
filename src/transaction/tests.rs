@@ -215,19 +215,19 @@ fn test_kill9_recovery_restores_branch_and_file() {
             repo_path: repo.path().to_path_buf(),
             created_at: "2026-06-11T00:00:00Z".to_string(),
             steps: vec![
-                RollbackStep::RestoreBackup {
+                StepEntry::pending(RollbackStep::RestoreBackup {
                     backup,
                     original: repo.path().join("README.md"),
-                },
-                RollbackStep::DeleteLocalBranch {
+                }),
+                StepEntry::pending(RollbackStep::DeleteLocalBranch {
                     repo: repo.path().to_path_buf(),
                     branch: "GX-kill".to_string(),
                     branch_existed: false,
-                },
-                RollbackStep::ResetCommit {
+                }),
+                StepEntry::pending(RollbackStep::ResetCommit {
                     repo: repo.path().to_path_buf(),
                     expected_sha: sha_before.clone(),
-                },
+                }),
             ],
         };
         let dir = data.path().join("gx").join("recovery");
@@ -281,5 +281,175 @@ fn test_finalize_restores_branch_and_stash() {
         // The stash was dropped after a clean apply.
         let reflog = run_git_command(&["reflog", "show", "stash"], repo.path());
         assert!(reflog.stdout.is_empty() || !reflog.status.success());
+    });
+}
+
+#[test]
+fn test_step_entry_roundtrip_and_legacy_bare_steps() {
+    // Journaled shape round-trips with status + error.
+    let entry = StepEntry {
+        step: RollbackStep::SwitchBranch {
+            repo: PathBuf::from("/r"),
+            branch: "main".to_string(),
+        },
+        status: StepStatus::Failed,
+        error: Some("boom".to_string()),
+    };
+    let json = serde_json::to_string(&entry).unwrap();
+    let back: StepEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(entry, back);
+
+    // A pre-journal recovery file stored bare `RollbackStep`s; those still load,
+    // defaulting to Pending, so an upgrade never strands an in-flight recovery.
+    let legacy = r#"[
+        { "SwitchBranch": { "repo": "/r", "branch": "main" } },
+        { "RemoveCreatedFile": { "path": "/f" } }
+    ]"#;
+    let steps: Vec<StepEntry> = serde_json::from_str(legacy).unwrap();
+    assert_eq!(steps.len(), 2);
+    assert!(steps.iter().all(|s| s.status == StepStatus::Pending));
+    assert!(steps.iter().all(|s| s.error.is_none()));
+}
+
+/// Hand-write a recovery file for `tx_id` under the active data dir.
+fn write_recovery_fixture(data: &Path, state: &RecoveryState) {
+    let dir = data.join("gx").join("recovery");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{}.json", state.transaction_id)),
+        serde_json::to_string_pretty(state).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_rollback_retains_artifacts_on_failed_step() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+
+    with_data_home(data.path(), || {
+        let tx_id = "tx-fail";
+        let backups_base = data.path().join("gx").join("backups").join(tx_id);
+
+        // Step A: a valid backup that restores cleanly.
+        let a_original = repo.path().join("a.txt");
+        std::fs::write(&a_original, "A-modified").unwrap();
+        let a_backup = backups_base.join("a.txt");
+        std::fs::create_dir_all(&backups_base).unwrap();
+        std::fs::write(&a_backup, "A-orig").unwrap();
+
+        // Step B: a backup path that does NOT exist yet -> restore fails.
+        let b_original = repo.path().join("b.txt");
+        let b_backup = backups_base.join("b.txt");
+
+        let state = RecoveryState {
+            transaction_id: tx_id.to_string(),
+            change_id: "GX-fail".to_string(),
+            repo_path: repo.path().to_path_buf(),
+            created_at: "2026-07-11T00:00:00Z".to_string(),
+            steps: vec![
+                StepEntry::pending(RollbackStep::RestoreBackup {
+                    backup: a_backup.clone(),
+                    original: a_original.clone(),
+                }),
+                StepEntry::pending(RollbackStep::RestoreBackup {
+                    backup: b_backup.clone(),
+                    original: b_original.clone(),
+                }),
+            ],
+        };
+        write_recovery_fixture(data.path(), &state);
+
+        // First run: reverse order runs B (fails) then A (succeeds).
+        let err = Transaction::execute_recovery(tx_id);
+        assert!(err.is_err(), "a failed step must surface an error");
+
+        // Evidence is retained: recovery file + backup dir survive.
+        assert!(
+            recovery_file(tx_id).unwrap().exists(),
+            "recovery file must survive a failed step"
+        );
+        assert!(
+            backups_base.exists(),
+            "backup dir must survive a failed step"
+        );
+
+        // The journal recorded the per-step outcome.
+        let loaded = Transaction::load_recovery_state(tx_id).unwrap();
+        assert_eq!(loaded.steps[0].status, StepStatus::Done, "step A restored");
+        assert_eq!(loaded.steps[1].status, StepStatus::Failed, "step B failed");
+        assert!(loaded.steps[1].error.is_some());
+        assert!(loaded.has_failed_steps());
+        // Step A actually ran.
+        assert_eq!(std::fs::read_to_string(&a_original).unwrap(), "A-orig");
+
+        // Remove the failure: create B's backup so the retry converges.
+        std::fs::write(&b_backup, "B-orig").unwrap();
+        Transaction::execute_recovery(tx_id).unwrap();
+
+        // Now everything is Done -> artifacts are cleaned up.
+        assert!(
+            !recovery_file(tx_id).unwrap().exists(),
+            "recovery file removed after convergence"
+        );
+        assert!(
+            !backups_base.exists(),
+            "backup dir removed after convergence"
+        );
+        assert_eq!(std::fs::read_to_string(&b_original).unwrap(), "B-orig");
+    });
+}
+
+#[test]
+fn test_popstash_applied_state_skips_reapply() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+
+    with_data_home(data.path(), || {
+        // Create WIP, stash it (-u), then apply it back to simulate the first
+        // beat of a two-beat PopStash having completed (journal at `Applied`).
+        std::fs::write(repo.path().join("wip.txt"), "v1").unwrap();
+        let sha = crate::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
+        crate::git::stash_apply_sha(repo.path(), &sha).unwrap();
+        // Mutate the applied file: a re-apply of the -u stash would now fail
+        // (untracked file already exists), so an Ok result proves apply was
+        // skipped.
+        std::fs::write(repo.path().join("wip.txt"), "v2").unwrap();
+
+        let tx_id = "tx-applied";
+        let state = RecoveryState {
+            transaction_id: tx_id.to_string(),
+            change_id: "GX-applied".to_string(),
+            repo_path: repo.path().to_path_buf(),
+            created_at: "2026-07-11T00:00:00Z".to_string(),
+            steps: vec![StepEntry {
+                step: RollbackStep::PopStash {
+                    repo: repo.path().to_path_buf(),
+                    stash_sha: sha.clone(),
+                },
+                status: StepStatus::Applied,
+                error: None,
+            }],
+        };
+        write_recovery_fixture(data.path(), &state);
+
+        // Applied -> only the drop runs; the apply is skipped and does not error.
+        Transaction::execute_recovery(tx_id).unwrap();
+
+        // Recovery converged and cleaned up.
+        assert!(!recovery_file(tx_id).unwrap().exists());
+        // The stash was dropped.
+        let list = run_git_command(&["stash", "list"], repo.path());
+        assert!(
+            String::from_utf8_lossy(&list.stdout).trim().is_empty(),
+            "stash should be dropped"
+        );
+        // The applied file was left untouched (no re-apply clobbered "v2").
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("wip.txt")).unwrap(),
+            "v2"
+        );
     });
 }

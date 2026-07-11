@@ -93,8 +93,8 @@ fn list_recovery_states() -> Result<()> {
         if !state.steps.is_empty() {
             println!("   Step Types:");
             let mut type_counts = std::collections::BTreeMap::new();
-            for step in &state.steps {
-                *type_counts.entry(step_kind(step)).or_insert(0) += 1;
+            for entry in &state.steps {
+                *type_counts.entry(step_kind(&entry.step)).or_insert(0) += 1;
             }
             for (kind, count) in type_counts {
                 println!("     {} {}: {}", "•".blue(), kind, count);
