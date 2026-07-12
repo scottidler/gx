@@ -209,6 +209,61 @@ fn test_atomic_write_creates_and_overwrites() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_atomic_write_preserves_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("script.sh");
+    fs::write(&path, "#!/bin/sh\necho hi\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Before F3, atomic_write's NamedTempFile persisted at 0600 regardless of
+    // the target's existing mode - this proves the rewrite preserves it.
+    atomic_write(&path, b"#!/bin/sh\necho bye\n").unwrap();
+
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(
+        mode, 0o755,
+        "atomic_write must preserve the existing target's mode"
+    );
+}
+
+// Raw FFI to libc's `umask(2)`: the design explicitly rules out a new crate
+// dependency for mode handling, and this is the only syscall needed to prove
+// `atomic_write`'s new-file mode is set explicitly rather than umask-derived.
+#[cfg(unix)]
+extern "C" {
+    fn umask(mask: u32) -> u32;
+}
+
+#[test]
+#[cfg(unix)]
+fn test_atomic_write_new_file_mode_under_restrictive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // umask is process-global state; serialize with every other test that
+    // mutates shared environment/process state.
+    let _guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("new.txt");
+
+    // A maximally restrictive umask: a raw open()/creat() would leave the
+    // temp file well below 0644. atomic_write's explicit chmod must win.
+    let prior = unsafe { umask(0o077) };
+    let result = atomic_write(&path, b"content");
+    unsafe { umask(prior) };
+    result.unwrap();
+
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(
+        mode, 0o644,
+        "a brand-new file must be 0644 regardless of the process umask"
+    );
+}
+
+#[test]
 fn test_validate_new_file_path_accepts_normal() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
@@ -332,14 +387,46 @@ fn test_create_and_restore_out_of_tree_backup() {
     fs::write(&file_path, "original content").unwrap();
 
     // Backup lives outside the worktree and the original is untouched.
-    create_backup(&file_path, &backup_path).unwrap();
+    let mode = create_backup(&file_path, &backup_path).unwrap();
     assert!(backup_path.exists());
     assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
 
     // Modify, then restore from the out-of-tree backup.
     fs::write(&file_path, "modified content").unwrap();
-    restore_backup(&backup_path, &file_path).unwrap();
+    restore_backup(&backup_path, &file_path, mode).unwrap();
     assert_eq!(fs::read_to_string(&file_path).unwrap(), "original content");
     // The backup is left in place (the tx dir is cleaned wholesale later).
     assert!(backup_path.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_restore_backup_restores_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("run.sh");
+    let backup_path = temp_dir.path().join("backups").join("tx-1").join("run.sh");
+
+    fs::write(&file_path, "#!/bin/sh\necho hi\n").unwrap();
+    fs::set_permissions(&file_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mode = create_backup(&file_path, &backup_path).unwrap();
+    assert_eq!(mode, 0o755);
+
+    // Delete-then-restore (the `gx create delete` rollback path): the original
+    // is gone entirely, so `atomic_write` alone has no existing target to
+    // preserve a mode from - the mode captured at backup time must still be
+    // applied. Without threading it through, the restored file would come
+    // back at atomic_write's new-file default (0644), silently dropping the
+    // executable bit.
+    fs::remove_file(&file_path).unwrap();
+
+    restore_backup(&backup_path, &file_path, mode).unwrap();
+
+    let restored_mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(
+        restored_mode, 0o755,
+        "restore_backup must reapply the mode captured at backup time"
+    );
 }

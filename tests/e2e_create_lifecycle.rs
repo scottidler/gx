@@ -150,6 +150,117 @@ fn test_create_lifecycle_offline() {
         ])
         .env("XDG_DATA_HOME", data_home.path())
         .output()
-        .expect("gx cleanup failed to spawn");
+        .expect("gx cleanup --list failed to spawn");
     assert!(cleanup.status.success(), "gx cleanup --list failed");
+}
+
+/// F3 e2e: `gx create sub` over a tracked executable must not flip its mode.
+/// Before this phase, `atomic_write` unconditionally wrote through
+/// `NamedTempFile`, which persists at 0600, so every substitution silently
+/// dropped the executable bit fleet-wide - git only tracks a binary
+/// executable/non-executable bit per file (100755 vs 100644), so a 0600
+/// rewrite is exactly what flips a tracked script's tree entry to 100644.
+///
+/// The check is done against the GX branch's own committed tree, not the
+/// working directory after the run finishes: `finalize` switches back to the
+/// user's original branch, and a plain `git checkout`/`switch` recreates any
+/// file whose blob differs between branches using the process umask (this is
+/// git's own long-standing behavior, unrelated to `atomic_write`) - so
+/// comparing exact working-tree permission bits post-finalize would be
+/// asserting an invariant git itself does not provide.
+#[test]
+#[cfg(unix)]
+fn test_create_sub_preserves_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = TempDir::new().unwrap();
+    let remotes = TempDir::new().unwrap();
+    let data_home = TempDir::new().unwrap();
+
+    let repo = make_repo(workspace.path(), remotes.path(), "toolbox", "main");
+
+    // Add a tracked, executable script and commit it at 0755.
+    let script = repo.join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\necho old value\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "--quiet", "-m", "add executable"], &repo);
+    git(&["push", "--quiet", "origin", "main"], &repo);
+
+    let output = Command::new(gx_binary())
+        .args([
+            "--cwd",
+            workspace.path().to_str().unwrap(),
+            "--log-level",
+            "off",
+            "create",
+            "--files",
+            "**/*.sh",
+            "--commit",
+            "e2e: preserve executable mode",
+            "--yes",
+            "sub",
+            "old",
+            "new",
+        ])
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("gx failed to spawn");
+    assert!(
+        output.status.success(),
+        "gx create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `git status --porcelain` is clean: finalize restored the original
+    // branch and no dangling diff (mode or otherwise) was left behind.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "git status --porcelain must be clean, got: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    // Find the GX branch gx created and pushed.
+    let branches = Command::new("git")
+        .args(["branch", "--list", "GX-*"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&branches.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim_start_matches("* ").trim().to_string())
+        .expect("gx must have created a GX- branch");
+
+    // The committed tree entry on the GX branch is still mode 100755, not
+    // 100644 - the executable bit survived the rewrite.
+    let ls_tree = Command::new("git")
+        .args(["ls-tree", &branch, "run.sh"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let entry = String::from_utf8_lossy(&ls_tree.stdout);
+    assert!(
+        entry.starts_with("100755"),
+        "run.sh must remain mode 100755 on {branch}, got: {entry:?}"
+    );
+
+    // `git diff --summary` reports mode-change lines ONLY when a blob's
+    // executable bit differs between the two sides; asserting their absence
+    // proves the commit carried a content-only change.
+    let diff_summary = Command::new("git")
+        .args(["diff", "--summary", "main", &branch, "--", "run.sh"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let summary = String::from_utf8_lossy(&diff_summary.stdout);
+    assert!(
+        !summary.contains("mode"),
+        "the GX commit must not change run.sh's mode, got: {summary:?}"
+    );
 }

@@ -261,12 +261,14 @@ impl StateManager {
         Self { state_dir }
     }
 
-    /// Save a change state to disk
+    /// Save a change state to disk (atomic, F8): a torn write here would hide
+    /// or corrupt the whole campaign's bookkeeping, not just one file.
     pub fn save(&self, state: &ChangeState) -> Result<()> {
         let file_path = self.state_dir.join(format!("{}.json", state.change_id));
         let json =
             serde_json::to_string_pretty(state).context("Failed to serialize change state")?;
-        fs::write(&file_path, json).context("Failed to write change state file")?;
+        crate::file::atomic_write(&file_path, json.as_bytes())
+            .context("Failed to write change state file")?;
         debug!("Saved change state to {}", file_path.display());
         Ok(())
     }

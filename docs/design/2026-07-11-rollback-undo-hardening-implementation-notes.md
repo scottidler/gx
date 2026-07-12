@@ -159,3 +159,88 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None.
+
+## Phase 3: Write mechanics
+
+### Design decisions
+- `atomic_write` now handles permissions explicitly rather than inheriting
+  `NamedTempFile`'s restrictive creation mode — `src/file.rs:atomic_write`. It
+  stats the EXISTING target's mode (`mode_of`) before the write and applies it
+  to the temp file with an explicit `fchmod` before `persist`; a target that
+  does not yet exist gets `NEW_FILE_MODE = 0o644` set the same explicit way
+  (not derived from the temp file's creation-time mode or the process umask).
+- `create_backup` now returns the backed-up file's mode (captured via
+  `mode_of` before the copy) instead of `()` — `src/file.rs:create_backup`.
+  `RollbackStep::RestoreBackup` gained `mode: u32` per the Data Model —
+  `src/transaction.rs:RollbackStep`. `restore_backup` takes the mode as a
+  parameter and applies it via an explicit `set_permissions` AFTER
+  `atomic_write` — `src/file.rs:restore_backup`. This is load-bearing for the
+  delete-then-restore path (`gx create delete`): by the time `RestoreBackup`
+  runs, `original` may not exist at all, so `atomic_write`'s "preserve the
+  existing target's mode" logic has nothing to preserve from and would default
+  to 0644, silently dropping the executable bit. All three `create.rs` call
+  sites (`apply_delete_change`, `apply_substitution_change`,
+  `apply_regex_change`) thread the returned mode into the pushed
+  `RestoreBackup` step.
+- `StateManager::save` routes through `crate::file::atomic_write` instead of
+  `fs::write` — `src/state.rs:StateManager::save` (F8). No other behavior
+  change; `ChangeState`'s directory is already created in `StateManager::new`.
+- Transaction id gained the pid: `gx-tx-<ts>-<pid>-<counter>` via
+  `std::process::id()` — `src/transaction.rs:Transaction::new` (F9). Verified
+  no other code parses the id's internal structure (`rollback.rs`,
+  `cleanup.rs` treat it as an opaque string; age comes from `created_at`, not
+  the id).
+- `process_single_repo`'s head-branch resolution (F10) — `src/create.rs`
+  (step 3, formerly `if let Ok(head) = git::get_head_branch(...)`) — now
+  matches on `Result` and returns a hard `dry_run_error` (after
+  `transaction.rollback()`) on failure, naming "Failed to determine head
+  branch". The unrelated `if let Ok(branch) = git::get_head_branch(...)` in
+  `resolve_base_branch` (PR base-branch resolution, `create.rs:1012`) is a
+  deliberate, already-cascading fallback chain (head -> GitHub default ->
+  `main`) per its own doc comment ("a lookup failure must never drop the PR")
+  and is NOT the F10 site; left untouched.
+
+### Deviations
+- The e2e success criterion ("a fleet sub run over an executable produces zero
+  mode changes in `git status --porcelain`") is verified against the GX
+  branch's own committed tree (`git ls-tree <branch> -- run.sh` starts with
+  `100755`, `git diff --summary main <branch> -- run.sh` carries no `mode`
+  line), not the working directory after the full run completes —
+  `tests/e2e_create_lifecycle.rs:test_create_sub_preserves_executable_mode`.
+  Investigated by instrumenting `atomic_write` and `commit_changes_with_rollback`
+  with temporary debug prints: the file is confirmed at the correct mode
+  (0755) through every `atomic_write` call and immediately after `git commit`,
+  inside the gx process. The drift to 0775 happens strictly AFTER the process
+  exits, and is reproduced by `Transaction::finalize`'s `switch_branch` back to
+  the user's original branch: `git checkout`/`switch` recreates any file whose
+  blob differs between branches using the process umask (0777/0666 & ~umask)
+  rather than preserving the exact prior permission bits — this is git's own
+  long-standing checkout behavior (confirmed with a bare `chmod`+`rename`
+  reproduction outside gx entirely) and is orthogonal to `atomic_write`; git
+  itself only ever tracks a binary executable bit (100644 vs 100755) for
+  regular files, never the finer-grained rwx bits, so it is not an invariant
+  `atomic_write` can or should try to preserve across a branch switch. Same
+  effect (proves F3 - the executable bit never gets dropped), correct seam
+  (checked where git's own tracking lives, not the umask-dependent working
+  tree after finalize's branch switch).
+- `NEW_FILE_MODE` and the mode-preservation logic are behind `#[cfg(unix)]`,
+  matching the doc's Windows non-goal ("not regressing", not new behavior);
+  non-unix builds keep the pre-existing behavior (mode considerations are a
+  no-op, `create_backup` returns `NEW_FILE_MODE` as a placeholder that
+  `restore_backup` then can't meaningfully apply either, since the
+  `set_permissions` call is also `#[cfg(unix)]`).
+
+### Tradeoffs
+- `mode_of` masks to `0o7777` (rwxrwxrwx + setuid/setgid/sticky), not just
+  `0o777`, so an existing setuid/setgid/sticky bit is preserved rather than
+  silently dropped. Chosen over a `0o777` mask because dropping those bits
+  would be a second, narrower version of the same F3 bug for the (rare but
+  real) tracked file that carries one.
+- The umask-independence test (`test_atomic_write_new_file_mode_under_restrictive_umask`)
+  uses a raw `extern "C" { fn umask(mask: u32) -> u32; }` FFI declaration
+  rather than the `libc` crate, per the doc's explicit "no new crates
+  expected" for mode handling — `src/file/tests.rs`. `mode_t` is a 32-bit
+  unsigned int on every unix target this crate builds for.
+
+### Open questions
+- None.

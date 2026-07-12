@@ -69,6 +69,7 @@ fn test_rollback_step_serialize_roundtrip() {
         RollbackStep::RestoreBackup {
             backup: PathBuf::from("/b"),
             original: PathBuf::from("/o"),
+            mode: 0o644,
         },
         RollbackStep::RemoveCreatedFile {
             path: PathBuf::from("/f"),
@@ -77,6 +78,23 @@ fn test_rollback_step_serialize_roundtrip() {
     let json = serde_json::to_string(&steps).unwrap();
     let back: Vec<RollbackStep> = serde_json::from_str(&json).unwrap();
     assert_eq!(steps, back);
+}
+
+#[test]
+fn test_transaction_id_embeds_pid() {
+    // F9: the bare `<ts>-<counter>` form collides across processes (the
+    // counter resets to 1 in every new gx invocation); the pid must be
+    // present so two concurrent gx processes never generate the same id.
+    let tx = Transaction::new(PathBuf::from("/r"), "GX-pid".to_string(), false);
+    let pid = std::process::id().to_string();
+    let parts: Vec<&str> = tx.transaction_id.split('-').collect();
+    assert_eq!(parts[0], "gx");
+    assert_eq!(parts[1], "tx");
+    assert_eq!(
+        parts[3], pid,
+        "transaction id must embed the current process id, got: {}",
+        tx.transaction_id
+    );
 }
 
 #[test]
@@ -139,12 +157,13 @@ fn test_execute_step_restore_backup() {
     let original = temp.path().join("file.txt");
     let backup = temp.path().join("bk").join("file.txt");
     std::fs::write(&original, "ORIGINAL").unwrap();
-    crate::file::create_backup(&original, &backup).unwrap();
+    let mode = crate::file::create_backup(&original, &backup).unwrap();
     std::fs::write(&original, "MODIFIED").unwrap();
 
     execute_step(&RollbackStep::RestoreBackup {
         backup,
         original: original.clone(),
+        mode,
     })
     .unwrap();
     assert_eq!(std::fs::read_to_string(&original).unwrap(), "ORIGINAL");
@@ -215,7 +234,7 @@ fn test_kill9_recovery_restores_branch_and_file() {
             .join("backups")
             .join("tx-test")
             .join("README.md");
-        crate::file::create_backup(&repo.path().join("README.md"), &backup).unwrap();
+        let mode = crate::file::create_backup(&repo.path().join("README.md"), &backup).unwrap();
         git(&["checkout", "-q", "-b", "GX-kill"], repo.path());
         std::fs::write(repo.path().join("README.md"), "MUTATED\n").unwrap();
         git(&["add", "-A"], repo.path());
@@ -234,6 +253,7 @@ fn test_kill9_recovery_restores_branch_and_file() {
                 StepEntry::pending(RollbackStep::RestoreBackup {
                     backup,
                     original: repo.path().join("README.md"),
+                    mode,
                 }),
                 StepEntry::pending(RollbackStep::DeleteLocalBranch {
                     repo: repo.path().to_path_buf(),
@@ -371,10 +391,12 @@ fn test_rollback_retains_artifacts_on_failed_step() {
                 StepEntry::pending(RollbackStep::RestoreBackup {
                     backup: a_backup.clone(),
                     original: a_original.clone(),
+                    mode: 0o644,
                 }),
                 StepEntry::pending(RollbackStep::RestoreBackup {
                     backup: b_backup.clone(),
                     original: b_original.clone(),
+                    mode: 0o644,
                 }),
             ],
         };

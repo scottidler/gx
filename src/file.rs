@@ -88,10 +88,20 @@ impl FileSet {
     }
 }
 
+/// Mode a brand-new file gets from `atomic_write`, set explicitly rather than
+/// inherited from the temp file's creation mode or the process umask (F3).
+const NEW_FILE_MODE: u32 = 0o644;
+
 /// Atomically write bytes to `path`: write to a uniquely named temp file in the
 /// target's own directory, fsync, then rename over the target. A crash or torn
 /// write can never leave a truncated file in place ([A21]). The temp file lives
 /// in the same directory so the final rename stays on one filesystem.
+///
+/// Permissions are handled explicitly rather than inherited from the temp
+/// file's restrictive creation mode (F3): an existing target's mode is stat'd
+/// before the write and applied to the temp file before the rename, so
+/// rewriting a tracked executable can never flip it to 0600. A brand-new
+/// target gets [`NEW_FILE_MODE`] set directly - not derived from the umask.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -112,6 +122,16 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     tmp.as_file()
         .sync_all()
         .with_context(|| format!("Failed to fsync temp file for: {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = mode_of(path).unwrap_or(NEW_FILE_MODE);
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("Failed to set mode on temp file for: {}", path.display()))?;
+    }
+
     tmp.persist(path)
         .map_err(|e| eyre::eyre!("Failed to persist temp file to {}: {}", path.display(), e))?;
 
@@ -121,6 +141,15 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+/// The permission bits of `path` (masked to the rwxrwxrwx + setuid/setgid/
+/// sticky range), or an error if it does not exist / cannot be stat'd.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path).with_context(|| format!("Failed to stat: {}", path.display()))?;
+    Ok(meta.permissions().mode() & 0o7777)
 }
 
 /// Validate a relative path for `gx add` and resolve it to an absolute path
@@ -272,15 +301,22 @@ pub fn create_file_with_content(
 }
 
 /// Copy `original` to an out-of-tree `backup` path, creating parent dirs.
+/// Returns `original`'s mode at backup time, so callers can carry it in the
+/// `RestoreBackup` step and restore it even if `original` is later deleted
+/// (delete-then-restore has nothing left to stat mode from otherwise, F3).
 ///
 /// Backups live under `$XDG_DATA_HOME/gx/backups/<tx-id>/...`, never beside the
 /// original ([A21]). This keeps `*.backup` files out of the worktree where they
 /// could match later glob patterns or collide with user files.
-pub fn create_backup(original: &Path, backup: &Path) -> Result<()> {
+pub fn create_backup(original: &Path, backup: &Path) -> Result<u32> {
     if let Some(parent) = backup.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create backup dir: {}", parent.display()))?;
     }
+    #[cfg(unix)]
+    let mode = mode_of(original)?;
+    #[cfg(not(unix))]
+    let mode = NEW_FILE_MODE;
     fs::copy(original, backup).with_context(|| {
         format!(
             "Failed to back up {} to {}",
@@ -289,22 +325,37 @@ pub fn create_backup(original: &Path, backup: &Path) -> Result<()> {
         )
     })?;
     debug!(
-        "create_backup: {} -> {}",
+        "create_backup: {} -> {} (mode {mode:o})",
         original.display(),
         backup.display()
     );
-    Ok(())
+    Ok(mode)
 }
 
-/// Restore `original` from an out-of-tree `backup` (atomic write). The backup
-/// itself is left in place; the whole tx backup dir is removed on finalize or
-/// completed rollback.
-pub fn restore_backup(backup: &Path, original: &Path) -> Result<()> {
+/// Restore `original` from an out-of-tree `backup` (atomic write), then apply
+/// `mode` (captured at backup time) explicitly - `atomic_write` alone would
+/// preserve `original`'s CURRENT mode, which is wrong when `original` no
+/// longer exists (a delete step ran) or was already re-written by a later
+/// mutation. The backup itself is left in place; the whole tx backup dir is
+/// removed on finalize or completed rollback.
+pub fn restore_backup(backup: &Path, original: &Path, mode: u32) -> Result<()> {
     let bytes =
         fs::read(backup).with_context(|| format!("Failed to read backup: {}", backup.display()))?;
     atomic_write(original, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(original, std::fs::Permissions::from_mode(mode)).with_context(
+            || {
+                format!(
+                    "Failed to set mode on restored file: {}",
+                    original.display()
+                )
+            },
+        )?;
+    }
     debug!(
-        "restore_backup: {} -> {}",
+        "restore_backup: {} -> {} (mode {mode:o})",
         backup.display(),
         original.display()
     );

@@ -503,25 +503,36 @@ fn process_single_repo(
         }
     }
 
-    // 3. Switch to the head branch if we are not already on it.
-    if let Ok(head) = git::get_head_branch(repo_path) {
-        if head != original_branch {
-            // Write-ahead: persist the switch-back before switching away.
-            if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::SwitchBranch {
-                repo: repo_path.clone(),
-                branch: original_branch.clone(),
-            }) {
-                transaction.rollback();
-                return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
-            }
-            if let Err(e) = git::switch_branch(repo_path, &head) {
-                transaction.rollback();
-                return dry_run_error(
-                    repo,
-                    change_id,
-                    format!("Failed to switch to head branch: {e}"),
-                );
-            }
+    // 3. Switch to the head branch if we are not already on it. A failure here
+    //    (F10) is a hard per-repo error: swallowing it would silently mutate
+    //    whatever branch the user happened to be on.
+    let head = match git::get_head_branch(repo_path) {
+        Ok(head) => head,
+        Err(e) => {
+            transaction.rollback();
+            return dry_run_error(
+                repo,
+                change_id,
+                format!("Failed to determine head branch: {e}"),
+            );
+        }
+    };
+    if head != original_branch {
+        // Write-ahead: persist the switch-back before switching away.
+        if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::SwitchBranch {
+            repo: repo_path.clone(),
+            branch: original_branch.clone(),
+        }) {
+            transaction.rollback();
+            return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
+        }
+        if let Err(e) = git::switch_branch(repo_path, &head) {
+            transaction.rollback();
+            return dry_run_error(
+                repo,
+                change_id,
+                format!("Failed to switch to head branch: {e}"),
+            );
         }
     }
 
@@ -744,10 +755,11 @@ fn apply_delete_change(
 
         // Out-of-tree backup, then write-ahead register the restore before delete.
         let backup_path = transaction.backup_path_for(&file_path)?;
-        file::create_backup(&full_path, &backup_path)?;
+        let mode = file::create_backup(&full_path, &backup_path)?;
         transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
             backup: backup_path,
             original: full_path.clone(),
+            mode,
         })?;
 
         // Delete file
@@ -797,10 +809,11 @@ fn apply_substitution_change(
             } => {
                 // Out-of-tree backup, then write-ahead register the restore.
                 let backup_path = transaction.backup_path_for(&file_path)?;
-                file::create_backup(&full_path, &backup_path)?;
+                let mode = file::create_backup(&full_path, &backup_path)?;
                 transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
                     backup: backup_path,
                     original: full_path.clone(),
+                    mode,
                 })?;
 
                 // Write updated content
@@ -874,10 +887,11 @@ fn apply_regex_change(
             } => {
                 // Out-of-tree backup, then write-ahead register the restore.
                 let backup_path = transaction.backup_path_for(&file_path)?;
-                file::create_backup(&full_path, &backup_path)?;
+                let mode = file::create_backup(&full_path, &backup_path)?;
                 transaction.push_step(crate::transaction::RollbackStep::RestoreBackup {
                     backup: backup_path,
                     original: full_path.clone(),
+                    mode,
                 })?;
 
                 // Write updated content
@@ -1212,6 +1226,44 @@ mod tests {
         let change_id = generate_change_id();
         assert!(change_id.starts_with("GX-"));
         assert!(change_id.len() > 10); // Should have timestamp
+    }
+
+    #[test]
+    fn test_process_single_repo_hard_errors_on_head_branch_failure() {
+        // F10: a `get_head_branch` failure must surface as a hard per-repo
+        // error, not be silently swallowed (which would leave the repo on
+        // whatever branch the user happened to be on).
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path().to_path_buf();
+        fs::write(repo_path.join("README.md"), "# repo").unwrap();
+        init_git_repo(&repo_path);
+        // No `origin` remote: get_head_branch() can neither read
+        // origin/HEAD nor confirm main/master exist remotely, so it errors.
+        let repo = Repo::new(repo_path).unwrap();
+
+        let result = process_single_repo(
+            &repo,
+            "GX-test",
+            &["**/*.md".to_string()],
+            &Change::Delete,
+            None,
+            None,
+            &Config::default(),
+        );
+
+        assert!(
+            result.error.is_some(),
+            "a get_head_branch failure must be a hard error, not swallowed"
+        );
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("determine head branch"),
+            "error should name the head-branch failure, got: {:?}",
+            result.error
+        );
     }
 
     #[test]

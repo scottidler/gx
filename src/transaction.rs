@@ -55,8 +55,15 @@ pub enum RollbackStep {
     LegacyDeleteRemoteBranch { repo: PathBuf, branch: String },
     /// Reset HEAD back to the pre-commit SHA (a known target, not blind HEAD~1).
     ResetCommit { repo: PathBuf, expected_sha: String },
-    /// Restore a file from its out-of-tree backup.
-    RestoreBackup { backup: PathBuf, original: PathBuf },
+    /// Restore a file from its out-of-tree backup. `mode` is the original
+    /// file's permission bits, captured at backup time (F3): `original` may no
+    /// longer exist by the time this runs (a delete step ran), so the mode
+    /// cannot be re-derived from it at restore time.
+    RestoreBackup {
+        backup: PathBuf,
+        original: PathBuf,
+        mode: u32,
+    },
     /// Remove a file gx created (for `gx add`).
     RemoveCreatedFile { path: PathBuf },
 }
@@ -260,7 +267,10 @@ impl Transaction {
     pub fn new(repo_path: PathBuf, change_id: String, persist: bool) -> Self {
         let counter = TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = chrono::Utc::now().timestamp();
-        let transaction_id = format!("gx-tx-{timestamp}-{counter}");
+        let pid = std::process::id();
+        // Include the pid (F9): the bare `<ts>-<counter>` form collides across
+        // processes, since the counter resets to 1 in every new gx invocation.
+        let transaction_id = format!("gx-tx-{timestamp}-{pid}-{counter}");
         Transaction {
             transaction_id,
             change_id,
@@ -646,9 +656,11 @@ pub fn execute_step(step: &RollbackStep) -> Result<()> {
         RollbackStep::ResetCommit { repo, expected_sha } => {
             git::reset_hard_to_sha(repo, expected_sha)
         }
-        RollbackStep::RestoreBackup { backup, original } => {
-            crate::file::restore_backup(backup, original)
-        }
+        RollbackStep::RestoreBackup {
+            backup,
+            original,
+            mode,
+        } => crate::file::restore_backup(backup, original, *mode),
         RollbackStep::RemoveCreatedFile { path } => {
             if path.exists() {
                 std::fs::remove_file(path).with_context(|| {
