@@ -4,6 +4,7 @@
 **Reviewer:** Scott Idler
 **Date:** 2026-07-12
 **Status:** Implemented
+**Shipped in:** v0.5.0
 **Review Passes Completed:** 5/5
 **External review:** Architect (Gemini) + Staff Engineer (Codex), 2026-07-12;
 all findings folded (see Resolved Decisions); one escalation answered by
