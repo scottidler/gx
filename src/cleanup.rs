@@ -214,6 +214,12 @@ fn cleanup_single_change(
     if state.get_repos_needing_cleanup().is_empty() && result.repos_failed == 0 {
         state_manager.delete(change_id)?;
         println!("   ✅ Change state removed");
+        // Retention (design Data Model): the proposal dir is removed when the
+        // change reaches its cleaned-up terminal. Best-effort + idempotent; a
+        // change that never had a proposal is a harmless no-op.
+        if let Err(e) = crate::create::manifest::remove_proposal_dir(change_id) {
+            warn!("Failed to remove proposal artifacts for {change_id}: {e}");
+        }
     }
 
     Ok(())

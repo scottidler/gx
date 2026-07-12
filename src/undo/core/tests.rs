@@ -1170,3 +1170,162 @@ fn branch_on_bare(bare: &std::path::Path, branch: &str) -> bool {
         .status
         .success()
 }
+
+// ---- Phase 5: the real `Proposed` local-only undo arm (replaces Phase 4's
+// fail-safe stub). A bare proposal has nothing pushed, so undo deletes the
+// proposal artifacts and marks the repo CleanedUp, touching NO remote. ----
+
+#[test]
+fn classify_proposed_is_local_only_cleanup() {
+    // The Phase 4 stub mapped Proposed -> AlreadyGone; Phase 5 wires the real
+    // local-only arm. This pins that it is NEVER a remote-mutating action.
+    assert_eq!(
+        classify_action(&RepoChangeStatus::Proposed, None),
+        UndoAction::CleanupProposal
+    );
+    assert!(
+        !is_remote_mutating(&UndoAction::CleanupProposal),
+        "a bare-proposal cleanup must never be classified remote-mutating"
+    );
+}
+
+/// Write an executable spy at `dir/<name>` that appends its argv to
+/// `dir/<name>.called` and exits 0. If the undo path ever shells out to it, the
+/// sentinel file appears - the airtight "zero invocations" proof.
+#[cfg(unix)]
+fn write_spy(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let sentinel = dir.join(format!("{name}.called"));
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+        sentinel.display()
+    );
+    let path = dir.join(name);
+    fs::write(&path, script).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    sentinel
+}
+
+#[test]
+#[cfg(unix)]
+fn undo_bare_proposal_is_local_only_with_zero_remote_invocations() {
+    // Success criterion: `gx undo` on a bare (unapplied) proposal removes the
+    // artifacts + state LOCALLY with ZERO gh/git-remote invocations. Proven by
+    // `gh` and `git` PATH spies whose sentinel files must never appear.
+    let guard = crate::test_utils::env_lock();
+
+    let data_home = TempDir::new().unwrap();
+    let spies = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap(); // stands in as the repo checkout
+    let gh_sentinel = write_spy(spies.path(), "gh");
+    let git_sentinel = write_spy(spies.path(), "git");
+
+    let change_id = "GX-bare-proposal";
+    let slug = "acme/svc";
+
+    let prior_path = std::env::var("PATH").ok();
+    let prior_data = std::env::var("XDG_DATA_HOME").ok();
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", data_home.path());
+    }
+
+    // Persist a bare proposal: a manifest under proposals/<id>/ AND a change
+    // state whose sole repo is `Proposed` (exactly what the propose pass writes).
+    let dir = crate::create::manifest::proposal_dir(change_id).unwrap();
+    let manifest = crate::create::manifest::ProposalManifest::new(
+        change_id.to_string(),
+        "rewrite".to_string(),
+        "fake-agent".to_string(),
+        vec![crate::create::manifest::RepoProposal {
+            slug: slug.to_string(),
+            base_sha: "deadbeef".to_string(),
+            outcome: crate::create::manifest::ProposalOutcome::Proposed,
+            error: None,
+            files: vec![],
+        }],
+    );
+    crate::create::manifest::write_manifest(&dir, &manifest).unwrap();
+    assert!(dir.exists(), "proposal dir must exist before undo");
+
+    let mut state = ChangeState::new(change_id.to_string(), Some("rewrite".to_string()));
+    state.mark_proposed(
+        slug,
+        "deadbeef".to_string(),
+        vec!["README.md".to_string()],
+        Some(repo_dir.path().to_string_lossy().to_string()),
+    );
+    crate::state::StateManager::new()
+        .unwrap()
+        .save(&state)
+        .unwrap();
+
+    // Now put the spies FIRST on PATH so any gh/git shell-out is caught.
+    let new_path = format!(
+        "{}:{}",
+        spies.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe {
+        std::env::set_var("PATH", &new_path);
+    }
+
+    let plan_set = plan_undo(change_id, None, &Config::default())
+        .unwrap()
+        .expect("a bare proposal is something to undo");
+    // The plan action is the local-only cleanup, no recovery drain.
+    let p = plan_set.plan.iter().find(|p| p.slug == slug).unwrap();
+    assert_eq!(p.action, UndoAction::CleanupProposal);
+    assert!(p.recovery_tx_ids.is_empty());
+
+    let outcomes = execute_undo(
+        &plan_set,
+        change_id,
+        &Config::default(),
+        1,
+        crate::confirm::already_confirmed(),
+    )
+    .unwrap();
+
+    // Restore PATH before any assertion can early-return and leak it.
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].kind, OutcomeKind::Undone);
+
+    // Artifacts gone, repo CleanedUp, aggregate Abandoned.
+    assert!(
+        !dir.exists(),
+        "the proposal dir must be removed by the local-only undo"
+    );
+    let final_state = crate::state::StateManager::new()
+        .unwrap()
+        .load(change_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_state.repositories.get(slug).unwrap().status,
+        RepoChangeStatus::CleanedUp
+    );
+    assert_eq!(final_state.status, ChangeStatus::Abandoned);
+
+    // THE PROOF: neither spy was ever invoked.
+    assert!(
+        !gh_sentinel.exists(),
+        "gh must NOT be invoked for a bare-proposal undo"
+    );
+    assert!(
+        !git_sentinel.exists(),
+        "git must NOT be invoked for a bare-proposal undo"
+    );
+
+    match prior_data {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}

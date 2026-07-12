@@ -8,6 +8,7 @@
 //! seam a future MCP `create-apply` tool calls into instead of the wrapper.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod apply;
 pub mod manifest;
 pub mod propose;
 
@@ -19,13 +20,14 @@ use crate::git;
 use crate::github;
 use crate::repo::Repo;
 use crate::state::{ChangeState, StateManager};
-use crate::transaction::Transaction;
+use crate::transaction::{RollbackStep, Transaction};
 use chrono::Local;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
+use manifest::{FileAction, ProposalManifest, ProposalOutcome};
 use rayon::prelude::*;
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Statistics for substitution operations
 #[derive(Debug, Default, Clone)]
@@ -50,6 +52,22 @@ pub enum Change {
     /// barrier (design doc `2026-07-12-llm-propose-apply-and-mcp-server.md`,
     /// Chunk A). The per-repo match below rejects it defensively.
     Llm(String),
+    /// The INTERNAL deterministic apply of a persisted proposal (design doc
+    /// Chunk A, Apply pass). NEVER CLI-exposed and no [`CreateAction`] maps to
+    /// it: it is constructed only by [`apply::execute_apply`] and rides the
+    /// UNCHANGED `process_single_repo` pipeline (stash/switch/pull, then
+    /// branch/commit/push/PR), so recovery, undo, locks, and F12 apply exactly
+    /// as they do for `sub`/`regex`.
+    ///
+    /// Carries the proposal directory (blobs live under it) and the canonical
+    /// manifest (`Arc` so the fleet-shared `&Change` clones cheaply). Per repo,
+    /// `process_single_repo` looks up THIS repo's entry by slug, verifies the
+    /// post-pull `base_sha` and each blob's sha256 under the `RepoLock`, then
+    /// writes the full post-change bytes through the existing backup/write seam.
+    Patchset {
+        proposal_dir: PathBuf,
+        manifest: Arc<ProposalManifest>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +531,22 @@ fn process_single_repo(
         Change::Llm(_) => Err(eyre::eyre!(
             "internal error: Change::Llm must go through the propose pass, not process_single_repo"
         )),
+        // The deterministic apply of a persisted proposal (design Chunk A). Runs
+        // AFTER the pipeline's stash/switch/pull above, so the drift check inside
+        // sees the post-pull head. Everything downstream (branch/commit/push/PR)
+        // is the unchanged pipeline.
+        Change::Patchset {
+            proposal_dir,
+            manifest,
+        } => apply_patchset_change(
+            repo_path,
+            proposal_dir,
+            manifest,
+            &repo.slug,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        ),
     };
 
     if let Err(e) = change_result {
@@ -1041,6 +1075,157 @@ fn apply_regex_change(
     Ok(stats)
 }
 
+/// Apply a persisted proposal for ONE repo (`Change::Patchset`, design Chunk A
+/// apply). Runs under the per-repo `RepoLock` the caller already holds, AFTER
+/// the pipeline's stash/switch/pull, so `get_head_sha` sees the post-pull head.
+///
+/// Two loud, nothing-written refusals guard the write (both panel must-fixes):
+/// 1. **Post-pull drift**: `HEAD != base_sha` means the repo advanced past the
+///    proposal's base (pull can legitimately move head, which is why the check
+///    sits here). The proposal no longer describes this tree; re-propose.
+/// 2. **Blob tamper**: every add/modify blob is re-hashed and size-checked
+///    against the manifest BEFORE anything is written, so a proposal artifact
+///    altered after review is refused with the worktree untouched.
+///
+/// Only after every blob verifies does it write through the EXISTING seam:
+/// register `RestoreBackup`/`RemoveCreatedFile` write-ahead, then delete (for
+/// `Delete`) or write the full post-change bytes with the proposal's mode (for
+/// `Add`/`Modify`). gx never applies hunks to the real worktree - the diff is
+/// for humans, the blobs are for apply.
+fn apply_patchset_change(
+    repo_path: &Path,
+    proposal_dir: &Path,
+    manifest: &ProposalManifest,
+    slug: &str,
+    transaction: &mut Transaction,
+    files_affected: &mut Vec<String>,
+    diff_parts: &mut Vec<String>,
+) -> Result<()> {
+    debug!(
+        "apply_patchset_change: slug={slug} proposal_dir={} repo={}",
+        proposal_dir.display(),
+        repo_path.display()
+    );
+
+    // This repo's entry in the canonical manifest.
+    let rp = manifest
+        .repos
+        .iter()
+        .find(|r| r.slug == slug)
+        .ok_or_else(|| eyre::eyre!("no proposal entry for {slug} in the manifest"))?;
+    if rp.outcome != ProposalOutcome::Proposed {
+        return Err(eyre::eyre!(
+            "proposal for {slug} is not appliable (outcome {:?})",
+            rp.outcome
+        ));
+    }
+
+    // (1) Post-pull drift refusal: touches NOTHING (no blob written yet; the
+    //     caller rolls the stash/switch back to a byte-identical worktree).
+    let head = git::get_head_sha(repo_path)?;
+    if head != rp.base_sha {
+        return Err(eyre::eyre!(
+            "repo drifted since proposal; re-propose (proposal base {} != current head {head})",
+            rp.base_sha
+        ));
+    }
+
+    // (2) Verify every add/modify blob under the RepoLock BEFORE writing any of
+    //     them, so a tampered proposal is refused with nothing written. Read the
+    //     verified bytes into memory here; the write loop below only touches the
+    //     worktree once every blob passes.
+    let mut verified: Vec<(&manifest::FileEntry, Option<Vec<u8>>)> =
+        Vec::with_capacity(rp.files.len());
+    for entry in &rp.files {
+        match entry.action {
+            FileAction::Delete => verified.push((entry, None)),
+            FileAction::Add | FileAction::Modify => {
+                let want = entry.sha256.as_deref().ok_or_else(|| {
+                    eyre::eyre!(
+                        "proposal file {} has no sha256 (corrupt manifest)",
+                        entry.path
+                    )
+                })?;
+                let blob = manifest::blob_path(proposal_dir, slug, &entry.path);
+                let bytes = std::fs::read(&blob)
+                    .with_context(|| format!("Failed to read proposal blob: {}", blob.display()))?;
+                let got = crate::hash::sha256_hex(&bytes);
+                if got != want {
+                    return Err(eyre::eyre!(
+                        "blob hash mismatch for {} (manifest {want}, on-disk {got}); refusing to apply a tampered proposal",
+                        entry.path
+                    ));
+                }
+                if bytes.len() as u64 != entry.size {
+                    return Err(eyre::eyre!(
+                        "blob size mismatch for {} (manifest {}, on-disk {})",
+                        entry.path,
+                        entry.size,
+                        bytes.len()
+                    ));
+                }
+                verified.push((entry, Some(bytes)));
+            }
+        }
+    }
+
+    // All blobs verified: mutate through the existing backup/write seam.
+    for (entry, bytes) in verified {
+        let rel = Path::new(&entry.path);
+        let full = repo_path.join(rel);
+        match entry.action {
+            FileAction::Delete => {
+                if !full.exists() {
+                    return Err(eyre::eyre!(
+                        "cannot delete {}: file absent at the proposal base (unexpected drift)",
+                        entry.path
+                    ));
+                }
+                let backup_path = transaction.backup_path_for(rel)?;
+                let mode = file::create_backup(&full, &backup_path)?;
+                transaction.push_step(RollbackStep::RestoreBackup {
+                    backup: backup_path,
+                    original: full.clone(),
+                    mode,
+                })?;
+                file::delete_file(&full)?;
+                diff_parts.push(format!("  D {}", entry.path));
+            }
+            FileAction::Add => {
+                transaction.push_step(RollbackStep::RemoveCreatedFile { path: full.clone() })?;
+                let bytes = bytes.expect("add entry carries verified bytes");
+                file::write_bytes_with_git_mode(&full, &bytes, &entry.mode)?;
+                diff_parts.push(format!("  A {}", entry.path));
+            }
+            FileAction::Modify => {
+                if !full.exists() {
+                    return Err(eyre::eyre!(
+                        "cannot modify {}: file absent at the proposal base (unexpected drift)",
+                        entry.path
+                    ));
+                }
+                let backup_path = transaction.backup_path_for(rel)?;
+                let mode = file::create_backup(&full, &backup_path)?;
+                transaction.push_step(RollbackStep::RestoreBackup {
+                    backup: backup_path,
+                    original: full.clone(),
+                    mode,
+                })?;
+                let bytes = bytes.expect("modify entry carries verified bytes");
+                file::write_bytes_with_git_mode(&full, &bytes, &entry.mode)?;
+                diff_parts.push(format!("  M {}", entry.path));
+            }
+        }
+        files_affected.push(entry.path.clone());
+    }
+
+    debug!(
+        "apply_patchset_change: slug={slug} applied {} file(s)",
+        files_affected.len()
+    );
+    Ok(())
+}
+
 /// Create the gx branch, stage, commit, and push - registering each undo step
 /// write-ahead. The success-path branch restoration and stash pop are handled by
 /// `Transaction::finalize`, not here. Returns the pre-commit HEAD (the safe
@@ -1053,7 +1238,7 @@ fn commit_changes_with_rollback(
     files_affected: &[String],
     transaction: &mut Transaction,
 ) -> Result<String> {
-    use crate::transaction::{Phase, RollbackStep};
+    use crate::transaction::Phase;
 
     // Whether the branch pre-existed gx's run (so rollback won't delete it).
     let branch_existed = git::branch_exists_locally(repo_path, change_id).unwrap_or(false);

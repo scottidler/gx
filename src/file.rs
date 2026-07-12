@@ -270,6 +270,35 @@ pub fn write_file_content(file_path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Write raw bytes to a worktree file atomically, then set its mode explicitly
+/// from a git file-mode string (e.g. `"100644"` / `"100755"`). Used by the
+/// `Change::Patchset` apply path (design doc
+/// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Chunk A apply): the target
+/// mode comes from the PROPOSAL, not the file already on disk, so a mode-only or
+/// executable-bit change lands correctly rather than inheriting the pre-change
+/// mode `atomic_write` alone would preserve. The blob bytes are the exact
+/// post-change content (binary-safe: no UTF-8 round-trip). Non-Unix ignores mode.
+pub fn write_bytes_with_git_mode(file_path: &Path, bytes: &[u8], git_mode: &str) -> Result<()> {
+    atomic_write(file_path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // A git file mode is octal (`100644`); the low 0o777 bits are the perms.
+        // A zero/garbage mode falls back to the standard new-file mode rather
+        // than 0 (which would make the file unreadable).
+        let parsed = u32::from_str_radix(git_mode, 8).unwrap_or(0) & 0o777;
+        let mode = if parsed == 0 { NEW_FILE_MODE } else { parsed };
+        fs::set_permissions(file_path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("Failed to set mode {mode:o} on {}", file_path.display()))?;
+    }
+    debug!(
+        "write_bytes_with_git_mode: wrote {} bytes to {} (git mode {git_mode})",
+        bytes.len(),
+        file_path.display()
+    );
+    Ok(())
+}
+
 /// Delete a file
 pub fn delete_file(file_path: &Path) -> Result<()> {
     fs::remove_file(file_path)

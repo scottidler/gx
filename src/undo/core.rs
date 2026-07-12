@@ -49,6 +49,12 @@ pub enum UndoAction {
     UnverifiedOffline,
     /// Already gone (cleaned up): record and skip.
     AlreadyGone,
+    /// A bare (unapplied) proposal (`RepoChangeStatus::Proposed`): LOCAL-ONLY.
+    /// Nothing was pushed, so there is nothing remote to reverse. Undo deletes
+    /// the persisted proposal artifacts under `proposals/<change-id>/` and marks
+    /// the repo `CleanedUp`, and NEVER touches a remote (design Data Model,
+    /// `Proposed` undo arm). Replaces Phase 4's fail-safe `AlreadyGone` stub.
+    CleanupProposal,
 }
 
 /// One repo's undo plan: the campaign action plus any live recovery files to
@@ -120,12 +126,9 @@ fn org_of(repo_slug: &str) -> &str {
 fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAction {
     match status {
         // A bare (unapplied) proposal has NOTHING remote to reverse - no branch
-        // pushed, no PR. Mapped to `AlreadyGone` here so undo never touches a
-        // remote for it (fail-safe). Phase 5 replaces this with the design's
-        // local-only undo arm (delete proposal artifacts, mark CleanedUp); it is
-        // deliberately NOT the full behavior yet, only the non-mutating stub that
-        // keeps this exhaustive match compiling once `Proposed` exists.
-        RepoChangeStatus::Proposed => UndoAction::AlreadyGone,
+        // pushed, no PR. The LOCAL-ONLY arm (Phase 5): delete the proposal
+        // artifacts and mark the repo CleanedUp, touching no remote.
+        RepoChangeStatus::Proposed => UndoAction::CleanupProposal,
         // Already reverted (revert PR open) or cleaned up: nothing more to do.
         RepoChangeStatus::CleanedUp | RepoChangeStatus::RevertPrOpen => UndoAction::AlreadyGone,
         RepoChangeStatus::PrMerged => UndoAction::RequiresRevert { pr_number },
@@ -493,6 +496,18 @@ fn undo_one(plan: &UndoPlan, change_id: &str, config: &Config) -> UndoOutcome {
     // 2. Campaign action.
     match &plan.action {
         UndoAction::AlreadyGone => outcome(OutcomeKind::Skipped),
+        // A bare proposal: LOCAL-ONLY. Delete the proposal artifacts for this
+        // change; touch NO remote (there is nothing pushed to reverse). Removing
+        // the whole `proposals/<change-id>/` dir is idempotent, so parallel
+        // per-repo workers of the same change converge (later removes no-op).
+        UndoAction::CleanupProposal => {
+            match crate::create::manifest::remove_proposal_dir(change_id) {
+                Ok(()) => outcome(OutcomeKind::Undone),
+                Err(e) => outcome(OutcomeKind::Failed(format!(
+                    "failed to remove proposal artifacts: {e}"
+                ))),
+            }
+        }
         // Fail closed: merge state could not be verified. The recovery drain
         // above (local-only) already ran; touch NO remote here and report so the
         // user re-runs online (post-audit hardening).
@@ -737,11 +752,27 @@ pub fn plan_undo(
         let state = manager.load(change_id)?.ok_or_else(|| {
             eyre::eyre!("Change state for {change_id} disappeared before reconcile")
         })?;
-        let Reconciliation {
-            merged_prs,
-            failed_orgs,
-        } = reconcile(change_id, org, &state, config);
-        (merged_prs, failed_orgs)
+        // A change composed ENTIRELY of bare proposals has nothing pushed to any
+        // remote, so there is nothing to reconcile against GitHub. Skip the
+        // round-trip so `gx undo` of a bare proposal is provably local-only -
+        // ZERO gh invocations (design `Proposed` undo arm). A mix (some applied,
+        // some still proposed) still reconciles for the applied repos.
+        let has_remote_work = state
+            .repositories
+            .values()
+            .any(|r| r.status != RepoChangeStatus::Proposed);
+        if has_remote_work {
+            let Reconciliation {
+                merged_prs,
+                failed_orgs,
+            } = reconcile(change_id, org, &state, config);
+            (merged_prs, failed_orgs)
+        } else {
+            debug!(
+                "plan_undo: {change_id} is all bare proposals; skipping remote reconcile (local-only undo)"
+            );
+            (Vec::new(), BTreeSet::new())
+        }
     } else {
         (Vec::new(), BTreeSet::new())
     };
@@ -814,6 +845,17 @@ pub fn execute_undo(
         manager
             .save(&state)
             .context("Failed to save change state after undo")?;
+
+        // Retention (design Data Model): the proposal dir is removed by `gx undo`.
+        // Once the change is fully resolved (`Abandoned`), drop any proposal
+        // artifacts - covers both a bare-proposal campaign (whose per-repo
+        // CleanupProposal already removed them; this is an idempotent no-op) and
+        // an APPLIED llm campaign whose branches/PRs were just reversed.
+        if state.status == ChangeStatus::Abandoned {
+            if let Err(e) = crate::create::manifest::remove_proposal_dir(change_id) {
+                warn!("Failed to remove proposal artifacts for {change_id} after undo: {e}");
+            }
+        }
     }
 
     Ok(outcomes)

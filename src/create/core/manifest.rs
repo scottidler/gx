@@ -218,14 +218,64 @@ pub fn write_manifest(
     Ok((path, token))
 }
 
-// NOTE (Phase 5 handoff): the READ side - `load_manifest(dir) ->
-// ProposalManifest` (serde_json::from_slice over `manifest.json`) and
-// `recompute_token(dir)` (read the bytes, `compute_token`) - is deliberately
-// NOT added here. Adding an uncalled `pub fn` now trips the bin target's
-// dead-code `-D warnings` (the `gx` bin duplicates the lib module tree and has
-// no external consumer). Phase 5's apply path is their first real caller and
-// adds them then; Phase 4 tests exercise the round-trip directly via
-// `serde_json::from_slice` + `compute_token`.
+/// Load and deserialize the persisted `manifest.json` for a proposal dir. The
+/// first real caller is Phase 5's apply path (Phase 4 deliberately deferred this
+/// so an uncalled `pub fn` would not trip the bin target's dead-code
+/// `-D warnings`). A missing file is a loud error NAMING the expected path so
+/// `gx apply <change-id>` on a change with no proposal artifacts fails clearly.
+pub fn load_manifest(proposal_dir: &Path) -> Result<ProposalManifest> {
+    let path = proposal_dir.join("manifest.json");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("proposal manifest not found: {}", path.display()))?;
+    let manifest: ProposalManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Failed to parse proposal manifest: {}", path.display()))?;
+    debug!(
+        "load_manifest: change_id={} repos={} from {}",
+        manifest.change_id,
+        manifest.repos.len(),
+        path.display()
+    );
+    Ok(manifest)
+}
+
+/// Recompute the confirm token from the RAW on-disk `manifest.json` bytes
+/// (`std::fs::read` + [`compute_token`]), NOT a re-serialized struct: re-
+/// serializing a loaded [`ProposalManifest`] could differ byte-for-byte (field
+/// order, whitespace) and yield a token the propose pass never emitted. Apply
+/// (and the Phase 6 present gate / Phase 9 MCP confirm) verify against THIS.
+pub fn recompute_token(proposal_dir: &Path) -> Result<String> {
+    let path = proposal_dir.join("manifest.json");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("proposal manifest not found: {}", path.display()))?;
+    let token = compute_token(&bytes);
+    debug!(
+        "recompute_token: dir={} token={token}",
+        proposal_dir.display()
+    );
+    Ok(token)
+}
+
+/// Remove a change's entire proposal directory (manifest + patches + blobs).
+/// Idempotent: a missing dir is `Ok(())` so parallel `gx undo` workers and the
+/// retention sweep converge (design Data Model: the proposal dir is removed when
+/// the change reaches `CleanedUp` and by `gx undo`). A gx-owned artifact under
+/// `$XDG_DATA_HOME/gx`, removed with `std::fs` like the transaction recovery/
+/// backup lifecycle cleanup (NOT the user-facing `gx doctor --purge`, which
+/// archives via `rkvr`).
+pub fn remove_proposal_dir(change_id: &str) -> Result<()> {
+    let dir = proposal_dir(change_id)?;
+    if !dir.exists() {
+        debug!(
+            "remove_proposal_dir: {} already absent; no-op",
+            dir.display()
+        );
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir)
+        .with_context(|| format!("Failed to remove proposal dir: {}", dir.display()))?;
+    debug!("remove_proposal_dir: removed {}", dir.display());
+    Ok(())
+}
 
 /// The confirm token for a set of canonical manifest bytes: a truncated
 /// SHA-256 hex. Truncation is a plain prefix of the (ASCII) hex string.

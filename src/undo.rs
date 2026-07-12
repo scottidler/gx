@@ -29,7 +29,7 @@ fn state_label(plan: &UndoPlan) -> &'static str {
         Some(RepoChangeStatus::RevertPrOpen) => "revert PR open",
         Some(RepoChangeStatus::BranchCreated) => "pushed, no PR",
         Some(RepoChangeStatus::Failed) => "failed",
-        // A bare (unapplied) proposal; the local-only undo arm lands in Phase 5.
+        // A bare (unapplied) proposal: undo is local-only (delete artifacts).
         Some(RepoChangeStatus::Proposed) => "proposed",
     }
 }
@@ -52,6 +52,9 @@ fn action_label(plan: &UndoPlan) -> String {
             "merge state unverified offline; skipped (re-run `gx undo` online)".to_string()
         }
         UndoAction::AlreadyGone => "already gone; skip".to_string(),
+        UndoAction::CleanupProposal => {
+            "bare proposal; delete proposal artifacts (local only, no remote)".to_string()
+        }
     }
 }
 

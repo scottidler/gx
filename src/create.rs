@@ -7,6 +7,11 @@
 mod core;
 
 pub use core::{generate_change_id, Change, CreateAction, CreateResult};
+// Re-exported so the proposal-artifact retention callers outside `create`
+// (`gx undo`'s local-only Proposed arm, `gx cleanup`, `gx doctor`) can reach
+// the manifest layout/removal helpers through a stable `crate::create::manifest`
+// path even though `core` itself is private.
+pub use core::manifest;
 
 use crate::cli::Cli;
 use crate::config::Config;
@@ -124,6 +129,14 @@ pub fn process_create_command(
     // target's dead-code `-D warnings` passes honestly - the same established
     // pattern as `confirm::already_confirmed` (GX_TEST_CONFIRM_TOKEN) and
     // GX_CRASH_POINT / GX_TEST_LOCK_DELAY_MS.
+    // Forward hook for `gx apply <change-id>` (Phase 6 wires the real clap verb
+    // on top of `process_apply_command`). Inert unless `GX_LLM_APPLY_CHANGE_ID`
+    // is set - the same test-drivable, dead-code-honest pattern as the propose
+    // hook below. Checked first: apply and propose are mutually exclusive.
+    if let Some(apply_id) = llm_apply_change_id() {
+        return process_apply_command(cli, config, &apply_id);
+    }
+
     let change = match llm_override_prompt() {
         Some(prompt) => Change::Llm(prompt),
         None => change,
@@ -223,6 +236,59 @@ fn llm_override_prompt() -> Option<String> {
         Ok(p) if !p.is_empty() => Some(p),
         _ => None,
     }
+}
+
+/// The inert forward hook that selects `gx apply <change-id>` before the CLI
+/// `apply` verb exists (Phase 6). Returns the change-id only when
+/// `GX_LLM_APPLY_CHANGE_ID` is set non-empty.
+fn llm_apply_change_id() -> Option<String> {
+    match std::env::var("GX_LLM_APPLY_CHANGE_ID") {
+        Ok(id) if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+/// Apply a persisted proposal set (`gx apply <change-id>`): drive the core apply
+/// pass and print a per-fleet summary. This is the CLI seam Phase 6 refines with
+/// the present step (re-render each repo's diff) + confirm gate #5; the core
+/// [`core::apply::execute_apply`] already owns the ChangeLock, drift/tamper
+/// refusals, the unchanged branch/commit/push/PR pipeline, and the partial-apply
+/// state reconciliation (drifted/failed repos stay `Proposed`).
+pub fn process_apply_command(cli: &Cli, config: &Config, change_id: &str) -> Result<()> {
+    log::info!("Starting apply for change ID: {change_id}");
+
+    let parallel_jobs = cli
+        .parallel
+        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .unwrap_or_else(num_cpus::get);
+
+    // The wrapper's TTY present + confirm gate is Phase 6; the core already
+    // confirmed by another means here (Token via GX_TEST_CONFIRM_TOKEN, else
+    // AlreadyConfirmed), and re-verifies any supplied token against the manifest.
+    let report = core::apply::execute_apply(
+        change_id,
+        None, // commit message: the core falls back to the recorded prompt
+        None, // PR creation is a Phase 6 flag; apply pushes branches by default
+        config,
+        parallel_jobs,
+        crate::confirm::already_confirmed(),
+    )?;
+
+    let opts = StatusOptions {
+        verbosity: if cli.verbose {
+            crate::config::OutputVerbosity::Detailed
+        } else {
+            crate::config::OutputVerbosity::Summary
+        },
+        use_emoji: true,
+        use_colors: true,
+    };
+    display_unified_results(&report.results, &opts);
+    println!(
+        "\n📊 Applied {}: {} applied | {} drifted/failed (token {})",
+        report.change_id, report.applied, report.drifted_or_failed, report.token
+    );
+    Ok(())
 }
 
 /// Run the `llm` PROPOSE pass over the discovered/filtered repos and print a

@@ -476,3 +476,110 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 - None new. (The pre-existing `main.rs` lib/bin duplicate-module-tree debt noted
   in Phase 3 still applies; this phase used the honest inert-hook pattern to work
   within it rather than undertaking that refactor.)
+
+## Phase 5: Change::Llm apply
+
+### Design decisions
+- **`Change::Patchset { proposal_dir, manifest: Arc<ProposalManifest> }`** added
+  to the `Change` enum (`src/create/core.rs`), INTERNAL-only: never CLI-exposed,
+  no `CreateAction` maps to it, constructed solely by `apply::execute_apply`. It
+  rides the UNCHANGED `process_single_repo` pipeline. `Arc` so the fleet-shared
+  `&Change` clones cheaply across rayon workers.
+- **`apply_patchset_change`** (`src/create/core.rs`) is the per-repo apply, run
+  from the `Change::Patchset` match arm AFTER the pipeline's stash/switch/pull
+  (so `get_head_sha` sees the post-pull head). Two nothing-written refusals guard
+  the write, both under the caller-held `RepoLock`: (1) post-pull drift
+  (`HEAD != base_sha`), (2) per-blob sha256 + size verification of EVERY
+  add/modify blob BEFORE any write (read the verified bytes into memory first,
+  then mutate). Only then does it write through the EXISTING seam - register
+  `RestoreBackup`/`RemoveCreatedFile` write-ahead, then delete / write the full
+  post-change bytes. NO hunk application: blobs are the payload, the diff is
+  display-only.
+- **`file::write_bytes_with_git_mode`** (`src/file.rs`) is the one new seam
+  primitive: atomic write + explicit mode from the proposal's git mode string
+  (`100644`/`100755`). Needed because `atomic_write` alone preserves the
+  file-on-disk's CURRENT mode, so a mode-only/exec-bit change from the proposal
+  would otherwise be lost. Binary-safe (no UTF-8 round-trip). This is how a
+  mode-only change "just works" (design payload matrix) - the F3 seam preserves
+  modes, this sets the *target* mode.
+- **`apply::execute_apply`** (`src/create/core/apply.rs`) is the `gx apply
+  <change-id>` core (mirrors `gx undo`'s core). It: loads the manifest, recomputes
+  the token from the RAW on-disk `manifest.json` bytes, gates on a caller-supplied
+  `Confirmation::Token`, resolves the `Proposed` repos from change state (trusting
+  the recorded slug as authoritative), constructs `Change::Patchset`, and calls
+  `execute_create` (which owns the `ChangeLock`, state, F12). A missing proposal
+  is a LOUD error naming the expected `manifest.json` path.
+- **`manifest::load_manifest` + `recompute_token`** (`src/create/core/manifest.rs`)
+  added as the first real callers (Phase 4 deferred them). `recompute_token`
+  hashes `std::fs::read(manifest.json)` via `compute_token`, NOT a re-serialized
+  struct (the Phase 4 handoff item): re-serializing could differ byte-for-byte
+  and yield a token propose never emitted.
+- **Partial-apply state reconciliation** (`apply::execute_apply` step 6):
+  `execute_create` saves a FRESH state holding only the repos that COMMITTED. A
+  repo that drifted/failed before committing is re-marked `Proposed` (with its
+  error) under a re-acquired `ChangeLock`, so it is not lost from state and `gx
+  undo` cannot miss it. "Committed" is `action in {Committed, PrCreated}` - a
+  committed repo with a trailing PR/stash error still counts as applied (the
+  branch landed), so it is NOT wrongly reverted to `Proposed`.
+- **Real `Proposed` local-only undo arm** (`src/undo/core.rs`): new
+  `UndoAction::CleanupProposal`; `classify_action(Proposed) -> CleanupProposal`
+  (replaced Phase 4's fail-safe `AlreadyGone` stub); `undo_one`'s new arm calls
+  `crate::create::manifest::remove_proposal_dir(change_id)` (local fs, idempotent)
+  and marks the repo `CleanedUp` - touching NO remote. `is_remote_mutating`
+  leaves it false, and `plan_undo` SKIPS the GitHub reconcile when the change is
+  ENTIRELY bare proposals (nothing pushed to reconcile), so a bare-proposal undo
+  is provably zero-gh/zero-git.
+- **Retention** (design Data Model): `manifest::remove_proposal_dir` (gx-owned
+  artifact, `std::fs::remove_dir_all` like the transaction recovery/backup
+  lifecycle, NOT `rkvr` which is the user-facing purge). Called by the bare
+  `CleanupProposal` arm, by `execute_undo` once a change reaches `Abandoned`
+  (covers applied campaigns), and by `cleanup_single_change` when the change
+  state is fully removed. `gx doctor` reports orphaned proposal dirs (a
+  `proposals/<id>/` with no `changes/<id>.json`) and `--purge`s via `rkvr`.
+- **`pub use core::manifest`** in `src/create.rs` so the retention callers outside
+  `create` (`undo`, `cleanup`, `doctor`) reach the helpers through a stable
+  `crate::create::manifest` path even though `core` stays private.
+- **CLI seam `create::process_apply_command` + `GX_LLM_APPLY_CHANGE_ID` hook**
+  (`src/create.rs`), the same inert-unless-set, dead-code-honest pattern as Phase
+  4's `GX_LLM_PROPOSE_PROMPT`: gives the bin target a real non-test caller AND
+  lets the e2e drive apply through the REAL binary. Phase 6 replaces the hook with
+  the `gx apply` clap verb + present gate on top of `process_apply_command`.
+
+### Deviations
+- **`Change::Patchset` carries the manifest + dir, not the exact
+  `Change::Llm(prompt)`-shaped payload the doc's prose implies.** Same effect,
+  correct seam: `process_single_repo` takes ONE `&Change` for the whole fleet but
+  each repo's proposal differs, so the variant carries the whole manifest and the
+  per-repo entry is looked up by slug. This is the only way to ride the unchanged
+  per-repo pipeline.
+- **A minimal apply CLI path (`process_apply_command` + env hook) is added now,
+  not deferred wholesale to Phase 6.** The phase brief permits a test-drivable
+  seam; the polished clap verb + present/confirm re-display remain Phase 6. The
+  env hook is inert in production.
+- **`Confirmation::Token` gains its first real check here** (Phase 3 threaded it
+  inert): `execute_apply` verifies a supplied token against the recomputed
+  manifest token. CLI passes `AlreadyConfirmed` (or `Token` via the existing
+  `GX_TEST_CONFIRM_TOKEN` hook); Phase 9's MCP `create-apply` supplies the real
+  round-tripped token.
+
+### Tradeoffs
+- **Reuse `execute_create` wholesale (then reconcile) vs. a bespoke apply
+  orchestrator** - chose reuse: the design's whole premise is that apply is
+  exactly as deterministic as `sub` downstream of the patchset, so riding the
+  identical pipeline is what makes crash/undo/lock/F12 parity FREE (proven by the
+  crash-matrix e2e). The cost is the post-hoc state reconciliation for drifted
+  stragglers, which is small and localized.
+- **Skip the reconcile only for an ALL-proposals change** (not per-repo) - a
+  mixed change still reconciles for its applied repos; only a change with zero
+  pushed work skips gh entirely. This is the minimal, correct condition for the
+  "zero remote invocations" guarantee without weakening reconcile for real
+  campaigns.
+- **Per-blob verification reads bytes into memory before writing** vs. verify-
+  then-reread-on-write: holding the verified bytes guarantees the exact bytes
+  hashed are the exact bytes written (no reread TOCTOU), at the cost of buffering
+  a repo's payload - bounded by one repo's changed files, acceptable.
+
+### Open questions
+- None. (Cross-repo/system-mutating bullets: none in this phase. The `main.rs`
+  lib/bin duplicate-module-tree debt from Phase 3 persists and was again worked
+  within via the inert-hook pattern, not undertaken here.)

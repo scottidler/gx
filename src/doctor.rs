@@ -29,7 +29,73 @@ pub fn run_doctor(purge: bool) -> Result<()> {
     println!("\nLOG PATH:\n  {}", log_path().display());
 
     report_orphans(purge)?;
+    report_proposal_orphans(purge)?;
     Ok(())
+}
+
+/// Report (and optionally purge) orphaned proposal directories: a
+/// `proposals/<change-id>/` whose change-state file no longer exists (the change
+/// was cleaned up / undone / never recorded), so the artifacts are dangling.
+/// Retention normally removes these when a change reaches its cleaned-up
+/// terminal (via `gx undo` / `gx cleanup`); this is the safety net for the ones
+/// a crash left behind (design Data Model: `gx doctor` reports orphaned
+/// proposal dirs).
+fn report_proposal_orphans(purge: bool) -> Result<()> {
+    let Some(base) = xdg_data_dir().map(|d| d.join("gx")) else {
+        return Ok(());
+    };
+    let proposals = base.join("proposals");
+    let changes = base.join("changes");
+
+    let mut orphans = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&proposals) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(change_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            // Orphaned iff no change-state file references this change-id.
+            if !changes.join(format!("{change_id}.json")).exists() {
+                orphans.push(change_id);
+            }
+        }
+    }
+    orphans.sort();
+
+    println!("\nORPHANED PROPOSALS:");
+    if orphans.is_empty() {
+        println!("  none");
+        return Ok(());
+    }
+    for change_id in &orphans {
+        println!("  {change_id} (no change state)");
+        if purge {
+            purge_proposal(&proposals.join(change_id));
+        }
+    }
+    if !purge {
+        println!("  (run `gx doctor --purge` to remove these via rkvr)");
+    }
+    Ok(())
+}
+
+/// Remove an orphaned proposal directory via `rkvr` (never `rm`), matching the
+/// recovery/backup purge path.
+fn purge_proposal(dir: &std::path::Path) {
+    if !dir.exists() {
+        return;
+    }
+    match Command::new("rkvr").arg("rmrf").arg(dir).output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => warn!(
+            "rkvr failed to remove {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(e) => warn!("Failed to run rkvr for {}: {}", dir.display(), e),
+    }
 }
 
 /// The log file path, rendered from the same XDG source the logger uses.
