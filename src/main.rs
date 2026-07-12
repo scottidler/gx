@@ -187,6 +187,13 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 patterns,
                 change_id,
             ),
+            cli::ReviewAction::Sync { change_id } => review::process_review_sync_command(
+                cli,
+                config,
+                org.as_deref(),
+                patterns,
+                change_id,
+            ),
             cli::ReviewAction::Purge { yes } => {
                 review::process_review_purge_command(cli, config, org.as_deref(), patterns, *yes)
             }

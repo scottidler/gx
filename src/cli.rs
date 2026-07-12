@@ -344,6 +344,7 @@ EXAMPLES:
   gx review clone GX-2024-01-15                 # Clone repos with PRs (auto-detect)
   gx review approve GX-2024-01-15 --admin       # Approve and merge PRs (auto-detect)
   gx review delete GX-2024-01-15                # Delete PRs and branches (auto-detect)
+  gx review sync GX-2024-01-15                  # True-up state against GitHub (merged/closed)
   gx review purge --org tatari-tv                # Clean up GX branches (explicit org)")]
     Review {
         /// GitHub organization (auto-detected if not specified)
@@ -463,6 +464,11 @@ pub enum ReviewAction {
     /// Delete PRs and branches
     Delete {
         #[arg(help = "Change ID to delete")]
+        change_id: String,
+    },
+    /// True-up recorded change state against GitHub PR reality (merged/closed)
+    Sync {
+        #[arg(help = "Change ID to sync")]
         change_id: String,
     },
     /// Purge gx-created branches with no open PR

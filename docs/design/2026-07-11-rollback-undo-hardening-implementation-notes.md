@@ -244,3 +244,124 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None.
+
+## Phase 4: State integrity and reconciliation
+
+### Design decisions
+- `ChangeState` gained `version: u32` (`#[serde(default = "default_version")]` ->
+  `CHANGE_STATE_VERSION = 1`), matching `RecoveryState`'s Phase 2 scheme exactly
+  — `src/state.rs:ChangeState`, `default_version`. `ChangeState::new` stamps the
+  current version; version-less files load under `deny_unknown_fields` via the
+  serde default.
+- `RepoChangeState.base_sha: Option<String>` added (`#[serde(default)]`) —
+  `src/state.rs:RepoChangeState`. Populated from the SAME value `ResetCommit`
+  already captures (the pre-commit HEAD), returned now from
+  `commit_changes_with_rollback` (changed `Result<()>` -> `Result<String>`) —
+  `src/create.rs:commit_changes_with_rollback`.
+- **Control-flow refactor (named, per the Resolved Decisions and Data Model
+  write order)**: `process_single_repo` gained two new parameters,
+  `change_state: Option<&Mutex<ChangeState>>` and
+  `state_manager: Option<&StateManager>`, and now owns BOTH state saves itself
+  — `src/create.rs:process_single_repo`. The write order matches the doc
+  exactly: stamp `pushing` -> push -> stamp `pushed` (both inside
+  `commit_changes_with_rollback`, unchanged from Phase 2) -> **`record_pushed_state`**
+  (new: adds/updates the repo entry with `branch_name`, `local_path`,
+  `files_modified`, `original_branch`, `base_sha`, saves via `StateManager` if
+  present) -> stamp `finalizing` -> `finalize()` (deletes the recovery file) ->
+  **`record_final_state`** (new: folds the finished `CreateResult`, including
+  any PR, via the pre-existing `update_change_state` helper, then re-stamps
+  `base_sha` since `add_repository` resets the entry, and saves). The caller's
+  outer rayon fold in `process_create_command` is now display-only — it just
+  collects `CreateResult`s and passes `change_state.as_ref()` /
+  `state_manager.as_ref()` into each `process_single_repo` call — closing F12:
+  a pushed branch is now recorded in state OR recovery (or both) in every crash
+  window, because the state save happens BEFORE the recovery file is deleted,
+  not after the whole per-repo function (including PR creation) returns.
+- `gx review sync <change-id>` — `src/review.rs:process_review_sync_command`
+  (CLI shell: repo discovery, org auto-detection, calls `github::list_prs_by_change_id`
+  per org) + `sync_change_state` (core: reconciles already-fetched `PrInfo`s
+  into `mark_merged`/`mark_closed`, saves once, returns
+  `(merged, closed, ChangeStatus)`). Split shell/core so tests exercise the
+  reconciliation logic directly with a `gh`-shimmed fetch, without repo
+  discovery. Wired as `ReviewAction::Sync { change_id }` in `src/cli.rs` and
+  dispatched in `src/main.rs`.
+- `PrInfo` gained `merged_at: Option<String>`, `merge_commit_oid: Option<String>`,
+  `base_ref_name: String`; `PrState` gained a `Merged` variant distinct from
+  `Closed` (GraphQL's `PullRequest.state` is OPEN/CLOSED/MERGED, not two-valued)
+  — `src/github.rs`. `PR_SEARCH_QUERY` gained `mergedAt`, `mergeCommit { oid }`,
+  `baseRefName`. The search string (extracted into `pr_search_string(org, pattern)`
+  for testability) DROPS the `is:open` filter — `gx review sync` needs
+  merged/closed PRs, and the doc calls out today's open-only restriction as the
+  thing Phase 4 fixes. `review approve`/`review delete` are unaffected: they
+  already filter locally to `PrState::Open`. `review clone`'s `include_closed`
+  gate now treats `Merged` the same as `Closed` (`!matches!(pr.state, Closed | Merged)`)
+  to preserve its prior behavior (previously GraphQL bucketed MERGED under
+  "not OPEN", i.e. the old two-valued `Closed`).
+- F14: `ChangeState::mark_failed` now calls `update_overall_status()` (it
+  previously didn't), and `update_overall_status` gained a `failed == total`
+  branch that resolves the aggregate to `ChangeStatus::Failed` — `src/state.rs`.
+  `mark_closed` also now calls `update_overall_status()` for the same reason
+  (aggregate must reflect closed PRs, not just merged ones). `StateManager::cleanup_old`
+  now also ages out `ChangeStatus::Failed` changes (previously only
+  `FullyMerged`/`Abandoned`), since a failed campaign can now actually reach
+  that status and needs a path to age out — `src/state.rs:cleanup_old`. This is
+  the concrete meaning of the Phase 4 bullet "`rollback cleanup --older-than`
+  ... operate on the trued-up statuses": `gx rollback cleanup --older-than`
+  calls `cleanup_old` under the hood.
+- New `merged_at`/`merge_commit_oid`/`base_ref_name` fields are read (not dead
+  code) via a `trace!` log per PR inside `sync_change_state`'s reconciliation
+  loop — `src/review.rs:sync_change_state`. This is a real, if minimal, use:
+  diagnosability for exactly the command whose job is surfacing GitHub truth;
+  `merge_commit_oid`/`base_ref_name` are otherwise unconsumed until Phase 6's
+  revert path.
+
+### Deviations
+- The doc's Phase 4 bullet says "`version: 1` on `ChangeState` + `RecoveryState`"
+  — `RecoveryState.version` was ALREADY added in Phase 2 (per the orchestrator's
+  scope note and confirmed by reading `src/transaction.rs`); this phase adds it
+  ONLY to `ChangeState`, matching the exact same serde-default scheme. Same
+  effect, no duplicate work.
+- The doc says `gx review sync` does "gh PR lookups -> mark_merged/mark_closed".
+  Implemented as a shell/core split (`process_review_sync_command` +
+  `sync_change_state`) rather than one function, matching the repo's existing
+  shell/thin-core convention and making the reconciliation logic directly
+  testable with a `gh`-shim without needing repo discovery / org
+  auto-detection scaffolding in the test. Same effect, correct seam.
+- The gh PATH shim (test harness) did not exist in this repo before this phase
+  (confirmed: no `shim` hits anywhere in `src/`). Added inline as a `const`
+  shell script in `src/review.rs`'s test module, asserting exact argv (the
+  `api graphql` invocation and a `q=` arg containing the change-id pattern)
+  before returning canned JSON, per the 2026-06-11 gh-shim precedent named in
+  the design doc. No new test fixture files; kept as one self-contained test.
+
+### Tradeoffs
+- `record_pushed_state`/`record_final_state` both take `Option<&Mutex<ChangeState>>`
+  / `Option<&StateManager>` and silently no-op when either is `None` (dry-run
+  path, where `process_create_command` never constructs them). Alternative:
+  thread a single `Option<(&Mutex<ChangeState>, &StateManager)>` pair. Rejected
+  as no real improvement — both must be present or absent together today, but
+  keeping them as two independent options matches how `process_create_command`
+  already constructs them separately and costs nothing.
+- `record_final_state` re-invokes `update_change_state` (unchanged) rather than
+  inlining its logic, then patches `base_sha` back in afterward (since
+  `add_repository` resets the whole `RepoChangeState`). Alternative: thread
+  `base_sha` as a parameter into `update_change_state` itself. Rejected to keep
+  `update_change_state`'s signature stable (it is also exercised by its own
+  existing call shape/tests) and because the patch-back is a single field
+  write, not worth widening a shared helper's signature for.
+- `process_single_repo` now takes 9 parameters, past the default clippy
+  threshold; `#[allow(clippy::too_many_arguments)]` added, mirroring the
+  identical annotation already on `process_create_command` in the same file
+  for the same reason (`clippy.toml` does not exist in this repo to raise the
+  threshold repo-wide, and adding one crate-wide for a single call site is a
+  bigger change than a scoped allow at the two sites that need it).
+- `pr_search_string`/`PR_SEARCH_QUERY` broadening to drop `is:open` increases
+  the result size of every `list_prs_by_change_id` call (more gh/GraphQL rows
+  returned per query for repos with long-closed history under the same
+  change-id prefix). Accepted: the design doc explicitly calls this out as the
+  fix Phase 4 makes, pagination already handles arbitrary result counts
+  (`hasNextPage`/`endCursor`), and existing consumers (`approve`/`delete`)
+  filter locally so their behavior is unchanged.
+
+### Open questions
+- None.

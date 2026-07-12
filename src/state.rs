@@ -11,10 +11,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Schema version stamped on every change state file written by this gx.
+const CHANGE_STATE_VERSION: u32 = 1;
+
+/// Default `version` for a change state file that predates the field (serde
+/// fills this in for version-less files written by an older gx), matching
+/// `RecoveryState`'s scheme ([`crate::transaction::RecoveryState`]).
+fn default_version() -> u32 {
+    CHANGE_STATE_VERSION
+}
+
 /// State of a change operation across repositories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeState {
+    /// Schema version. Defaults to 1 so version-less files from an older gx load.
+    #[serde(default = "default_version")]
+    pub version: u32,
+
     /// Unique change identifier (e.g., "GX-2024-01-15-abc123")
     pub change_id: String,
 
@@ -53,6 +67,13 @@ pub struct RepoChangeState {
 
     /// Original branch before the change
     pub original_branch: Option<String>,
+
+    /// The pre-commit HEAD of the base branch (the safe point `ResetCommit`
+    /// already captures), recorded at commit time so `gx undo` and audits can
+    /// always state exactly what the safe point was. `None` on files written
+    /// before this field existed.
+    #[serde(default)]
+    pub base_sha: Option<String>,
 
     /// PR number if one was created
     pub pr_number: Option<u64>,
@@ -111,6 +132,7 @@ impl ChangeState {
     pub fn new(change_id: String, description: Option<String>) -> Self {
         let now = Utc::now();
         Self {
+            version: CHANGE_STATE_VERSION,
             change_id,
             description,
             created_at: now,
@@ -128,6 +150,7 @@ impl ChangeState {
             local_path: None,
             branch_name,
             original_branch: None,
+            base_sha: None,
             pr_number: None,
             pr_url: None,
             status: RepoChangeStatus::BranchCreated,
@@ -167,6 +190,7 @@ impl ChangeState {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.status = RepoChangeStatus::PrClosed;
             self.updated_at = Utc::now();
+            self.update_overall_status();
         }
     }
 
@@ -184,15 +208,27 @@ impl ChangeState {
             repo.status = RepoChangeStatus::Failed;
             repo.error = Some(error);
             self.updated_at = Utc::now();
+            // F14: the aggregate must be able to reach `Failed`, or a campaign
+            // where every repo failed sits at `InProgress` forever and never
+            // ages out via cleanup.
+            self.update_overall_status();
         }
     }
 
-    /// Update overall status based on repository states
+    /// Update overall status based on repository states. `Failed` is reachable
+    /// (F14) when every repository failed; a mix of failed and successful
+    /// repos still resolves via the merged/PR-created buckets below.
     fn update_overall_status(&mut self) {
         let total = self.repositories.len();
         if total == 0 {
             return;
         }
+
+        let failed = self
+            .repositories
+            .values()
+            .filter(|r| r.status == RepoChangeStatus::Failed)
+            .count();
 
         let merged = self
             .repositories
@@ -211,7 +247,9 @@ impl ChangeState {
             })
             .count();
 
-        if merged == total {
+        if failed == total {
+            self.status = ChangeStatus::Failed;
+        } else if merged == total {
             self.status = ChangeStatus::FullyMerged;
         } else if merged > 0 {
             self.status = ChangeStatus::PartiallyMerged;
@@ -335,9 +373,12 @@ impl StateManager {
         let mut deleted = 0;
 
         for state in states {
-            // Only clean up fully merged or abandoned changes
+            // Clean up fully merged, abandoned, or failed changes (F14: `Failed`
+            // is now reachable, so a failed campaign must age out too, not sit
+            // around forever).
             if (state.status == ChangeStatus::FullyMerged
-                || state.status == ChangeStatus::Abandoned)
+                || state.status == ChangeStatus::Abandoned
+                || state.status == ChangeStatus::Failed)
                 && state.updated_at < cutoff
             {
                 self.delete(&state.change_id)?;
@@ -718,5 +759,131 @@ mod tests {
         assert_eq!(deserialized.description, state.description);
         assert_eq!(deserialized.commit_message, state.commit_message);
         assert_eq!(deserialized.repositories.len(), state.repositories.len());
+    }
+
+    #[test]
+    fn test_version_defaults_for_versionless_file() {
+        // Phase 4 [F11]: a change state file written before `version` existed
+        // must still load, defaulting to 1, matching RecoveryState's scheme.
+        let json = r#"{
+            "change_id": "x",
+            "description": null,
+            "created_at": "2026-06-11T00:00:00Z",
+            "updated_at": "2026-06-11T00:00:00Z",
+            "commit_message": null,
+            "repositories": {},
+            "status": "InProgress"
+        }"#;
+        let state: ChangeState = serde_json::from_str(json).expect("version-less file must load");
+        assert_eq!(state.version, CHANGE_STATE_VERSION);
+    }
+
+    #[test]
+    fn test_new_change_state_stamps_current_version() {
+        let state = ChangeState::new("test".to_string(), None);
+        assert_eq!(state.version, CHANGE_STATE_VERSION);
+    }
+
+    #[test]
+    fn test_base_sha_defaults_for_repo_state_without_it() {
+        // Phase 4 [F11]: a repo entry written before `base_sha` existed must
+        // still load, defaulting to `None`.
+        let json = r#"{
+            "repo_slug": "org/repo",
+            "local_path": null,
+            "branch_name": "GX-test",
+            "original_branch": null,
+            "pr_number": null,
+            "pr_url": null,
+            "status": "BranchCreated",
+            "files_modified": [],
+            "error": null
+        }"#;
+        let repo: RepoChangeState =
+            serde_json::from_str(json).expect("base_sha-less repo state must load");
+        assert_eq!(repo.base_sha, None);
+    }
+
+    #[test]
+    fn test_base_sha_roundtrips() {
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-test".to_string());
+        state.repositories.get_mut("org/repo").unwrap().base_sha = Some("deadbeefcafe".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ChangeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.repositories.get("org/repo").unwrap().base_sha,
+            Some("deadbeefcafe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mark_failed_updates_aggregate_to_failed_when_all_repos_fail() {
+        // F14: `Failed` was previously unreachable at the aggregate level; a
+        // campaign where every repo failed must resolve to `ChangeStatus::Failed`
+        // so it can age out via cleanup instead of sitting at `InProgress` forever.
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo1".to_string(), "GX-test".to_string());
+        state.add_repository("org/repo2".to_string(), "GX-test".to_string());
+
+        state.mark_failed("org/repo1", "boom".to_string());
+        assert_eq!(
+            state.status,
+            ChangeStatus::InProgress,
+            "one of two repos failed; aggregate should not yet be Failed"
+        );
+
+        state.mark_failed("org/repo2", "boom again".to_string());
+        assert_eq!(
+            state.status,
+            ChangeStatus::Failed,
+            "every repo failed; aggregate must reach Failed"
+        );
+    }
+
+    #[test]
+    fn test_mark_closed_updates_aggregate() {
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo1".to_string(), "GX-test".to_string());
+        state.add_repository("org/repo2".to_string(), "GX-test".to_string());
+        state.set_pr_info(
+            "org/repo1",
+            1,
+            "https://github.com/org/repo1/pull/1".to_string(),
+            false,
+        );
+        state.set_pr_info(
+            "org/repo2",
+            2,
+            "https://github.com/org/repo2/pull/2".to_string(),
+            false,
+        );
+
+        state.mark_closed("org/repo1");
+        state.mark_closed("org/repo2");
+
+        // Both closed, none merged: PrsCreated bucket (with_prs counts Closed
+        // too), never Failed - closed is a distinct outcome from failed.
+        assert_eq!(state.status, ChangeStatus::PrsCreated);
+    }
+
+    #[test]
+    fn test_cleanup_old_includes_failed_states() {
+        // F14 bite-proof: before this phase, `Failed` was unreachable so a
+        // failed campaign never satisfied cleanup_old's filter and sat around
+        // forever. Now it must age out like FullyMerged/Abandoned.
+        let (manager, _temp) = create_test_manager();
+
+        let mut state = ChangeState::new("old-failed".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-test".to_string());
+        state.mark_failed("org/repo", "boom".to_string());
+        assert_eq!(state.status, ChangeStatus::Failed);
+        state.updated_at = Utc::now() - chrono::Duration::days(30);
+        manager.save(&state).unwrap();
+
+        let deleted = manager.cleanup_old(7).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(manager.load("old-failed").unwrap().is_none());
     }
 }

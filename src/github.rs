@@ -305,13 +305,24 @@ pub struct PrInfo {
     pub author: String,
     pub state: PrState,
     pub url: String,
+    /// When the PR was merged, if it was (Phase 4 [F11]: `gx review sync`
+    /// needs this to reconcile state against GitHub reality).
+    pub merged_at: Option<String>,
+    /// The SHA of the merge commit, if merged. Feeds the Phase 6 revert path
+    /// (parent-count dispatch between squash/rebase vs. a true merge commit).
+    pub merge_commit_oid: Option<String>,
+    /// The PR's base branch name.
+    pub base_ref_name: String,
 }
 
-/// PR state enumeration
+/// PR state enumeration. GitHub's GraphQL `PullRequest.state` is one of
+/// OPEN/CLOSED/MERGED; `Merged` is distinct from `Closed` so `gx review sync`
+/// can tell a landed PR apart from an abandoned one (Phase 4 [F11]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrState {
     Open,
     Closed,
+    Merged,
 }
 
 /// GraphQL response wrapper
@@ -351,6 +362,12 @@ struct GhGraphqlPrItem {
     state: String,
     url: String,
     repository: GhGraphqlRepository,
+    #[serde(rename = "mergedAt")]
+    merged_at: Option<String>,
+    #[serde(rename = "mergeCommit")]
+    merge_commit: Option<GhGraphqlMergeCommit>,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,9 +381,15 @@ struct GhGraphqlRepository {
     name_with_owner: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GhGraphqlMergeCommit {
+    oid: String,
+}
+
 /// GraphQL query with pagination. The search string is passed as a JSON-encoded
 /// variable (`$q`), never spliced into the query text, closing an injection path
-/// via crafted org/change-id values ([A13]).
+/// via crafted org/change-id values ([A13]). `mergedAt`/`mergeCommit { oid }`/
+/// `baseRefName` feed `gx review sync` (Phase 4 [F11]) and the Phase 6 revert path.
 const PR_SEARCH_QUERY: &str = r#"query($q: String!, $cursor: String) {
   search(query: $q, type: ISSUE, first: 100, after: $cursor) {
     pageInfo { hasNextPage endCursor }
@@ -379,10 +402,21 @@ const PR_SEARCH_QUERY: &str = r#"query($q: String!, $cursor: String) {
         state
         url
         repository { nameWithOwner }
+        mergedAt
+        mergeCommit { oid }
+        baseRefName
       }
     }
   }
 }"#;
+
+/// The GitHub search query text for PRs whose head branch matches `pattern` in
+/// `org`. No `is:open` filter (Phase 4 [F11]): `gx review sync` needs to see
+/// merged/closed PRs too, not just open ones; existing open-only consumers
+/// (`review approve`/`delete`) already filter locally on `PrState::Open`.
+fn pr_search_string(org: &str, pattern: &str) -> String {
+    format!("org:{org} is:pr head:{pattern}")
+}
 
 /// List PRs by change ID pattern using GraphQL, following pagination to
 /// exhaustion (no longer capped at the first 100 results) ([A13]).
@@ -393,7 +427,7 @@ pub fn list_prs_by_change_id(
 ) -> Result<Vec<PrInfo>> {
     debug!("list_prs_by_change_id: org={org} pattern={change_id_pattern}");
 
-    let search = format!("org:{org} is:pr is:open head:{change_id_pattern}");
+    let search = pr_search_string(org, change_id_pattern);
     let mut cursor: Option<String> = None;
     let mut all = Vec::new();
 
@@ -487,9 +521,13 @@ fn parse_graphql_prs_page(
             author: gh_pr.author.login,
             state: match gh_pr.state.to_uppercase().as_str() {
                 "OPEN" => PrState::Open,
+                "MERGED" => PrState::Merged,
                 _ => PrState::Closed,
             },
             url: gh_pr.url,
+            merged_at: gh_pr.merged_at,
+            merge_commit_oid: gh_pr.merge_commit.map(|m| m.oid),
+            base_ref_name: gh_pr.base_ref_name,
         })
         .collect();
 
@@ -714,7 +752,8 @@ mod tests {
             "author": {"login": "testuser"},
             "state": "OPEN",
             "url": "https://github.com/org/repo/pull/123",
-            "repository": {"nameWithOwner": "org/repo"}
+            "repository": {"nameWithOwner": "org/repo"},
+            "baseRefName": "main"
         }]}}}"#;
 
         let result = parse_graphql_prs_json(json).unwrap();
@@ -726,6 +765,9 @@ mod tests {
         assert_eq!(result[0].repo_slug, "org/repo");
         assert_eq!(result[0].state, PrState::Open);
         assert_eq!(result[0].url, "https://github.com/org/repo/pull/123");
+        assert_eq!(result[0].base_ref_name, "main");
+        assert_eq!(result[0].merged_at, None);
+        assert_eq!(result[0].merge_commit_oid, None);
     }
 
     #[test]
@@ -738,7 +780,8 @@ mod tests {
                 "author": {"login": "user1"},
                 "state": "OPEN",
                 "url": "https://github.com/org/repo1/pull/1",
-                "repository": {"nameWithOwner": "org/repo1"}
+                "repository": {"nameWithOwner": "org/repo1"},
+                "baseRefName": "main"
             },
             {
                 "number": 2,
@@ -747,7 +790,8 @@ mod tests {
                 "author": {"login": "user2"},
                 "state": "CLOSED",
                 "url": "https://github.com/org/repo2/pull/2",
-                "repository": {"nameWithOwner": "org/repo2"}
+                "repository": {"nameWithOwner": "org/repo2"},
+                "baseRefName": "main"
             }
         ]}}}"#;
 
@@ -762,6 +806,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_graphql_prs_json_merged_pr_fields() {
+        // Phase 4 [F11]: `gx review sync` needs `state: MERGED` distinguished
+        // from `Closed`, plus `mergedAt`/`mergeCommit.oid`/`baseRefName`.
+        let json = r#"{"data":{"search":{"nodes":[{
+            "number": 99,
+            "title": "GX-merged: PR",
+            "headRefName": "GX-merged",
+            "author": {"login": "user1"},
+            "state": "MERGED",
+            "url": "https://github.com/org/repo/pull/99",
+            "repository": {"nameWithOwner": "org/repo"},
+            "mergedAt": "2026-07-11T00:00:00Z",
+            "mergeCommit": {"oid": "deadbeefcafe"},
+            "baseRefName": "main"
+        }]}}}"#;
+
+        let result = parse_graphql_prs_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].state, PrState::Merged);
+        assert_eq!(result[0].merged_at.as_deref(), Some("2026-07-11T00:00:00Z"));
+        assert_eq!(result[0].merge_commit_oid.as_deref(), Some("deadbeefcafe"));
+        assert_eq!(result[0].base_ref_name, "main");
+    }
+
+    #[test]
+    fn test_pr_search_string_has_no_open_filter() {
+        // Phase 4 [F11] bite-proof: the old query filtered `is:open`, so
+        // `gx review sync` could never see merged/closed PRs. Broadened here;
+        // open-only consumers (approve/delete) filter locally on PrState::Open.
+        let q = pr_search_string("acme", "GX-123");
+        assert!(
+            !q.contains("is:open"),
+            "search must not filter to open-only"
+        );
+        assert!(q.contains("org:acme"));
+        assert!(q.contains("head:GX-123"));
+    }
+
+    #[test]
     fn test_parse_graphql_prs_json_filters_non_gx_prs() {
         // This test verifies that PRs without proper GX- prefix on BOTH branch AND title are filtered out
         // This prevents false positives like "gx-alerts" branch or "[MCORE-1276] Enable Slack alerts for GX checks" title
@@ -773,7 +856,8 @@ mod tests {
                 "author": {"login": "user1"},
                 "state": "OPEN",
                 "url": "https://github.com/org/repo1/pull/1",
-                "repository": {"nameWithOwner": "org/repo1"}
+                "repository": {"nameWithOwner": "org/repo1"},
+                "baseRefName": "main"
             },
             {
                 "number": 2,
@@ -782,7 +866,8 @@ mod tests {
                 "author": {"login": "user2"},
                 "state": "OPEN",
                 "url": "https://github.com/org/repo2/pull/2",
-                "repository": {"nameWithOwner": "org/repo2"}
+                "repository": {"nameWithOwner": "org/repo2"},
+                "baseRefName": "main"
             },
             {
                 "number": 3,
@@ -791,7 +876,8 @@ mod tests {
                 "author": {"login": "user3"},
                 "state": "OPEN",
                 "url": "https://github.com/org/repo3/pull/3",
-                "repository": {"nameWithOwner": "org/repo3"}
+                "repository": {"nameWithOwner": "org/repo3"},
+                "baseRefName": "main"
             },
             {
                 "number": 4,
@@ -800,7 +886,8 @@ mod tests {
                 "author": {"login": "user4"},
                 "state": "OPEN",
                 "url": "https://github.com/org/repo4/pull/4",
-                "repository": {"nameWithOwner": "org/repo4"}
+                "repository": {"nameWithOwner": "org/repo4"},
+                "baseRefName": "main"
             }
         ]}}}"#;
 
@@ -831,7 +918,8 @@ mod tests {
                 "author": {"login": "u"},
                 "state": "OPEN",
                 "url": "https://github.com/o/r/pull/1",
-                "repository": {"nameWithOwner": "o/r"}
+                "repository": {"nameWithOwner": "o/r"},
+                "baseRefName": "main"
             }]
         }}}"#;
         let (prs, page_info) = parse_graphql_prs_page(json, "GX-").unwrap();

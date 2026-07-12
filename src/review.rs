@@ -7,7 +7,7 @@ use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
 use crate::state::StateManager;
 use eyre::{Context, Result};
-use log::{info, warn};
+use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -235,7 +235,14 @@ pub fn process_review_clone_command(
     let results: Vec<ReviewResult> = pool.install(|| {
         all_prs
             .par_iter()
-            .filter(|pr| include_closed || pr.state != github::PrState::Closed)
+            // The search no longer filters to open-only (Phase 4 [F11]), so
+            // treat Merged the same as Closed here to preserve prior behavior:
+            // `--all`/`include_closed` is required to clone a repo whose PR is
+            // no longer open, whether it landed or was abandoned.
+            .filter(|pr| {
+                include_closed
+                    || !matches!(pr.state, github::PrState::Closed | github::PrState::Merged)
+            })
             .map(|pr| {
                 // Extract org from repo slug for directory structure
                 let org_name = pr.repo_slug.split('/').next().unwrap_or("unknown");
@@ -497,6 +504,113 @@ pub fn process_review_delete_command(
     display_review_summary(&results, &opts);
 
     Ok(())
+}
+
+/// Process review sync command - true-up recorded change state against
+/// GitHub PR reality (Phase 4 [F11], F14). Reconciles merged/closed PRs into
+/// `mark_merged`/`mark_closed` so `gx cleanup`/`gx rollback cleanup` see the
+/// current state instead of whatever was last recorded by a `create`/`approve`
+/// run that may itself have crashed before updating state.
+pub fn process_review_sync_command(
+    cli: &Cli,
+    config: &Config,
+    org: Option<&str>,
+    _patterns: &[String],
+    change_id: &str,
+) -> Result<()> {
+    info!("Syncing change state for change ID: {change_id}");
+
+    // Discover repositories for org auto-detection.
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
+
+    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
+
+    let user_org_contexts =
+        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+
+    if user_org_contexts.is_empty() {
+        eprintln!("Error: No organization detected. Use --org <org> to specify one.");
+        return Ok(());
+    }
+
+    // Collect PRs (every state, not just open - Phase 4 broadened the search)
+    // from all detected orgs.
+    let mut all_prs = Vec::new();
+    for context in &user_org_contexts {
+        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
+            Ok(prs) => all_prs.extend(prs),
+            Err(e) => {
+                warn!(
+                    "Failed to get PRs from org '{}': {}",
+                    context.user_or_org, e
+                );
+            }
+        }
+    }
+
+    if all_prs.is_empty() {
+        println!("No PRs found for change ID: {change_id}");
+        return Ok(());
+    }
+
+    let (merged, closed, status) = sync_change_state(&all_prs, change_id)?;
+
+    println!("Synced {change_id}: {merged} merged, {closed} closed (aggregate status: {status:?})");
+    Ok(())
+}
+
+/// Core of `gx review sync`: reconcile already-fetched PR info into the
+/// recorded change state and save once. Split from the command shell above so
+/// tests can exercise the reconciliation logic directly with a `gh`-shimmed
+/// [`github::list_prs_by_change_id`] result, without needing repo discovery or
+/// org auto-detection.
+fn sync_change_state(
+    prs: &[PrInfo],
+    change_id: &str,
+) -> Result<(usize, usize, crate::state::ChangeStatus)> {
+    debug!("sync_change_state: change_id={change_id} prs={}", prs.len());
+    let manager = StateManager::new()?;
+    let mut state = manager
+        .load(change_id)?
+        .ok_or_else(|| eyre::eyre!("No change state recorded for {change_id}"))?;
+
+    let mut merged = 0;
+    let mut closed = 0;
+    for pr in prs {
+        trace!(
+            "sync_change_state: repo={} pr=#{} state={:?} base={} merged_at={:?} merge_commit={:?}",
+            pr.repo_slug,
+            pr.number,
+            pr.state,
+            pr.base_ref_name,
+            pr.merged_at,
+            pr.merge_commit_oid
+        );
+        match pr.state {
+            github::PrState::Merged => {
+                state.mark_merged(&pr.repo_slug);
+                merged += 1;
+            }
+            github::PrState::Closed => {
+                state.mark_closed(&pr.repo_slug);
+                closed += 1;
+            }
+            github::PrState::Open => {}
+        }
+    }
+
+    manager.save(&state)?;
+    debug!(
+        "sync_change_state: change_id={change_id} merged={merged} closed={closed} status={:?}",
+        state.status
+    );
+    Ok((merged, closed, state.status.clone()))
 }
 
 /// Process review purge command - clean up all GX branches and PRs
@@ -951,6 +1065,7 @@ impl PrInfo {
         match self.state {
             github::PrState::Open => "Open",
             github::PrState::Closed => "Closed",
+            github::PrState::Merged => "Merged",
         }
     }
 }
@@ -968,6 +1083,9 @@ impl ReviewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus};
+    use tempfile::TempDir;
 
     #[test]
     fn test_extract_repo_name() {
@@ -982,5 +1100,114 @@ mod tests {
         let repo = create_repo_from_slug("owner/test-repo");
         assert_eq!(repo.name, "test-repo");
         assert_eq!(repo.slug, "owner/test-repo".to_string());
+    }
+
+    /// A stub `gh` on PATH: asserts the invocation is `api graphql` carrying
+    /// our search pattern (bite-proof - a wrong query fails the test loudly),
+    /// then returns one canned MERGED PR as GraphQL JSON. Offline and
+    /// deterministic, per the 2026-06-11 gh-shim precedent.
+    const GH_SHIM_SCRIPT: &str = r#"#!/bin/sh
+if [ "$1" != "api" ] || [ "$2" != "graphql" ]; then
+  echo "gh shim: unexpected invocation: $@" >&2
+  exit 1
+fi
+found_q=0
+for arg in "$@"; do
+  case "$arg" in
+    q=*GX-sync-shim*) found_q=1 ;;
+  esac
+done
+if [ "$found_q" != "1" ]; then
+  echo "gh shim: expected q= arg containing GX-sync-shim, got: $@" >&2
+  exit 1
+fi
+cat <<'JSON'
+{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{
+  "number": 42,
+  "title": "GX-sync-shim: change",
+  "headRefName": "GX-sync-shim",
+  "author": {"login": "tester"},
+  "state": "MERGED",
+  "url": "https://github.com/gx-testing/repo/pull/42",
+  "repository": {"nameWithOwner": "gx-testing/repo"},
+  "mergedAt": "2026-07-11T00:00:00Z",
+  "mergeCommit": {"oid": "deadbeef"},
+  "baseRefName": "main"
+}]}}}
+JSON
+exit 0
+"#;
+
+    #[test]
+    fn test_review_sync_marks_merged_pr_via_gh_shim() {
+        // Phase 4 [F11] success criterion: a PR merged via gh (shimmed) shows
+        // Merged after `review sync`. Exercises the REAL
+        // github::list_prs_by_change_id (hitting a PATH-shimmed `gh`) piped
+        // into `sync_change_state` - the exact path `gx review sync` runs.
+        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let prior_path = std::env::var("PATH").ok();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let shim_dir = TempDir::new().unwrap();
+        let gh_path = shim_dir.path().join("gh");
+        std::fs::write(&gh_path, GH_SHIM_SCRIPT).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&gh_path, perms).unwrap();
+        }
+        let new_path = format!(
+            "{}:{}",
+            shim_dir.path().display(),
+            prior_path.clone().unwrap_or_default()
+        );
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        let change_id = "GX-sync-shim";
+        let manager = StateManager::new().unwrap();
+        let mut state = ChangeState::new(change_id.to_string(), None);
+        state.add_repository("gx-testing/repo".to_string(), change_id.to_string());
+        state.set_pr_info(
+            "gx-testing/repo",
+            42,
+            "https://github.com/gx-testing/repo/pull/42".to_string(),
+            false,
+        );
+        manager.save(&state).unwrap();
+
+        let config = Config::default();
+        let prs = github::list_prs_by_change_id("gx-testing", change_id, &config)
+            .expect("shimmed gh call should succeed");
+        assert_eq!(prs.len(), 1, "shim must return exactly one PR");
+        assert_eq!(prs[0].state, github::PrState::Merged);
+
+        let (merged, closed, status) =
+            sync_change_state(&prs, change_id).expect("sync_change_state should succeed");
+        assert_eq!(merged, 1);
+        assert_eq!(closed, 0);
+        assert_eq!(status, ChangeStatus::FullyMerged);
+
+        let synced = manager
+            .load(change_id)
+            .unwrap()
+            .expect("state must still exist");
+        assert_eq!(
+            synced.repositories.get("gx-testing/repo").unwrap().status,
+            RepoChangeStatus::PrMerged
+        );
+
+        match prior_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
     }
 }

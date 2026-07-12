@@ -130,6 +130,9 @@ pub struct CreateResult {
     pub pr_url: Option<String>,
     /// The branch the repo was on before the change (for state tracking).
     pub original_branch: Option<String>,
+    /// The pre-commit HEAD of the base branch (the safe point), set once a
+    /// commit lands. `None` for dry runs and pre-commit failures.
+    pub base_sha: Option<String>,
     pub error: Option<String>,
 }
 
@@ -232,12 +235,17 @@ pub fn process_create_command(
         .build()
         .context("Failed to create thread pool")?;
 
-    // Process repositories in parallel
+    // Process repositories in parallel. The change-state save is now done
+    // INSIDE `process_single_repo` (Phase 4 control-flow refactor, F12): a
+    // pushed-safe-point save before `finalize()` runs, then a final save once
+    // the whole result (including any PR) is known. This fold is display-only;
+    // the `Mutex<ChangeState>` + `StateManager` are passed in, and each worker
+    // locks briefly to update just its own repo's entry, same as before.
     let results: Vec<CreateResult> = pool.install(|| {
         filtered_repos
             .par_iter()
             .map(|repo| {
-                let result = process_single_repo(
+                process_single_repo(
                     repo,
                     &change_id,
                     files,
@@ -245,28 +253,9 @@ pub fn process_create_command(
                     commit_message.as_deref(),
                     pr.as_ref(),
                     config,
-                );
-
-                // Fold the result into the change state and save incrementally
-                // (inside the same lock) so a crash mid-fleet keeps prior repos'
-                // state on disk ([A3]).
-                if let Some(ref state_mutex) = change_state {
-                    if let Ok(mut state) = state_mutex.lock() {
-                        update_change_state(&mut state, &result, pr.as_ref());
-                        if matches!(
-                            result.action,
-                            CreateAction::Committed | CreateAction::PrCreated
-                        ) {
-                            if let Some(ref manager) = state_manager {
-                                if let Err(e) = manager.save(&state) {
-                                    warn!("Failed to save change state: {e}");
-                                }
-                            }
-                        }
-                    }
-                }
-
-                result
+                    change_state.as_ref(),
+                    state_manager.as_ref(),
+                )
             })
             .collect()
     });
@@ -392,6 +381,7 @@ fn dry_run_error(repo: &Repo, change_id: &str, error: String) -> CreateResult {
         pr_number: None,
         pr_url: None,
         original_branch: None,
+        base_sha: None,
         error: Some(error),
     }
 }
@@ -401,6 +391,15 @@ fn dry_run_error(repo: &Repo, change_id: &str, error: String) -> CreateResult {
 /// Order (design Architecture): lock → stash -u → switch to head → pull →
 /// mutate → branch → stage → commit → push → finalize → create PR. Rollback
 /// steps are persisted write-ahead via the typed `Transaction`.
+///
+/// The change-state save is a NAMED control-flow refactor (Phase 4 [F12], panel
+/// finding): it happens IN HERE now, not in the caller's outer fold, at two
+/// points. First, a safe-point save right after the push (`Phase::Pushed`) but
+/// BEFORE `finalize()` runs - `finalize()` deletes the recovery file, so this
+/// guarantees a pushed branch is recorded in state OR recovery in every crash
+/// window, never neither. Second, a final save once the whole result (including
+/// any PR) is known, replacing what the caller's rayon fold used to do.
+#[allow(clippy::too_many_arguments)]
 fn process_single_repo(
     repo: &Repo,
     change_id: &str,
@@ -409,6 +408,8 @@ fn process_single_repo(
     commit_message: Option<&str>,
     pr: Option<&crate::cli::PR>,
     config: &Config,
+    change_state: Option<&Mutex<ChangeState>>,
+    state_manager: Option<&StateManager>,
 ) -> CreateResult {
     debug!(
         "process_single_repo: repo={} change_id={change_id}",
@@ -609,6 +610,7 @@ fn process_single_repo(
             pr_number: None,
             pr_url: None,
             original_branch: Some(original_branch.clone()),
+            base_sha: None,
             error: None,
         };
     }
@@ -616,18 +618,36 @@ fn process_single_repo(
     let commit_message = commit_message.unwrap_or_default();
 
     // 6. branch → stage → commit → push (each undo persisted write-ahead).
-    if let Err(e) = commit_changes_with_rollback(
+    let base_sha = match commit_changes_with_rollback(
         repo_path,
         change_id,
         commit_message,
         &files_affected,
         &mut transaction,
     ) {
-        transaction.rollback();
-        let mut result = dry_run_error(repo, change_id, format!("Failed to commit changes: {e}"));
-        result.substitution_stats = substitution_stats;
-        return result;
-    }
+        Ok(base_sha) => base_sha,
+        Err(e) => {
+            transaction.rollback();
+            let mut result =
+                dry_run_error(repo, change_id, format!("Failed to commit changes: {e}"));
+            result.substitution_stats = substitution_stats;
+            return result;
+        }
+    };
+
+    // 6b. Pushed safe-point save (F12, control-flow refactor): record the
+    //     branch in change state NOW, before finalize() runs and deletes the
+    //     recovery file. A crash anywhere from here on - including mid-finalize
+    //     - leaves this repo recorded in state even after recovery is gone.
+    record_pushed_state(
+        change_state,
+        state_manager,
+        repo,
+        change_id,
+        &original_branch,
+        &files_affected,
+        &base_sha,
+    );
 
     // 7. Finalize BEFORE creating the PR: switch back to the original branch and
     //    re-apply the stash. A finalize error (e.g. cannot restore branch) keeps
@@ -635,7 +655,7 @@ fn process_single_repo(
     let finalize_outcome = match transaction.finalize() {
         Ok(outcome) => outcome,
         Err(e) => {
-            return CreateResult {
+            let result = CreateResult {
                 repo: repo.clone(),
                 change_id: change_id.to_string(),
                 action: CreateAction::Committed,
@@ -644,8 +664,11 @@ fn process_single_repo(
                 pr_number: None,
                 pr_url: None,
                 original_branch: Some(original_branch.clone()),
+                base_sha: Some(base_sha),
                 error: Some(format!("Committed and pushed, but finalize failed: {e}")),
             };
+            record_final_state(change_state, state_manager, &result, pr);
+            return result;
         }
     };
 
@@ -681,7 +704,7 @@ fn process_single_repo(
         });
     }
 
-    CreateResult {
+    let result = CreateResult {
         repo: repo.clone(),
         change_id: change_id.to_string(),
         action,
@@ -690,7 +713,93 @@ fn process_single_repo(
         pr_number,
         pr_url,
         original_branch: Some(original_branch.clone()),
+        base_sha: Some(base_sha),
         error,
+    };
+    record_final_state(change_state, state_manager, &result, pr);
+    result
+}
+
+/// Record the just-pushed branch in change state (the F12 safe point): saved
+/// BEFORE `finalize()` runs, so a crash during finalize (which deletes the
+/// recovery file) still leaves this repo recorded in at least one store.
+fn record_pushed_state(
+    change_state: Option<&Mutex<ChangeState>>,
+    state_manager: Option<&StateManager>,
+    repo: &Repo,
+    change_id: &str,
+    original_branch: &str,
+    files_affected: &[String],
+    base_sha: &str,
+) {
+    debug!(
+        "record_pushed_state: repo={} change_id={change_id} base_sha={base_sha}",
+        repo.slug
+    );
+    let Some(state_mutex) = change_state else {
+        return;
+    };
+    let Ok(mut state) = state_mutex.lock() else {
+        warn!(
+            "Change state mutex poisoned; skipping pushed safe-point save for {}",
+            repo.slug
+        );
+        return;
+    };
+    state.add_repository(repo.slug.clone(), change_id.to_string());
+    if let Some(repo_state) = state.repositories.get_mut(&repo.slug) {
+        repo_state.local_path = Some(repo.path.to_string_lossy().to_string());
+        repo_state.files_modified = files_affected.to_vec();
+        repo_state.original_branch = Some(original_branch.to_string());
+        repo_state.base_sha = Some(base_sha.to_string());
+    }
+    if let Some(manager) = state_manager {
+        if let Err(e) = manager.save(&state) {
+            warn!(
+                "Failed to save pushed safe-point state for {}: {e}",
+                repo.slug
+            );
+        }
+    }
+}
+
+/// Fold a finished repo's result into change state and save. This is now the
+/// ONLY place a finished repo's outcome is saved (the caller's outer rayon
+/// fold is display-only, Phase 4 control-flow refactor). Re-records `base_sha`
+/// since `update_change_state` -> `add_repository` resets the entry.
+fn record_final_state(
+    change_state: Option<&Mutex<ChangeState>>,
+    state_manager: Option<&StateManager>,
+    result: &CreateResult,
+    pr: Option<&crate::cli::PR>,
+) {
+    debug!(
+        "record_final_state: repo={} action={:?}",
+        result.repo.slug, result.action
+    );
+    let Some(state_mutex) = change_state else {
+        return;
+    };
+    let Ok(mut state) = state_mutex.lock() else {
+        warn!(
+            "Change state mutex poisoned; skipping final state save for {}",
+            result.repo.slug
+        );
+        return;
+    };
+    update_change_state(&mut state, result, pr);
+    if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
+        repo_state.base_sha = result.base_sha.clone();
+    }
+    if matches!(
+        result.action,
+        CreateAction::Committed | CreateAction::PrCreated
+    ) {
+        if let Some(manager) = state_manager {
+            if let Err(e) = manager.save(&state) {
+                warn!("Failed to save change state: {e}");
+            }
+        }
     }
 }
 
@@ -935,14 +1044,16 @@ fn apply_regex_change(
 
 /// Create the gx branch, stage, commit, and push - registering each undo step
 /// write-ahead. The success-path branch restoration and stash pop are handled by
-/// `Transaction::finalize`, not here.
+/// `Transaction::finalize`, not here. Returns the pre-commit HEAD (the safe
+/// point `ResetCommit` already captures), so the caller can record `base_sha`
+/// (F11/F12) at the pushed-state safe point before `finalize()` runs.
 fn commit_changes_with_rollback(
     repo_path: &Path,
     change_id: &str,
     commit_message: &str,
     files_affected: &[String],
     transaction: &mut Transaction,
-) -> Result<()> {
+) -> Result<String> {
     use crate::transaction::{Phase, RollbackStep};
 
     // Whether the branch pre-existed gx's run (so rollback won't delete it).
@@ -966,7 +1077,7 @@ fn commit_changes_with_rollback(
     let expected_sha = git::get_head_sha(repo_path)?;
     transaction.push_step(RollbackStep::ResetCommit {
         repo: repo_path.to_path_buf(),
-        expected_sha,
+        expected_sha: expected_sha.clone(),
     })?;
 
     // Stage only the specific files we modified - never "git add .".
@@ -982,7 +1093,7 @@ fn commit_changes_with_rollback(
     // Stamp `pushed`: the branch is now shared; recovery keeps the work.
     transaction.set_phase(Phase::Pushed)?;
 
-    Ok(())
+    Ok(expected_sha)
 }
 
 /// Create a pull request for the changes
@@ -1204,6 +1315,7 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RepoChangeStatus;
     use crate::test_utils::run_git_command;
     use std::fs;
     use tempfile::TempDir;
@@ -1249,6 +1361,8 @@ mod tests {
             None,
             None,
             &Config::default(),
+            None,
+            None,
         );
 
         assert!(
@@ -1395,5 +1509,200 @@ mod tests {
         transaction.rollback();
         let content = fs::read_to_string(repo_path.join("test.txt")).unwrap();
         assert_eq!(content, "Hello world\nHello again");
+    }
+
+    // ---- Phase 4: pushed-state safe point (F12) ----
+
+    /// Init `repo` with a bare `origin` remote at `bare`, push the initial
+    /// branch, and set `origin/HEAD`. Returns the default branch name.
+    fn init_repo_with_bare_remote(repo: &Path, bare: &Path) -> String {
+        let parent = bare.parent().unwrap();
+        run_git_command(
+            &["init", "--quiet", "--bare", bare.to_str().unwrap()],
+            parent,
+        );
+        fs::create_dir_all(repo).unwrap();
+        fs::write(repo.join("README.md"), "# repo\n").unwrap();
+        init_git_repo(repo);
+        run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
+        let branch = crate::git::get_current_branch_name(repo).unwrap();
+        run_git_command(&["push", "--quiet", "-u", "origin", &branch], repo);
+        run_git_command(&["remote", "set-head", "origin", &branch], repo);
+        branch
+    }
+
+    /// Point `XDG_DATA_HOME` at `dir` for the duration of `f`, serialized
+    /// behind the shared `ENV_LOCK` (env vars are process-global).
+    fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
+        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", dir) };
+        f();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn test_pushed_state_recorded_before_finalize_deletes_recovery() {
+        // F12, "state-saved-first" order: the pushed safe-point save happens
+        // BEFORE finalize() runs (finalize deletes the recovery file). A crash
+        // any time after the save - even after finalize already cleaned up the
+        // recovery file - still leaves the pushed branch recorded, because
+        // state landed first.
+        let data_home = TempDir::new().unwrap();
+        with_data_home(data_home.path(), || {
+            let ws = TempDir::new().unwrap();
+            let repo_path = ws.path().join("repo");
+            let bare = ws.path().join("repo.git");
+            let branch = init_repo_with_bare_remote(&repo_path, &bare);
+            fs::write(repo_path.join("README.md"), "# repo\nupdated\n").unwrap();
+
+            let change_id = "GX-safepoint";
+            let mut transaction = Transaction::new(repo_path.clone(), change_id.to_string(), true);
+            let base_sha = commit_changes_with_rollback(
+                &repo_path,
+                change_id,
+                "test commit",
+                &["README.md".to_string()],
+                &mut transaction,
+            )
+            .expect("commit+push should succeed");
+
+            let repo = Repo::new(repo_path.clone()).unwrap();
+            let change_state = Mutex::new(ChangeState::new(change_id.to_string(), None));
+            let state_manager = StateManager::new().unwrap();
+
+            record_pushed_state(
+                Some(&change_state),
+                Some(&state_manager),
+                &repo,
+                change_id,
+                &branch,
+                &["README.md".to_string()],
+                &base_sha,
+            );
+
+            // Simulate the run continuing to finalize (which deletes the
+            // recovery file) - the state save already happened, so it survives
+            // regardless of what happens to the recovery file next.
+            transaction.finalize().expect("finalize should succeed");
+
+            let recoveries = Transaction::list_recovery_states().unwrap();
+            assert!(
+                recoveries.iter().all(|r| r.repo_path != repo_path),
+                "finalize should have removed the recovery file"
+            );
+
+            let loaded = state_manager
+                .load(change_id)
+                .unwrap()
+                .expect("change state must have been saved");
+            let repo_state = loaded
+                .repositories
+                .get(&repo.slug)
+                .expect("repo must be recorded");
+            assert_eq!(repo_state.branch_name, change_id);
+            assert_eq!(repo_state.base_sha.as_deref(), Some(base_sha.as_str()));
+        });
+    }
+
+    #[test]
+    fn test_pushed_branch_recorded_via_recovery_when_state_save_not_reached() {
+        // F12, "recovery-only" order: if the process dies between the pushed
+        // phase stamp and the pushed safe-point save (never reached), the
+        // recovery file - stamped write-ahead BEFORE the push ran - still
+        // records the branch on its own.
+        let data_home = TempDir::new().unwrap();
+        with_data_home(data_home.path(), || {
+            let ws = TempDir::new().unwrap();
+            let repo_path = ws.path().join("repo");
+            let bare = ws.path().join("repo.git");
+            init_repo_with_bare_remote(&repo_path, &bare);
+            fs::write(repo_path.join("README.md"), "# repo\nupdated\n").unwrap();
+
+            let change_id = "GX-recoveryonly";
+            let mut transaction = Transaction::new(repo_path.clone(), change_id.to_string(), true);
+            commit_changes_with_rollback(
+                &repo_path,
+                change_id,
+                "test commit",
+                &["README.md".to_string()],
+                &mut transaction,
+            )
+            .expect("commit+push should succeed");
+
+            // Simulate a crash right here: record_pushed_state is never
+            // called, and finalize() never runs.
+            let recoveries = Transaction::list_recovery_states().unwrap();
+            let recorded = recoveries
+                .iter()
+                .find(|r| r.repo_path == repo_path)
+                .expect("recovery file must exist for the pushed branch");
+            assert_eq!(recorded.phase, crate::transaction::Phase::Pushed);
+            assert_eq!(recorded.branch.as_deref(), Some(change_id));
+
+            // No change state was ever saved for this change id.
+            let state_manager = StateManager::new().unwrap();
+            assert!(state_manager.load(change_id).unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn test_process_single_repo_records_state_with_base_sha() {
+        // End-to-end (Phase 4 control-flow refactor): process_single_repo
+        // itself - not just the lower-level helpers above - saves state with
+        // base_sha via the Mutex<ChangeState>/StateManager now threaded in.
+        let data_home = TempDir::new().unwrap();
+        with_data_home(data_home.path(), || {
+            let ws = TempDir::new().unwrap();
+            let repo_path = ws.path().join("repo");
+            let bare = ws.path().join("repo.git");
+            init_repo_with_bare_remote(&repo_path, &bare);
+            fs::write(repo_path.join("file1.txt"), "content1").unwrap();
+            run_git_command(&["add", "-A"], &repo_path);
+            run_git_command(&["commit", "--quiet", "-m", "add file1"], &repo_path);
+            run_git_command(&["push", "--quiet"], &repo_path);
+
+            let repo = Repo::new(repo_path.clone()).unwrap();
+            let change_id = "GX-e2e-state";
+            let change_state = Mutex::new(ChangeState::new(
+                change_id.to_string(),
+                Some("test".to_string()),
+            ));
+            let state_manager = StateManager::new().unwrap();
+
+            let result = process_single_repo(
+                &repo,
+                change_id,
+                &["file1.txt".to_string()],
+                &Change::Delete,
+                Some("delete file1"),
+                None,
+                &Config::default(),
+                Some(&change_state),
+                Some(&state_manager),
+            );
+
+            assert!(
+                result.error.is_none(),
+                "expected success, got: {:?}",
+                result.error
+            );
+            assert!(result.base_sha.is_some());
+
+            let loaded = state_manager
+                .load(change_id)
+                .unwrap()
+                .expect("change state must have been saved");
+            let repo_state = loaded
+                .repositories
+                .get(&repo.slug)
+                .expect("repo must be recorded");
+            assert_eq!(repo_state.base_sha, result.base_sha);
+            assert_eq!(repo_state.status, RepoChangeStatus::BranchCreated);
+        });
     }
 }
