@@ -11,10 +11,10 @@
 //!    (branch gone remote + local, change `Abandoned`) AND the proposal
 //!    artifacts are removed (retention).
 //!
-//! The CLI `llm`/`apply` verbs land in Phase 6; here propose and apply are
-//! reached through the inert-unless-set `GX_LLM_PROPOSE_PROMPT` /
-//! `GX_LLM_APPLY_CHANGE_ID` hooks, the same test-drivable pattern the earlier
-//! phases use. The fake agent is configured via `--config` (`create.llm`).
+//! Propose and apply are driven through the real Phase 6 CLI verbs
+//! (`gx create ... llm "<prompt>" --propose` and `gx apply <change-id>
+//! --yes`), not the Phase 4/5 inert env hooks (which Phase 6 replaced). The
+//! fake agent is configured via `--config` (`create.llm`).
 
 #![cfg(unix)]
 
@@ -167,8 +167,10 @@ fn sole_recovery(data_home: &Path) -> (String, String) {
     )
 }
 
-/// Run `gx create` in PROPOSE mode (GX_LLM_PROPOSE_PROMPT) for `change_id`. The
-/// `sub` action is overridden by the propose hook; a config supplies the agent.
+/// Run `gx create ... llm "<prompt>" --propose` for `change_id` through the
+/// real `llm` clap verb; a config supplies the fake agent. `--yes` skips the
+/// up-front blast-radius confirm (stdin is null in these tests); `--propose`
+/// stops after persisting proposals, leaving apply to a separate `gx apply`.
 fn run_propose(workspace: &Path, cfg: &Path, data_home: &Path, change_id: &str) {
     let out = Command::new(gx_binary())
         .args([
@@ -183,12 +185,12 @@ fn run_propose(workspace: &Path, cfg: &Path, data_home: &Path, change_id: &str) 
             "app",
             "--change-id",
             change_id,
-            "sub",
-            "old",
-            "new",
+            "--yes",
+            "llm",
+            "make data.md say new value",
+            "--propose",
         ])
         .env("XDG_DATA_HOME", data_home)
-        .env("GX_LLM_PROPOSE_PROMPT", "make data.md say new value")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("gx propose failed to spawn");
@@ -234,17 +236,11 @@ fn test_apply_crash_matrix_parity_with_sub() {
                 workspace.path().to_str().unwrap(),
                 "--log-level",
                 "off",
-                "create",
-                "-p",
-                "app",
-                "--change-id",
+                "apply",
                 change_id,
-                "sub",
-                "old",
-                "new",
+                "--yes",
             ])
             .env("XDG_DATA_HOME", data_home.path())
-            .env("GX_LLM_APPLY_CHANGE_ID", change_id)
             .env("GX_CRASH_POINT", point)
             .stdin(std::process::Stdio::null())
             .output()
@@ -352,17 +348,11 @@ fn test_undo_reverses_applied_llm_campaign_and_removes_proposal() {
             workspace.path().to_str().unwrap(),
             "--log-level",
             "off",
-            "create",
-            "-p",
-            "app",
-            "--change-id",
+            "apply",
             change_id,
-            "sub",
-            "old",
-            "new",
+            "--yes",
         ])
         .env("XDG_DATA_HOME", data_home.path())
-        .env("GX_LLM_APPLY_CHANGE_ID", change_id)
         .stdin(std::process::Stdio::null())
         .output()
         .expect("gx apply failed to spawn");

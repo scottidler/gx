@@ -15,11 +15,14 @@ pub use core::manifest;
 
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::confirm::Confirmation;
 use crate::file;
 use crate::output::{display_unified_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
+use colored::Colorize;
 use eyre::{Context, Result};
 use log::debug;
+use std::path::Path;
 
 /// Show matched repositories and files without performing any actions (dry-run mode)
 pub fn show_matches(
@@ -119,33 +122,24 @@ pub fn process_create_command(
     pr: Option<crate::cli::PR>,
     yes: bool,
     change: Change,
+    propose_only: bool,
 ) -> Result<()> {
     log::info!("Starting create command with change: {change:?}");
 
-    // Forward hook (design doc `2026-07-12-llm-propose-apply-and-mcp-server.md`):
-    // the `gx create ... llm "<prompt>"` subcommand lands in Phase 6. Until then
-    // this inert-unless-set env var is the ONLY non-test site that selects
-    // `Change::Llm`, giving the propose pass a real (non-test) caller so the bin
-    // target's dead-code `-D warnings` passes honestly - the same established
-    // pattern as `confirm::already_confirmed` (GX_TEST_CONFIRM_TOKEN) and
-    // GX_CRASH_POINT / GX_TEST_LOCK_DELAY_MS.
-    // Forward hook for `gx apply <change-id>` (Phase 6 wires the real clap verb
-    // on top of `process_apply_command`). Inert unless `GX_LLM_APPLY_CHANGE_ID`
-    // is set - the same test-drivable, dead-code-honest pattern as the propose
-    // hook below. Checked first: apply and propose are mutually exclusive.
-    if let Some(apply_id) = llm_apply_change_id() {
-        return process_apply_command(cli, config, &apply_id);
-    }
-
-    let change = match llm_override_prompt() {
-        Some(prompt) => Change::Llm(prompt),
-        None => change,
-    };
-
-    // The `llm` change is a fleet-level propose pass, not the per-repo commit
-    // pipeline; present + confirm + apply are Phases 5-6. Here we propose only.
+    // The `llm` change is a fleet-level propose->present->confirm->apply flow,
+    // not the per-repo commit pipeline handled below; `--propose` stops after
+    // persisting proposals (the design's dry-run equivalent for llm).
     if let Change::Llm(prompt) = &change {
-        return run_llm_propose(cli, config, patterns, change_id, prompt);
+        return run_llm(
+            cli,
+            config,
+            patterns,
+            change_id,
+            prompt,
+            pr.as_ref(),
+            yes,
+            propose_only,
+        );
     }
 
     let change_id = change_id.unwrap_or_else(generate_change_id);
@@ -227,82 +221,25 @@ pub fn process_create_command(
     Ok(())
 }
 
-/// The inert forward hook that selects `Change::Llm` before the CLI `llm`
-/// subcommand exists (Phase 6). Returns the prompt only when
-/// `GX_LLM_PROPOSE_PROMPT` is set non-empty; unset (the normal case) leaves the
-/// deterministic change untouched.
-fn llm_override_prompt() -> Option<String> {
-    match std::env::var("GX_LLM_PROPOSE_PROMPT") {
-        Ok(p) if !p.is_empty() => Some(p),
-        _ => None,
-    }
-}
-
-/// The inert forward hook that selects `gx apply <change-id>` before the CLI
-/// `apply` verb exists (Phase 6). Returns the change-id only when
-/// `GX_LLM_APPLY_CHANGE_ID` is set non-empty.
-fn llm_apply_change_id() -> Option<String> {
-    match std::env::var("GX_LLM_APPLY_CHANGE_ID") {
-        Ok(id) if !id.is_empty() => Some(id),
-        _ => None,
-    }
-}
-
-/// Apply a persisted proposal set (`gx apply <change-id>`): drive the core apply
-/// pass and print a per-fleet summary. This is the CLI seam Phase 6 refines with
-/// the present step (re-render each repo's diff) + confirm gate #5; the core
-/// [`core::apply::execute_apply`] already owns the ChangeLock, drift/tamper
-/// refusals, the unchanged branch/commit/push/PR pipeline, and the partial-apply
-/// state reconciliation (drifted/failed repos stay `Proposed`).
-pub fn process_apply_command(cli: &Cli, config: &Config, change_id: &str) -> Result<()> {
-    log::info!("Starting apply for change ID: {change_id}");
-
-    let parallel_jobs = cli
-        .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
-        .unwrap_or_else(num_cpus::get);
-
-    // The wrapper's TTY present + confirm gate is Phase 6; the core already
-    // confirmed by another means here (Token via GX_TEST_CONFIRM_TOKEN, else
-    // AlreadyConfirmed), and re-verifies any supplied token against the manifest.
-    let report = core::apply::execute_apply(
-        change_id,
-        None, // commit message: the core falls back to the recorded prompt
-        None, // PR creation is a Phase 6 flag; apply pushes branches by default
-        config,
-        parallel_jobs,
-        crate::confirm::already_confirmed(),
-    )?;
-
-    let opts = StatusOptions {
-        verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
-        } else {
-            crate::config::OutputVerbosity::Summary
-        },
-        use_emoji: true,
-        use_colors: true,
-    };
-    display_unified_results(&report.results, &opts);
-    println!(
-        "\n📊 Applied {}: {} applied | {} drifted/failed (token {})",
-        report.change_id, report.applied, report.drifted_or_failed, report.token
-    );
-    Ok(())
-}
-
-/// Run the `llm` PROPOSE pass over the discovered/filtered repos and print a
-/// minimal per-fleet summary. The full present gate + confirm + apply are
-/// Phases 5-6; this phase persists proposals and reports what landed.
-fn run_llm_propose(
+/// Run the full `llm` flow: the blast-radius confirm runs up front exactly as
+/// it does for a committing create (design doc "Present": "blast-radius
+/// confirm still runs up front as today"), then propose -> present (colored
+/// diffs + fleet summary) -> confirm gate #5 -> apply. `--propose` stops after
+/// persisting proposals - the design's dry-run equivalent for `llm` (no
+/// apply-then-rollback dance).
+#[allow(clippy::too_many_arguments)]
+fn run_llm(
     cli: &Cli,
     config: &Config,
     patterns: &[String],
     change_id: Option<String>,
     prompt: &str,
+    pr: Option<&crate::cli::PR>,
+    yes: bool,
+    propose_only: bool,
 ) -> Result<()> {
     let change_id = change_id.unwrap_or_else(generate_change_id);
-    debug!("run_llm_propose: change_id={change_id} patterns={patterns:?}");
+    debug!("run_llm: change_id={change_id} patterns={patterns:?} propose_only={propose_only}");
 
     let current_dir = std::env::current_dir()?;
     let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
@@ -319,6 +256,16 @@ fn run_llm_propose(
         return Ok(());
     }
 
+    // The up-front blast-radius confirm, same gate + threshold as a
+    // committing `sub`/`regex`/`add`/`delete` create: propose runs an agent
+    // per repo, so it deserves the same "are you sure" as a mutating run.
+    let threshold = config.confirm_threshold();
+    let needs_prompt = patterns.is_empty() || filtered_repos.len() > threshold;
+    if !confirm_blast_radius(&filtered_repos, patterns, needs_prompt, yes)? {
+        println!("Aborted; no changes made.");
+        return Ok(());
+    }
+
     let parallel_jobs = cli
         .parallel
         .or_else(|| crate::utils::get_jobs_from_config(config))
@@ -326,13 +273,115 @@ fn run_llm_propose(
 
     let summary =
         core::propose::execute_propose(&filtered_repos, &change_id, prompt, config, parallel_jobs)?;
-
-    // Minimal report (present gate is Phase 6). Every ProposeSummary field is
-    // consumed here so the bin target's dead-code check stays honest.
     debug!(
-        "run_llm_propose: change_id={} token={}",
+        "run_llm: change_id={} token={}",
         summary.change_id, summary.token
     );
+    let proposal_dir = summary.manifest_path.parent().ok_or_else(|| {
+        eyre::eyre!(
+            "proposal manifest path had no parent directory: {}",
+            summary.manifest_path.display()
+        )
+    })?;
+
+    if propose_only {
+        print_propose_summary(&summary);
+        println!(
+            "\n--propose given; stopping before present/apply. Run `gx apply {}` to apply.",
+            summary.change_id
+        );
+        return Ok(());
+    }
+
+    present_diffs(&summary.repos, proposal_dir);
+    if summary.proposed == 0 {
+        println!("\nNothing to apply (no repo produced a proposed change).");
+        return Ok(());
+    }
+    if !confirm_apply(summary.proposed, yes)? {
+        println!(
+            "Aborted; proposals persisted but not applied. Run `gx apply {}` to apply later.",
+            summary.change_id
+        );
+        return Ok(());
+    }
+
+    let report = core::apply::execute_apply(
+        &summary.change_id,
+        None, // commit message: the core falls back to the recorded prompt
+        pr,
+        config,
+        parallel_jobs,
+        Confirmation::Token(summary.token),
+    )?;
+    render_apply_report(cli, &report);
+    Ok(())
+}
+
+/// Apply a persisted proposal set (`gx apply <change-id>`): re-present each
+/// repo's diff, run confirm gate #5, then drive the core apply pass and
+/// render a per-fleet summary. [`core::apply::execute_apply`] owns the
+/// ChangeLock, drift/tamper refusals, the unchanged branch/commit/push/PR
+/// pipeline, and the partial-apply state reconciliation (drifted/failed repos
+/// stay `Proposed`).
+pub fn process_apply_command(
+    cli: &Cli,
+    config: &Config,
+    change_id: &str,
+    pr: Option<&crate::cli::PR>,
+    yes: bool,
+) -> Result<()> {
+    log::info!("Starting apply for change ID: {change_id}");
+
+    let dir = core::manifest::proposal_dir(change_id)?;
+    let manifest_path = dir.join("manifest.json");
+    if !manifest_path.exists() {
+        return Err(eyre::eyre!(
+            "no proposal to apply for {change_id}: expected manifest at {}",
+            manifest_path.display()
+        ));
+    }
+    let manifest = core::manifest::load_manifest(&dir)?;
+    let token = core::manifest::recompute_token(&dir)?;
+
+    present_diffs(&manifest.repos, &dir);
+    let proposed = manifest
+        .repos
+        .iter()
+        .filter(|r| r.outcome == core::manifest::ProposalOutcome::Proposed)
+        .count();
+    if proposed == 0 {
+        println!("\nNothing to apply (no repo produced a proposed change).");
+        return Ok(());
+    }
+    if !confirm_apply(proposed, yes)? {
+        println!("Aborted; no changes applied.");
+        return Ok(());
+    }
+
+    let parallel_jobs = cli
+        .parallel
+        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .unwrap_or_else(num_cpus::get);
+
+    // The token recomputed above (from the on-disk manifest.json we just
+    // presented) round-trips into the apply core, so a proposal altered
+    // between present and apply is refused (confirm token binds the bytes).
+    let report = core::apply::execute_apply(
+        change_id,
+        None, // commit message: the core falls back to the recorded prompt
+        pr,
+        config,
+        parallel_jobs,
+        Confirmation::Token(token),
+    )?;
+    render_apply_report(cli, &report);
+    Ok(())
+}
+
+/// A minimal fleet summary of a propose pass (used by `--propose`, which stops
+/// before the present step).
+fn print_propose_summary(summary: &core::propose::ProposeSummary) {
     println!(
         "Proposed change {}: {} proposed | {} empty | {} failed",
         summary.change_id, summary.proposed, summary.empty, summary.failed
@@ -346,10 +395,126 @@ fn run_llm_propose(
             );
         }
     }
-    if let Some(dir) = summary.manifest_path.parent() {
-        println!("Proposal artifacts: {}", dir.display());
+}
+
+/// The present step (design doc Chunk A "Present"): a colored per-repo diff
+/// (read from the persisted `<slug>.patch`, finally consuming the diff
+/// plumbing surfaced in Phase 3) for every `Proposed` repo, a one-line note
+/// for `Empty`/`Failed`, and a fleet summary. This IS confirm gate #5's
+/// content - the meaningful, content-based consent moment for a stochastic
+/// change, shown after generation.
+fn present_diffs(repos: &[core::manifest::RepoProposal], proposal_dir: &Path) {
+    for rp in repos {
+        match rp.outcome {
+            core::manifest::ProposalOutcome::Proposed => {
+                println!("\n=== {} ===", rp.slug);
+                let patch_path = core::manifest::patch_path(proposal_dir, &rp.slug);
+                match std::fs::read_to_string(&patch_path) {
+                    Ok(patch) => print!("{}", colorize_patch(&patch)),
+                    Err(e) => println!("  (failed to read patch {}: {e})", patch_path.display()),
+                }
+            }
+            core::manifest::ProposalOutcome::Empty => {
+                println!("\n=== {} === (no change proposed)", rp.slug);
+            }
+            core::manifest::ProposalOutcome::Failed => {
+                println!(
+                    "\n=== {} === FAILED: {}",
+                    rp.slug,
+                    rp.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+        }
     }
-    Ok(())
+
+    let proposed = repos
+        .iter()
+        .filter(|r| r.outcome == core::manifest::ProposalOutcome::Proposed)
+        .count();
+    let empty = repos
+        .iter()
+        .filter(|r| r.outcome == core::manifest::ProposalOutcome::Empty)
+        .count();
+    let failed = repos
+        .iter()
+        .filter(|r| r.outcome == core::manifest::ProposalOutcome::Failed)
+        .count();
+    println!(
+        "\n📊 {} repositories: {proposed} proposed | {empty} empty | {failed} failed",
+        repos.len()
+    );
+}
+
+/// Colorize a unified diff for terminal display: `+`/`-` content lines
+/// green/red, `+++`/`---` file headers bold (not colored as content), hunk
+/// headers (`@@`) cyan, everything else unstyled. Same visual language as
+/// `crate::diff::generate_diff` uses for `sub`/`regex` changes.
+fn colorize_patch(patch: &str) -> String {
+    let mut out = String::new();
+    for line in patch.lines() {
+        let rendered = if line.starts_with("+++") || line.starts_with("---") {
+            line.bold().to_string()
+        } else if line.starts_with('+') {
+            line.green().to_string()
+        } else if line.starts_with('-') {
+            line.red().to_string()
+        } else if line.starts_with("@@") {
+            line.cyan().to_string()
+        } else {
+            line.to_string()
+        };
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    out
+}
+
+/// Confirm gate #5 (design doc Chunk A "Present"): the content-based consent
+/// moment after generation, shared by the one-shot `llm` flow and `gx apply`.
+/// Fails closed exactly like the other four TTY gates: a required prompt on a
+/// non-interactive stdin without `--yes` is a loud error naming the flag.
+fn confirm_apply(proposed_count: usize, yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+
+    if yes {
+        debug!("--yes supplied; skipping apply confirmation prompt");
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "Refusing to apply {proposed_count} proposed repositories without confirmation on non-interactive stdin; pass --yes to proceed"
+        ));
+    }
+
+    print!("Apply these {proposed_count} proposed repositories? (y/N): ");
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Render an apply pass's results + fleet summary, shared by the one-shot
+/// `llm` flow and `gx apply`.
+fn render_apply_report(cli: &Cli, report: &core::apply::ApplyReport) {
+    let opts = StatusOptions {
+        verbosity: if cli.verbose {
+            crate::config::OutputVerbosity::Detailed
+        } else {
+            crate::config::OutputVerbosity::Summary
+        },
+        use_emoji: true,
+        use_colors: true,
+    };
+    display_unified_results(&report.results, &opts);
+    println!(
+        "\n📊 Applied {}: {} applied | {} drifted/failed (token {})",
+        report.change_id, report.applied, report.drifted_or_failed, report.token
+    );
 }
 
 /// Show the resolved repository list and, when a prompt is required, confirm
@@ -579,3 +744,6 @@ fn display_create_summary(results: &[CreateResult], opts: &StatusOptions) {
     // Add pattern analysis for substitution operations
     display_pattern_analysis(results, opts);
 }
+
+#[cfg(test)]
+mod tests;

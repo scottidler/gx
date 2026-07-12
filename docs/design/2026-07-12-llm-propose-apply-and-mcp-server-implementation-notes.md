@@ -583,3 +583,132 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 - None. (Cross-repo/system-mutating bullets: none in this phase. The `main.rs`
   lib/bin duplicate-module-tree debt from Phase 3 persists and was again worked
   within via the inert-hook pattern, not undertaken here.)
+
+## Phase 6: CLI surface + present gate
+
+### Design decisions
+- **`gx create -p <patterns> [--yes] llm "<prompt>" [--propose]`** (`src/cli.rs`):
+  `Llm { prompt, propose }` added to `cli::CreateAction` (the clap subcommand
+  enum under `create`); `propose` is a plain bool flag (no value), matching the
+  design's one-shot-vs-split shape exactly. `gx apply <change-id> [--pr] [--yes]`
+  added as a new top-level `Commands::Apply` variant, `change_id` validated with
+  the same `validate_change_id` (`GX-` prefix) as `create --change-id`/`undo`.
+- **`main.rs`** wires both: `cli::CreateAction::Llm { prompt, .. } =>
+  create::Change::Llm(prompt.clone())`, with `propose_only` extracted via a
+  `matches!` guard alongside the existing action match (so it's available to
+  `process_create_command` without restructuring the match itself); `Commands::
+  Apply` calls `create::process_apply_command` directly - a fresh top-level
+  entry point, not routed through `process_create_command`.
+- **The blast-radius confirm now runs for `llm` too** (`create.rs::run_llm`,
+  replacing Phase 4's `run_llm_propose`): design doc's Present section says
+  "blast-radius confirm still runs up front as today", but Phase 4's propose
+  CLI seam (env-hook only) never called `confirm_blast_radius` at all - propose
+  runs an agent per repo (real cost, real time), so it deserves the identical
+  up-front gate a committing `sub`/`regex`/`add`/`delete` gets, using the same
+  `confirm_threshold` config and the same `confirm_blast_radius` helper. This
+  closes a real gap, not a refactor of existing behavior.
+- **Confirm gate #5** (`create.rs::confirm_apply`): the content-based gate
+  after present, shared verbatim by the one-shot `llm` flow and `gx apply`.
+  Fails closed exactly like the four existing TTY gates (`confirm_blast_radius`,
+  undo's confirm, rollback execute's confirm, review purge's confirm): `--yes`
+  bypasses; a non-interactive stdin without `--yes` is a loud `Err` naming
+  `--yes`; only an interactive TTY without `--yes` prompts.
+- **Present step** (`create.rs::present_diffs`): for every `Proposed` repo,
+  reads the persisted `<slug>.patch` (Phase 4's display artifact) and prints it
+  through `colorize_patch` (new, `+`/`-` lines green/red, `+++`/`---` headers
+  bold, `@@` hunk headers cyan - same visual language `crate::diff::
+  generate_diff` uses for `sub`/`regex`); `Empty`/`Failed` repos get a one-line
+  note; a fleet summary (`N repositories: P proposed | E empty | F failed`)
+  follows. This is the FIRST real consumer of the `diff_parts`/`CreateResult.
+  diff` plumbing surfaced in Phase 3 for the deterministic path, and of the
+  Phase 4 `<slug>.patch` artifact for the llm path - both were computed and
+  discarded/unread until now.
+- **The confirm token round-trips for real** (`Confirmation::Token`, first
+  wired to a real caller here): the one-shot flow passes
+  `Confirmation::Token(summary.token)` (the token `execute_propose` just
+  minted) into `execute_apply`; `gx apply` passes `Confirmation::Token(token)`
+  where `token` is `core::manifest::recompute_token(&dir)` computed from the
+  SAME on-disk `manifest.json` bytes just presented. Either way, apply's
+  existing (Phase 5) token check refuses if the manifest changed between
+  present and apply - closing the loop the design's "token binds the applied
+  bytes" must-fix started.
+- **The `GX_LLM_PROPOSE_PROMPT` / `GX_LLM_APPLY_CHANGE_ID` env hooks are
+  DELETED**, not left inert-alongside: `process_create_command` now routes
+  `Change::Llm` straight to `run_llm` (no forward-hook branch), and
+  `process_apply_command` gained a `pr`/`yes` signature reached only from
+  `Commands::Apply`. `tests/e2e_llm_apply.rs` (Phase 5's crash-matrix + undo
+  e2e) was updated to drive the real `create ... llm ... --propose` / `apply
+  <id> --yes` verbs instead of the env hooks - the exact "replace that test
+  seam with the real clap verb" instruction, applied to both hooks for
+  consistency (leaving one hook alive while the other used the real verb would
+  have left two different CLI-reachability stories for propose vs apply).
+- **New e2e file `tests/e2e_llm_cli.rs`** (self-contained, matching the
+  no-shared-`tests/common`-module convention already in this repo): three
+  tests - (1) one-shot `llm` confirm gate #5 fails closed on non-TTY without
+  `--yes`, (2) `gx apply` confirm gate #5 fails closed on non-TTY without
+  `--yes`, (3) `--propose` then a separate `gx apply` produces the identical
+  pushed-branch content and recorded per-repo state as the one-shot flow (same
+  deterministic fake agent, two independent fixtures so the flows can't
+  interfere). Tests (1) and (2) use `-p app` matching exactly one repo (under
+  the default `confirm-threshold: 5`) specifically so the up-front
+  blast-radius gate auto-proceeds and the ONLY thing under test is gate #5 in
+  isolation.
+- **New unit tests** `src/create/tests.rs` (new submodule, `create.rs` had none
+  before - Phase 3 moved every prior inline test into `core`): `colorize_patch`
+  is pure and easy to pin directly - asserts every line survives in order
+  (headers, hunk marker, +/-/context lines) and that empty input round-trips
+  to empty output.
+
+### Deviations
+- **`gx apply` gained a `--pr` flag**, which the design's literal API-Design
+  CLI block (`gx apply <change-id> [--yes]`) does not show. Same effect,
+  correct seam: Phase 5's own `process_apply_command` already threaded a `pr:
+  Option<&PR>` parameter into `execute_apply` with the comment "PR creation is
+  a Phase 6 flag" - the implementation handoff, not the doc's terse CLI
+  summary, is the more precise signal here. Without it, the split flow
+  (`--propose` then `gx apply`) could never open a PR, while the one-shot flow
+  could (via `create`'s existing `--pr`) - an arbitrary capability gap between
+  the two paths the design explicitly says must produce the "identical" apply
+  pass.
+- **Both env hooks removed, not just `GX_LLM_APPLY_CHANGE_ID`.** The phase
+  brief named only the apply hook explicitly; `GX_LLM_PROPOSE_PROMPT` was
+  removed too, for the reason above (consistency; Phase 7's "full matrix"
+  needs one coherent CLI-entry-point story for both halves of the flow, not
+  one real verb and one leftover env shim).
+- **Present-step formatting uses plain `println!`/`print!` with `colored`
+  string wrapping**, not `crate::output::display_unified_results` /
+  `UnifiedDisplay` (the trait deterministic changes render through): a
+  proposal's diff is per-repo unstructured patch TEXT (not a `CreateResult`
+  with typed fields), so there is no natural `UnifiedDisplay` row to build:
+  print_diffs is its own small renderer, matching the existing precedent of
+  `run_llm_propose`'s (Phase 4) bespoke summary print rather than forcing the
+  unified-result machinery onto a shape it wasn't built for.
+
+### Tradeoffs
+- **Confirm gate #5 shares one function (`confirm_apply`) across the one-shot
+  flow and `gx apply`** vs. two near-identical copies - chose one function: the
+  prompt text, `--yes` bypass, and fail-closed non-TTY error are identical by
+  design ("same confirm gate"); a single function makes that identity
+  structural rather than a comment promising two call sites stay in sync.
+- **`run_llm` (one function) owns discover -> blast-radius confirm -> propose
+  -> present -> confirm#5 -> apply** for the one-shot flow, rather than
+  splitting propose-only and apply-only into always-separate helpers that
+  `run_llm` merely calls twice - chose the single function: the one-shot path
+  IS the design's literal sentence ("propose all -> present -> confirm -> apply
+  all"), and `process_apply_command` already exists as the standalone,
+  independently-callable apply entry point for the split flow, so there's no
+  duplicated logic - only duplicated *rendering* (present_diffs,
+  render_apply_report, confirm_apply), which are already shared helpers.
+- **`present_diffs` takes `&[core::manifest::RepoProposal]` (the manifest's own
+  type) rather than a `Vec<CreateResult>`-shaped adapter** - chose the direct
+  manifest type: it's what both call sites already have in hand (a fresh
+  `ProposeSummary.repos` in `run_llm`, a freshly-loaded `ProposalManifest.repos`
+  in `process_apply_command`), and building a `CreateResult` shim purely to
+  reuse `display_unified_results` would have meant inventing dummy
+  `CreateAction`/`base_sha`/etc. fields with no real meaning at the propose/
+  present stage (before any repo has been touched by apply).
+
+### Open questions
+- None new. (Cross-repo/system-mutating bullets: none in this phase. The
+  `main.rs` lib/bin duplicate-module-tree debt from Phase 3 persists,
+  unaffected by this phase's changes.)

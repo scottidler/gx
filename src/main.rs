@@ -128,6 +128,8 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
         } => match action {
             None => create::show_matches(cli, config, files, patterns),
             Some(action) => {
+                let propose_only =
+                    matches!(action, cli::CreateAction::Llm { propose, .. } if *propose);
                 let change = match action {
                     cli::CreateAction::Add { path, content } => {
                         create::Change::Add(path.clone(), content.clone())
@@ -141,6 +143,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                         pattern,
                         replacement,
                     } => create::Change::Regex(pattern.clone(), replacement.clone()),
+                    cli::CreateAction::Llm { prompt, .. } => create::Change::Llm(prompt.clone()),
                 };
                 create::process_create_command(
                     cli,
@@ -152,9 +155,13 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                     pr.clone(),
                     *yes,
                     change,
+                    propose_only,
                 )
             }
         },
+        Commands::Apply { change_id, pr, yes } => {
+            create::process_apply_command(cli, config, change_id, pr.as_ref(), *yes)
+        }
         Commands::Review {
             org,
             patterns,

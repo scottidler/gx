@@ -333,6 +333,36 @@ EXAMPLES:
         action: Option<CreateAction>,
     },
 
+    /// Apply a persisted `llm` proposal (`gx create ... llm "<prompt>" --propose`,
+    /// then `gx apply <change-id>`). Re-presents the diffs and runs the same
+    /// confirm gate as the one-shot `gx create ... llm` flow.
+    #[command(after_help = "EXAMPLES:
+  gx apply GX-2026-07-12              # re-present diffs, confirm, then apply
+  gx apply GX-2026-07-12 --yes        # apply without the confirmation prompt
+  gx apply GX-2026-07-12 --pr         # apply and open a PR per repo")]
+    Apply {
+        /// Change ID whose persisted proposal to apply
+        #[arg(value_name = "CHANGE_ID", value_parser = validate_change_id)]
+        change_id: String,
+
+        /// Create PR after committing (use --pr=draft for draft mode)
+        #[arg(
+            long,
+            help = "Create pull request after committing (use --pr=draft for draft mode)",
+            default_missing_value = "normal",
+            num_args = 0..=1
+        )]
+        pr: Option<PR>,
+
+        /// Skip the confirmation prompt before applying (for automation)
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before applying"
+        )]
+        yes: bool,
+    },
+
     /// Manage PRs across multiple repositories
     #[command(after_help = "REVIEW LEGEND:
   📋  PR listed             📥  Repository cloned   ✅  PR approved
@@ -580,6 +610,27 @@ pub enum CreateAction {
         pattern: String,
         #[arg(help = "Replacement text")]
         replacement: String,
+    },
+    /// Run an agent per repo in an isolated worktree and propose the diff
+    #[command(
+        after_help = "One generation per repo per propose; re-propose to retry.
+
+EXAMPLES:
+  gx create -p frontend llm \"add error handling to the API client\"
+  gx create -p frontend llm \"...\" --propose      # stop after persisting proposals
+  gx apply GX-2026-07-12                          # apply a persisted proposal"
+    )]
+    Llm {
+        /// Prompt describing the desired change; passed to the configured agent
+        #[arg(help = "Prompt describing the desired change")]
+        prompt: String,
+
+        /// Stop after persisting proposals (skip present + confirm + apply)
+        #[arg(
+            long,
+            help = "Stop after persisting proposals (skip present + confirm + apply); the proposal IS the dry run"
+        )]
+        propose: bool,
     },
 }
 
