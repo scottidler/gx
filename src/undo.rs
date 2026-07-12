@@ -43,6 +43,13 @@ enum UndoAction {
     /// PR merged: revert it via a `revert/<change-id>` PR (Phase 6 [F4]). The
     /// base branch is NEVER touched directly and undo NEVER force-pushes.
     RequiresRevert { pr_number: Option<u64> },
+    /// Merge state could NOT be verified against GitHub (the repo's org fetch
+    /// failed during reconcile), so a remote-mutating action would be unsafe: a
+    /// repo recorded `PrOpen`/`PrClosed`/... might actually be MERGED, and
+    /// deleting its remote branch would skip the required revert. Fail closed:
+    /// report it, touch NO remote, and leave the repo for a re-run online
+    /// (post-audit hardening). Recovery-file draining (local-only) still runs.
+    UnverifiedOffline,
     /// Already gone (cleaned up): record and skip.
     AlreadyGone,
 }
@@ -87,6 +94,9 @@ enum OutcomeKind {
     /// Marks the row `RevertPrOpen`; the aggregate reaches `Abandoned` once every
     /// merged row is reverted.
     RevertPrOpened { pr_number: Option<u64> },
+    /// Merge state could not be verified offline: reported, no remote touched,
+    /// state NOT advanced so a re-run online retries (post-audit hardening).
+    Unverified(String),
     /// A step failed; the error is reported and state is NOT advanced, so a
     /// re-run retries this repo.
     Failed(String),
@@ -119,8 +129,21 @@ fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAct
 
 /// True when a plan entry has real work: a non-`AlreadyGone` action, or a
 /// recovery file to drain. `AlreadyGone` with no recovery is informational.
+/// `UnverifiedOffline` is actionable so it is REPORTED (never silently dropped).
 fn needs_action(plan: &UndoPlan) -> bool {
     !matches!(plan.action, UndoAction::AlreadyGone) || !plan.recovery_tx_ids.is_empty()
+}
+
+/// Whether an action would MUTATE a remote (close a PR or delete a remote
+/// branch). Such an action is unsafe when the repo's merge state could not be
+/// verified against GitHub, because the repo might actually be merged.
+fn is_remote_mutating(action: &UndoAction) -> bool {
+    matches!(
+        action,
+        UndoAction::ClosePr { .. }
+            | UndoAction::DeleteRemoteAndLocal
+            | UndoAction::RequiresRevert { .. }
+    )
 }
 
 /// Whether two paths refer to the same repo, comparing canonical forms when
@@ -141,9 +164,10 @@ fn build_plan(
     state: &ChangeState,
     recoveries: &[RecoveryState],
     merged_prs: &[github::PrInfo],
+    failed_orgs: &BTreeSet<String>,
 ) -> Vec<UndoPlan> {
     debug!(
-        "build_plan: change_id={} repos={} recoveries={} merged_prs={}",
+        "build_plan: change_id={} repos={} recoveries={} merged_prs={} failed_orgs={failed_orgs:?}",
         state.change_id,
         state.repositories.len(),
         recoveries.len(),
@@ -172,13 +196,26 @@ fn build_plan(
             .iter()
             .find(|p| p.repo_slug == repo_state.repo_slug);
 
+        // Fail closed when this repo's merge state is unverified: if its org
+        // fetch failed AND the classified action would touch the remote, hold
+        // it back as `UnverifiedOffline` rather than risk deleting the branch of
+        // a PR that is actually merged (post-audit hardening).
+        let mut action = classify_action(&repo_state.status, repo_state.pr_number);
+        if failed_orgs.contains(org_of(&repo_state.repo_slug)) && is_remote_mutating(&action) {
+            debug!(
+                "build_plan: {} merge state unverified (org fetch failed) -> UnverifiedOffline",
+                repo_state.repo_slug
+            );
+            action = UndoAction::UnverifiedOffline;
+        }
+
         plans.push(UndoPlan {
             slug: repo_state.repo_slug.clone(),
             repo_path,
             branch: Some(repo_state.branch_name.clone()),
             pr_number: repo_state.pr_number.or_else(|| merged.map(|p| p.number)),
             status: Some(repo_state.status.clone()),
-            action: classify_action(&repo_state.status, repo_state.pr_number),
+            action,
             recovery_tx_ids,
             merge_commit_oid: merged.and_then(|p| p.merge_commit_oid.clone()),
             base_ref_name: merged.map(|p| p.base_ref_name.clone()),
@@ -241,6 +278,9 @@ fn action_label(plan: &UndoPlan) -> String {
             Some(n) => format!("PR #{n} merged -> open revert PR (never touches base branch)"),
             None => "merged -> open revert PR (never touches base branch)".to_string(),
         },
+        UndoAction::UnverifiedOffline => {
+            "merge state unverified offline; skipped (re-run `gx undo` online)".to_string()
+        }
         UndoAction::AlreadyGone => "already gone; skip".to_string(),
     }
 }
@@ -290,17 +330,30 @@ fn confirm_undo(change_id: &str, count: usize, yes: bool) -> Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
+/// The outcome of reconciling recorded state against GitHub.
+struct Reconciliation {
+    /// The merged PRs (carry the merge commit oid + base branch the revert needs).
+    merged_prs: Vec<github::PrInfo>,
+    /// Orgs whose PR fetch FAILED, so any repo under them has UNVERIFIED merge
+    /// state. Remote-mutating undo actions for those repos are held back
+    /// (post-audit hardening) rather than risking deletion of a merged PR's
+    /// branch.
+    failed_orgs: BTreeSet<String>,
+}
+
 /// Reconcile the recorded change state against GitHub reality before planning,
 /// reusing `gx review sync`'s core so merged/closed PRs are trued up. Orgs are
 /// taken from the recorded repo slugs (or an explicit `--org`); a per-org fetch
-/// failure is a warning, not a hard error, so an offline undo of local branches
-/// still proceeds on the recorded state.
+/// failure is a warning, not a hard error, so an offline undo of LOCAL-only work
+/// still proceeds -- but the failed orgs are returned so that REMOTE-mutating
+/// actions on their repos fail closed (a PrOpen repo whose fetch failed might
+/// actually be merged; deleting its branch would skip the revert).
 fn reconcile(
     change_id: &str,
     org: Option<&str>,
     state: &ChangeState,
     config: &Config,
-) -> Vec<github::PrInfo> {
+) -> Reconciliation {
     let orgs: BTreeSet<String> = match org {
         Some(o) => std::iter::once(o.to_string()).collect(),
         None => state
@@ -312,16 +365,23 @@ fn reconcile(
     debug!("reconcile: change_id={change_id} orgs={orgs:?}");
 
     let mut all_prs = Vec::new();
+    let mut failed_orgs = BTreeSet::new();
     for org in &orgs {
         match github::list_prs_by_change_id(org, change_id, config) {
             Ok(prs) => all_prs.extend(prs),
-            Err(e) => warn!("Failed to list PRs from org '{org}' during reconcile: {e}"),
+            Err(e) => {
+                warn!("Failed to list PRs from org '{org}' during reconcile: {e}");
+                failed_orgs.insert(org.clone());
+            }
         }
     }
 
     if all_prs.is_empty() {
         debug!("reconcile: no PRs returned; leaving recorded state as-is");
-        return all_prs;
+        return Reconciliation {
+            merged_prs: all_prs,
+            failed_orgs,
+        };
     }
 
     match crate::review::sync_change_state(&all_prs, change_id) {
@@ -333,10 +393,14 @@ fn reconcile(
 
     // Return only the merged PRs; they carry the merge commit oid + base branch
     // the Phase 6 revert path needs.
-    all_prs
+    let merged_prs = all_prs
         .into_iter()
         .filter(|p| p.state == github::PrState::Merged)
-        .collect()
+        .collect();
+    Reconciliation {
+        merged_prs,
+        failed_orgs,
+    }
 }
 
 /// Delete the pushed branch: the remote branch (via the token-consistent gh
@@ -435,6 +499,13 @@ fn undo_one(plan: &UndoPlan, change_id: &str, config: &Config) -> UndoOutcome {
     // 2. Campaign action.
     match &plan.action {
         UndoAction::AlreadyGone => outcome(OutcomeKind::Skipped),
+        // Fail closed: merge state could not be verified. The recovery drain
+        // above (local-only) already ran; touch NO remote here and report so the
+        // user re-runs online (post-audit hardening).
+        UndoAction::UnverifiedOffline => outcome(OutcomeKind::Unverified(format!(
+            "merge state for {} could not be verified offline; no remote action taken - re-run `gx undo {change_id}` online",
+            plan.slug
+        ))),
         UndoAction::RequiresRevert { .. } => outcome(revert_merged(plan, change_id, config)),
         UndoAction::ClosePr { pr_number } => {
             if let Err(e) = github::close_pr(&plan.slug, *pr_number, config) {
@@ -642,7 +713,7 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
                 OutcomeKind::Undone | OutcomeKind::Skipped | OutcomeKind::RevertPrOpened { .. } => {
                     None
                 }
-                OutcomeKind::Failed(msg) => Some(msg.clone()),
+                OutcomeKind::Unverified(msg) | OutcomeKind::Failed(msg) => Some(msg.clone()),
             };
             ReviewResult {
                 repo: Repo::from_slug(o.slug.clone()),
@@ -677,13 +748,17 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
         .iter()
         .filter(|o| matches!(o.kind, OutcomeKind::Failed(_)))
         .count();
+    let unverified = outcomes
+        .iter()
+        .filter(|o| matches!(o.kind, OutcomeKind::Unverified(_)))
+        .count();
     let skipped = outcomes
         .iter()
         .filter(|o| o.kind == OutcomeKind::Skipped)
         .count();
 
     println!(
-        "\n📊 {} repositories: {undone} undone, {reverted} reverted (revert PR opened), {failed} failed, {skipped} skipped",
+        "\n📊 {} repositories: {undone} undone, {reverted} reverted (revert PR opened), {failed} failed, {unverified} unverified (offline), {skipped} skipped",
         outcomes.len()
     );
 }
@@ -710,7 +785,10 @@ pub fn process_undo_command(
     // This planning copy is read-only from here on: the authoritative
     // load-mutate-save happens once more, under the change lock, right before
     // the final save below.
-    let merged_prs = reconcile(change_id, org, &state, config);
+    let Reconciliation {
+        merged_prs,
+        failed_orgs,
+    } = reconcile(change_id, org, &state, config);
     let state = manager
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during reconcile"))?;
@@ -723,7 +801,7 @@ pub fn process_undo_command(
         .filter(|r| r.change_id == change_id)
         .collect();
 
-    let plan = build_plan(&state, &recoveries, &merged_prs);
+    let plan = build_plan(&state, &recoveries, &merged_prs, &failed_orgs);
     print_plan(&plan, change_id);
 
     let actionable: Vec<UndoPlan> = plan.into_iter().filter(needs_action).collect();

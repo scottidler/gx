@@ -808,3 +808,109 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None. No cross-repo/system-mutating bullets in Phase 8.
+
+## Phase 9: Post-audit hardening
+
+Three unhappy-path fixes from the implementation-audit review panel (Staff
+Engineer/Codex findings, verified against the code). Not new features -- each
+closes a double-fault gap the eight phases left open.
+
+### Design decisions
+- **FIX 1 [Critical] F12 "never neither" on a save/init double fault.** A
+  committing run now REQUIRES a durable state store: `StateManager::new()`
+  failing in commit mode is a HARD error (`?`) that aborts BEFORE the rayon pool
+  mutates or pushes any repo, replacing the old `warn!` + `None` fail-open --
+  `src/create.rs:process_create_command`. `record_pushed_state` now returns
+  `bool` (`#[must_use]`): `true` only when the pushed safe point was DURABLY
+  saved -- `src/create.rs:record_pushed_state`. When it returns `false`,
+  `process_single_repo` does NOT call `finalize()` (which deletes the recovery
+  file); instead it calls the new `Transaction::finalize_retaining_recovery`
+  (restores branch + stash, leaves the recovery file and backups on disk, leaves
+  the phase at `Pushed`) and reports the repo `Committed` with an error naming
+  the retained recovery path -- `src/create.rs:process_single_repo`,
+  `src/transaction.rs:finalize_retaining_recovery`. `finalize` and
+  `finalize_retaining_recovery` share the extracted
+  `Transaction::restore_environment`; `Transaction::recovery_path` exposes the
+  retained path for the report. **Invariant now enforced: recovery file deleted
+  => state contains this repo** (the recovery file is deleted only via
+  `finalize`, which runs only when `record_pushed_state` returned `true`).
+- **FIX 2 [Medium] undo fails closed on unverified merge state.** `reconcile`
+  now returns a `Reconciliation { merged_prs, failed_orgs }`; a per-org PR fetch
+  failure records the org in `failed_orgs` instead of being only a `warn!` --
+  `src/undo.rs:reconcile`. `build_plan` gained a `failed_orgs` parameter: a repo
+  whose org fetch FAILED and whose classified action is remote-mutating
+  (`is_remote_mutating`: `ClosePr`/`DeleteRemoteAndLocal`/`RequiresRevert`) is
+  reclassified to the new `UndoAction::UnverifiedOffline` -- `src/undo.rs:build_plan`.
+  `undo_one` handles it by draining any recovery file (local-only, safe) and
+  then touching NO remote, returning the new `OutcomeKind::Unverified(msg)`;
+  `finalize_state` leaves such a repo's state unadvanced so a re-run online
+  retries, and `render_results` reports it in a distinct "unverified (offline)"
+  bucket -- `src/undo.rs`. Local-only cleanup (`DeleteLocal`) and recovery drains
+  still proceed offline.
+- **FIX 3 [Medium] `cleanup_old` deletes change files under the change lock.**
+  `StateManager::cleanup_old` now acquires `crate::lock::ChangeLock` for each
+  aged-out change-id before deleting its file; if the lock is held by a live
+  process the change is SKIPPED with a `warn!`, never deleted under contention
+  -- `src/state.rs:cleanup_old`. This is the change-level RMW discipline Phase 7
+  requires (a delete is the ultimate mutation), closing the race against
+  `undo`/`review sync`/create saves.
+
+### Deviations
+- FIX 1 (b)'s deterministic test needs the pushed-state save to fail AFTER a
+  real push. Added a compiled-in, inert-by-default fault hook
+  `GX_TEST_FAIL_STATE_SAVE` at the top of `StateManager::save`
+  (`src/state.rs`), mirroring the existing `GX_TEST_LOCK_DELAY_MS`
+  (`src/lock.rs`) and `GX_CRASH_POINT` (`src/crash.rs`) hooks the design already
+  blesses. Same "compiled in, inert unless set" shape; no production behavior
+  change.
+- FIX 1 (a)'s test isolates the `StateManager::new()` failure (rather than the
+  earlier `ChangeLock`/logging xdg users) by making `gx/changes` a regular FILE
+  while `gx/` stays a directory, so only `create_dir_all(gx/changes)` fails.
+  Same effect (state store unavailable), correct seam.
+- FIX 3 made the pre-existing `test_cleanup_old_includes_failed_states`
+  XDG-isolated (new `with_xdg_data_home` test helper in `src/state.rs`), because
+  `cleanup_old` now acquires a `ChangeLock` whose dir resolves from
+  `xdg_data_dir()`; without isolation the test would write lock files into the
+  real `$HOME/.local/share`. Behavior of that test is unchanged.
+- `UnverifiedOffline` reuses `review`'s unified renderer via the existing
+  `ReviewResult`/error-line path (no new `output.rs` variant), consistent with
+  Phase 5's "undo looks like review" decision.
+
+### Tradeoffs
+- FIX 2 includes `RequiresRevert` in `is_remote_mutating` for completeness even
+  though a `PrMerged` classification can only come from a SUCCESSFUL reconcile
+  (so its org is never in `failed_orgs` in practice). Cheap defensiveness; no
+  behavior cost.
+- FIX 1's retain path deliberately skips `record_final_state` when the safe-point
+  save failed: re-attempting a save that is already failing would only mask the
+  retained-recovery outcome, and `record_final_state` must never delete the
+  recovery file. The recovery file is the durable record; `gx undo` / `gx
+  rollback` resolve it. Alternative (retry the save inline) rejected -- it does
+  not change the fail-closed invariant and muddies the report.
+- FIX 3 acquires + releases a `ChangeLock` per aged-out change rather than one
+  broad lock, matching `RepoLock`'s per-target fail-fast shape (the lock has no
+  queueing); a contended change is skipped this run and aged out on the next.
+
+### Break-the-code proofs
+- **FIX 1 (a)** [`tests/e2e_f12_failclosed.rs:test_commit_aborts_before_push_when_state_store_unavailable`]:
+  reverting the guard to `warn!` + `None` made the committing run PROCEED and
+  push instead of aborting -- the `!create.status.success()` "must abort"
+  assertion FAILED (run exited 0). Restored; passes.
+- **FIX 1 (b)** [`tests/e2e_f12_failclosed.rs:test_pushed_save_failure_retains_recovery_and_reports_committed`]:
+  reverting the retain branch to the unconditional `finalize()` (skip the
+  `if !pushed_saved` arm) deleted the recovery file, so the "must report the
+  retained recovery file" (RETAINED in output) assertion FAILED, and
+  `recovery_file_count == 1` would have gone to 0. Restored; passes.
+- **FIX 2** [`src/undo/tests.rs:build_plan_holds_remote_action_when_org_unverified`]:
+  dropping the `failed_orgs`/`is_remote_mutating` override in `build_plan` made
+  `blocked/open` classify as `ClosePr { pr_number: 11 }` instead of
+  `UnverifiedOffline` -- assertion FAILED (`left: ClosePr`, `right:
+  UnverifiedOffline`). Restored; passes. (`undo_one_unverified_offline_touches_no_remote_and_reports`
+  additionally proves the runtime path deletes no branch and calls no `gh`.)
+- **FIX 3** [`src/state.rs:test_cleanup_old_skips_locked_change`]: reverting
+  `cleanup_old` to an unconditional `self.delete(...)` made the first cleanup
+  return `1` and remove the locked file -- the `deleted == 0` / "locked change
+  must NOT be deleted" assertion FAILED. Restored; passes.
+
+### Open questions
+- None. No cross-repo/system-mutating bullets in this hardening pass.

@@ -80,7 +80,7 @@ fn build_plan_maps_each_repo_to_its_action() {
     state.mark_merged("org/merged");
     state.add_repository("org/pushed".to_string(), "GX-plan".to_string());
 
-    let plan = build_plan(&state, &[], &[]);
+    let plan = build_plan(&state, &[], &[], &BTreeSet::new());
     assert_eq!(plan.len(), 3);
 
     let by_slug = |s: &str| plan.iter().find(|p| p.slug == s).unwrap().action.clone();
@@ -116,7 +116,7 @@ fn build_plan_associates_recovery_file_by_path() {
         steps: vec![],
     };
 
-    let plan = build_plan(&state, std::slice::from_ref(&rec), &[]);
+    let plan = build_plan(&state, std::slice::from_ref(&rec), &[], &BTreeSet::new());
     assert_eq!(
         plan.len(),
         1,
@@ -144,11 +144,153 @@ fn build_plan_adds_recovery_only_repo_as_committed_local_only() {
         steps: vec![],
     };
 
-    let plan = build_plan(&state, std::slice::from_ref(&rec), &[]);
+    let plan = build_plan(&state, std::slice::from_ref(&rec), &[], &BTreeSet::new());
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].action, UndoAction::DeleteLocal);
     assert_eq!(plan[0].recovery_tx_ids, vec!["gx-tx-orphan-1".to_string()]);
     assert!(plan[0].status.is_none());
+}
+
+#[test]
+fn build_plan_holds_remote_action_when_org_unverified() {
+    // FIX 2 (post-audit hardening): when a repo's org fetch FAILED during
+    // reconcile, its merge state is UNVERIFIED -- a repo recorded PrOpen might
+    // actually be merged, and deleting its remote branch would skip the revert.
+    // Such a remote-mutating action fails closed (UnverifiedOffline), while a
+    // repo in a VERIFIED org keeps its action and a local-only (recovery-only)
+    // repo still proceeds.
+    //
+    // Break-the-code proof: dropping the `failed_orgs`/`is_remote_mutating`
+    // override in `build_plan` makes `blocked/open` classify as ClosePr and this
+    // assertion fails (it would delete the branch of a possibly-merged PR).
+    let repo_dir = TempDir::new().unwrap();
+
+    let mut state = ChangeState::new("GX-unverified".to_string(), None);
+    state.add_repository("blocked/open".to_string(), "GX-unverified".to_string());
+    state.set_pr_info(
+        "blocked/open",
+        11,
+        "https://github.com/blocked/open/pull/11".to_string(),
+        false,
+    );
+    state.add_repository("safe/pushed".to_string(), "GX-unverified".to_string());
+
+    // A recovery-only (committed-local-only) repo: no remote action, so it is
+    // NEVER held back even though we are offline for its content.
+    let rec = RecoveryState {
+        version: 1,
+        transaction_id: "gx-tx-local-1".to_string(),
+        change_id: "GX-unverified".to_string(),
+        repo_path: repo_dir.path().to_path_buf(),
+        created_at: "2026-07-11T00:00:00Z".to_string(),
+        phase: Phase::Mutating,
+        branch: Some("GX-unverified".to_string()),
+        steps: vec![],
+    };
+
+    let mut failed = BTreeSet::new();
+    failed.insert("blocked".to_string());
+
+    let plan = build_plan(&state, std::slice::from_ref(&rec), &[], &failed);
+    let by_slug = |s: &str| plan.iter().find(|p| p.slug == s).unwrap().action.clone();
+
+    assert_eq!(
+        by_slug("blocked/open"),
+        UndoAction::UnverifiedOffline,
+        "an unverified remote action must fail closed"
+    );
+    assert_eq!(
+        by_slug("safe/pushed"),
+        UndoAction::DeleteRemoteAndLocal,
+        "a verified org keeps its action"
+    );
+    let local = plan
+        .iter()
+        .find(|p| p.recovery_tx_ids == vec!["gx-tx-local-1".to_string()])
+        .unwrap();
+    assert_eq!(
+        local.action,
+        UndoAction::DeleteLocal,
+        "local-only cleanup still proceeds while offline"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn undo_one_unverified_offline_touches_no_remote_and_reports() {
+    // FIX 2: an UnverifiedOffline plan touches NO remote and does NOT delete the
+    // local branch; it reports so the user re-runs online. A `gh` shim that fails
+    // loudly proves no remote call is made.
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+    let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+    let prior_path = std::env::var("PATH").ok();
+
+    let data_home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let repo_dir = TempDir::new().unwrap();
+    let repo = repo_dir.path();
+    run_git_command(&["init", "--quiet", "-b", "main"], repo);
+    run_git_command(&["config", "user.email", "t@e.com"], repo);
+    run_git_command(&["config", "user.name", "T"], repo);
+    run_git_command(&["config", "commit.gpgsign", "false"], repo);
+    std::fs::write(repo.join("README.md"), "# r\n").unwrap();
+    run_git_command(&["add", "-A"], repo);
+    run_git_command(&["commit", "--quiet", "-m", "init"], repo);
+    run_git_command(&["branch", "GX-unverified"], repo);
+
+    let shim_dir = TempDir::new().unwrap();
+    let gh = shim_dir.path().join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\necho 'gh must not be called for unverified-offline' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&gh).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh, perms).unwrap();
+    let new_path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe { std::env::set_var("PATH", &new_path) };
+
+    let plan = UndoPlan {
+        slug: "org/repo".to_string(),
+        repo_path: Some(repo.to_path_buf()),
+        branch: Some("GX-unverified".to_string()),
+        pr_number: Some(7),
+        status: Some(RepoChangeStatus::PrOpen),
+        action: UndoAction::UnverifiedOffline,
+        recovery_tx_ids: vec![],
+        merge_commit_oid: None,
+        base_ref_name: None,
+    };
+
+    let outcome = undo_one(&plan, "GX-unverified", &Config::default());
+
+    assert!(
+        matches!(outcome.kind, OutcomeKind::Unverified(_)),
+        "must report unverified, got {:?}",
+        outcome.kind
+    );
+    assert!(
+        crate::git::branch_exists_locally(repo, "GX-unverified").unwrap(),
+        "the local branch must NOT be deleted when merge state is unverified"
+    );
+
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_data_home {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
 }
 
 #[test]

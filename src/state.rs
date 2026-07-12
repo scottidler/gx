@@ -316,6 +316,16 @@ impl StateManager {
     /// Save a change state to disk (atomic, F8): a torn write here would hide
     /// or corrupt the whole campaign's bookkeeping, not just one file.
     pub fn save(&self, state: &ChangeState) -> Result<()> {
+        // Test-only fault injection (inert unless GX_TEST_FAIL_STATE_SAVE is set),
+        // same "compiled in, inert by default" shape as the lock-delay
+        // (`GX_TEST_LOCK_DELAY_MS`) and crash (`GX_CRASH_POINT`) hooks. Lets an
+        // e2e deterministically fail the pushed safe-point save AFTER a real push
+        // to exercise the F12 retain-recovery fail-closed path.
+        if std::env::var_os("GX_TEST_FAIL_STATE_SAVE").is_some() {
+            return Err(eyre::eyre!(
+                "GX_TEST_FAIL_STATE_SAVE: simulated state save failure"
+            ));
+        }
         let file_path = self.state_dir.join(format!("{}.json", state.change_id));
         let json =
             serde_json::to_string_pretty(state).context("Failed to serialize change state")?;
@@ -380,7 +390,15 @@ impl StateManager {
         Ok(())
     }
 
-    /// Clean up old states (older than specified days)
+    /// Clean up old states (older than specified days).
+    ///
+    /// Each `changes/<id>.json` deletion is taken UNDER that change's
+    /// [`ChangeLock`](crate::lock::ChangeLock) (post-audit hardening): Phase 7
+    /// requires every change-state read-modify-write to hold the change lock, and
+    /// a delete is the ultimate mutation. Without it, `cleanup_old` could delete a
+    /// file out from under a concurrent `undo`/`review sync`/create save. If the
+    /// lock is held by a live process, that change is SKIPPED (a `warn!`), never
+    /// deleted under contention.
     pub fn cleanup_old(&self, days: u64) -> Result<usize> {
         let cutoff = Utc::now() - chrono::Duration::days(days as i64);
         let states = self.list()?;
@@ -395,8 +413,20 @@ impl StateManager {
                 || state.status == ChangeStatus::Failed)
                 && state.updated_at < cutoff
             {
-                self.delete(&state.change_id)?;
-                deleted += 1;
+                match crate::lock::ChangeLock::acquire(&state.change_id) {
+                    Ok(_lock) => {
+                        self.delete(&state.change_id)?;
+                        deleted += 1;
+                        // `_lock` drops here, releasing the change lock after the
+                        // file is gone.
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Skipping cleanup of change {} - its change lock is held: {e}",
+                            state.change_id
+                        );
+                    }
+                }
             }
         }
 
@@ -882,22 +912,81 @@ mod tests {
         assert_eq!(state.status, ChangeStatus::PrsCreated);
     }
 
+    /// Run `f` with `XDG_DATA_HOME` pointed at a fresh temp dir (serialized by
+    /// the shared `ENV_LOCK`). Needed for any test whose code path acquires a
+    /// `ChangeLock`, which resolves its lock dir from `xdg_data_dir()`; without
+    /// this it would write lock files into the real `$HOME/.local/share`.
+    fn with_xdg_data_home<F: FnOnce(&std::path::Path)>(f: F) {
+        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("XDG_DATA_HOME").ok();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", tmp.path()) };
+        f(tmp.path());
+        match prior {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
     #[test]
     fn test_cleanup_old_includes_failed_states() {
         // F14 bite-proof: before this phase, `Failed` was unreachable so a
         // failed campaign never satisfied cleanup_old's filter and sat around
-        // forever. Now it must age out like FullyMerged/Abandoned.
-        let (manager, _temp) = create_test_manager();
+        // forever. Now it must age out like FullyMerged/Abandoned. (XDG-isolated
+        // because cleanup_old now takes each change's ChangeLock.)
+        with_xdg_data_home(|_| {
+            let (manager, _temp) = create_test_manager();
 
-        let mut state = ChangeState::new("old-failed".to_string(), None);
-        state.add_repository("org/repo".to_string(), "GX-test".to_string());
-        state.mark_failed("org/repo", "boom".to_string());
-        assert_eq!(state.status, ChangeStatus::Failed);
-        state.updated_at = Utc::now() - chrono::Duration::days(30);
-        manager.save(&state).unwrap();
+            let mut state = ChangeState::new("old-failed".to_string(), None);
+            state.add_repository("org/repo".to_string(), "GX-test".to_string());
+            state.mark_failed("org/repo", "boom".to_string());
+            assert_eq!(state.status, ChangeStatus::Failed);
+            state.updated_at = Utc::now() - chrono::Duration::days(30);
+            manager.save(&state).unwrap();
 
-        let deleted = manager.cleanup_old(7).unwrap();
-        assert_eq!(deleted, 1);
-        assert!(manager.load("old-failed").unwrap().is_none());
+            let deleted = manager.cleanup_old(7).unwrap();
+            assert_eq!(deleted, 1);
+            assert!(manager.load("old-failed").unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn test_cleanup_old_skips_locked_change() {
+        // FIX 3 (post-audit hardening): cleanup_old must take each change's
+        // ChangeLock before deleting. A change whose lock is HELD by a live
+        // process (simulated here by holding the guard in-test, so the lock file
+        // names our own alive pid) is SKIPPED, not deleted; once released a
+        // re-run converges and deletes it.
+        //
+        // Break-the-code proof: reverting cleanup_old to an unconditional
+        // `self.delete(...)` makes the first cleanup return 1 and remove the
+        // file, so the `deleted == 0` / `path.exists()` assertions fail.
+        with_xdg_data_home(|data_home| {
+            // Use StateManager::new() so the state dir AND the lock dir both live
+            // under the isolated XDG_DATA_HOME.
+            let manager = StateManager::new().unwrap();
+
+            let mut state = ChangeState::new("GX-locked".to_string(), None);
+            state.status = ChangeStatus::Abandoned;
+            state.updated_at = Utc::now() - chrono::Duration::days(100);
+            manager.save(&state).unwrap();
+
+            let path = data_home.join("gx").join("changes").join("GX-locked.json");
+            assert!(path.exists(), "state file must exist before cleanup");
+
+            // Hold the change lock, as another live process's RMW would.
+            let held = crate::lock::ChangeLock::acquire("GX-locked").unwrap();
+
+            let deleted = manager.cleanup_old(30).unwrap();
+            assert_eq!(deleted, 0, "a locked change must NOT be deleted");
+            assert!(path.exists(), "the locked change file must survive cleanup");
+
+            // Release the lock; a second cleanup converges and removes it.
+            drop(held);
+            let deleted2 = manager.cleanup_old(30).unwrap();
+            assert_eq!(deleted2, 1, "once unlocked, the aged-out change is removed");
+            assert!(!path.exists(), "the change file is deleted once unlocked");
+        });
     }
 }

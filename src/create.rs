@@ -228,14 +228,21 @@ pub fn process_create_command(
         None
     };
     // One state manager, shared for incremental saves after each repo ([A3]).
+    //
+    // F12 fail-closed (post-audit hardening): a committing run REQUIRES a durable
+    // state store. Without one, a pushed branch could end up recorded in NEITHER
+    // state nor recovery (finalize deletes the recovery file), so the guarantee
+    // "a pushed branch is ALWAYS recorded in state OR recovery" cannot hold. Abort
+    // NOW - before any repo is mutated or pushed - rather than downgrading to a
+    // best-effort `None` that fails open.
     let state_manager = if commit_message.is_some() {
-        match StateManager::new() {
-            Ok(manager) => Some(manager),
-            Err(e) => {
-                warn!("Failed to create state manager: {e}");
-                None
-            }
-        }
+        Some(StateManager::new().map_err(|e| {
+            eyre::eyre!(
+                "Cannot start a committing gx run: the durable state store is unavailable ({e}). \
+                 Refusing to mutate repositories without it (F12: a pushed branch must always be \
+                 recorded in state or recovery)."
+            )
+        })?)
     } else {
         None
     };
@@ -668,7 +675,7 @@ fn process_single_repo(
     //     branch in change state NOW, before finalize() runs and deletes the
     //     recovery file. A crash anywhere from here on - including mid-finalize
     //     - leaves this repo recorded in state even after recovery is gone.
-    record_pushed_state(
+    let pushed_saved = record_pushed_state(
         change_state,
         state_manager,
         repo,
@@ -677,6 +684,44 @@ fn process_single_repo(
         &files_affected,
         &base_sha,
     );
+
+    // 6c. F12 fail-closed (post-audit hardening): the recovery file may be
+    //     deleted (which finalize() does) ONLY when the pushed safe point was
+    //     durably saved, so the invariant "recovery file deleted => state
+    //     contains this repo" holds. If the save FAILED, do NOT finalize:
+    //     restore the working tree (branch + stash) but RETAIN the recovery file
+    //     as the record of the pushed branch, and report the repo Committed with
+    //     an error naming the retained recovery path. `gx undo`'s recovery-file
+    //     sweep (F12) then reverses the shared work; `gx rollback execute` on the
+    //     retained `pushed`-phase file restores only the environment (keep-work).
+    if !pushed_saved {
+        let recovery_hint = transaction
+            .recovery_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("recovery/{}", change_id));
+        let mut error = format!(
+            "Committed and pushed, but the durable safe-point save FAILED; recovery file RETAINED at {recovery_hint}. Reverse the pushed work with `gx undo {change_id}`, or restore-only with `gx rollback execute`."
+        );
+        // Restore the environment WITHOUT deleting the retained recovery file.
+        if let Err(e) = transaction.finalize_retaining_recovery() {
+            error = format!("{error} (environment restore also failed: {e})");
+        }
+        // Deliberately NOT calling record_final_state: it must never delete the
+        // recovery file, and re-attempting the save (still failing) would only
+        // mask the retained-recovery outcome. The recovery file is the record.
+        return CreateResult {
+            repo: repo.clone(),
+            change_id: change_id.to_string(),
+            action: CreateAction::Committed,
+            files_affected,
+            substitution_stats,
+            pr_number: None,
+            pr_url: None,
+            original_branch: Some(original_branch.clone()),
+            base_sha: Some(base_sha),
+            error: Some(error),
+        };
+    }
 
     // 7. Finalize BEFORE creating the PR: switch back to the original branch and
     //    re-apply the stash. A finalize error (e.g. cannot restore branch) keeps
@@ -752,6 +797,13 @@ fn process_single_repo(
 /// Record the just-pushed branch in change state (the F12 safe point): saved
 /// BEFORE `finalize()` runs, so a crash during finalize (which deletes the
 /// recovery file) still leaves this repo recorded in at least one store.
+///
+/// Returns `true` only when the pushed safe point was DURABLY saved to disk;
+/// `false` on any failure (no state store, poisoned mutex, save error). The
+/// caller must NOT delete the recovery file (must not finalize) when this
+/// returns `false` - that is the F12 fail-closed guarantee (recovery file
+/// deleted => state contains this repo).
+#[must_use]
 fn record_pushed_state(
     change_state: Option<&Mutex<ChangeState>>,
     state_manager: Option<&StateManager>,
@@ -760,20 +812,24 @@ fn record_pushed_state(
     original_branch: &str,
     files_affected: &[String],
     base_sha: &str,
-) {
+) -> bool {
     debug!(
         "record_pushed_state: repo={} change_id={change_id} base_sha={base_sha}",
         repo.slug
     );
     let Some(state_mutex) = change_state else {
-        return;
+        warn!(
+            "No change state for {}; pushed safe point not recorded (recovery retained)",
+            repo.slug
+        );
+        return false;
     };
     let Ok(mut state) = state_mutex.lock() else {
         warn!(
             "Change state mutex poisoned; skipping pushed safe-point save for {}",
             repo.slug
         );
-        return;
+        return false;
     };
     state.add_repository(repo.slug.clone(), change_id.to_string());
     if let Some(repo_state) = state.repositories.get_mut(&repo.slug) {
@@ -782,12 +838,21 @@ fn record_pushed_state(
         repo_state.original_branch = Some(original_branch.to_string());
         repo_state.base_sha = Some(base_sha.to_string());
     }
-    if let Some(manager) = state_manager {
-        if let Err(e) = manager.save(&state) {
+    let Some(manager) = state_manager else {
+        warn!(
+            "No state manager for {}; pushed safe point not durably saved (recovery retained)",
+            repo.slug
+        );
+        return false;
+    };
+    match manager.save(&state) {
+        Ok(()) => true,
+        Err(e) => {
             warn!(
                 "Failed to save pushed safe-point state for {}: {e}",
                 repo.slug
             );
+            false
         }
     }
 }
@@ -1616,7 +1681,7 @@ mod tests {
             let change_state = Mutex::new(ChangeState::new(change_id.to_string(), None));
             let state_manager = StateManager::new().unwrap();
 
-            record_pushed_state(
+            let saved = record_pushed_state(
                 Some(&change_state),
                 Some(&state_manager),
                 &repo,
@@ -1625,6 +1690,7 @@ mod tests {
                 &["README.md".to_string()],
                 &base_sha,
             );
+            assert!(saved, "a successful save must report durably saved (true)");
 
             // Simulate the run continuing to finalize (which deletes the
             // recovery file) - the state save already happened, so it survives

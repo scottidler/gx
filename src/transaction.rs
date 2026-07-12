@@ -425,6 +425,39 @@ impl Transaction {
         // still holds every keep-work step; recovery keeps the shared work
         // (remote branch retained) and restores only the environment.
         crate::crash::maybe_crash("mid-finalize");
+        let outcome = self.restore_environment()?;
+        self.finalized = true;
+        self.steps.clear();
+        self.cleanup_artifacts();
+        Ok(outcome)
+    }
+
+    /// Restore the user's environment WITHOUT deleting the recovery file or
+    /// backups (F12 fail-closed, post-audit hardening). Used when the pushed
+    /// safe-point state save failed: the working tree must be returned to the
+    /// user, but the recovery file is RETAINED so the pushed branch stays
+    /// recorded in recovery (it is NOT in the state store). The phase is left at
+    /// `Pushed`, so `gx rollback execute` / `gx undo` treat the retained file as
+    /// keep-work (environment restore only; the shared work is reversed by
+    /// `gx undo`, never by rollback). This preserves the invariant that a
+    /// recovery file is deleted ONLY once the state store records this repo.
+    pub fn finalize_retaining_recovery(&mut self) -> Result<FinalizeOutcome> {
+        debug!(
+            "Transaction::finalize_retaining_recovery: tx={}",
+            self.transaction_id
+        );
+        let outcome = self.restore_environment()?;
+        self.finalized = true;
+        // Deliberately NOT clearing steps or calling cleanup_artifacts: the
+        // recovery file and backups are the durable record of the pushed work.
+        Ok(outcome)
+    }
+
+    /// Switch back to the original branch and re-apply + drop the stash. Shared
+    /// by [`finalize`](Self::finalize) (which then deletes the recovery
+    /// artifacts) and [`finalize_retaining_recovery`](Self::finalize_retaining_recovery)
+    /// (which keeps them). Never touches the recovery file itself.
+    fn restore_environment(&self) -> Result<FinalizeOutcome> {
         let mut outcome = FinalizeOutcome::default();
 
         if let Some(branch) = &self.original_branch {
@@ -450,10 +483,13 @@ impl Transaction {
             }
         }
 
-        self.finalized = true;
-        self.steps.clear();
-        self.cleanup_artifacts();
         Ok(outcome)
+    }
+
+    /// The on-disk path of this transaction's recovery file, for reporting a
+    /// retained file to the user. `None` only when the data dir is undeterminable.
+    pub fn recovery_path(&self) -> Option<PathBuf> {
+        recovery_file(&self.transaction_id).ok()
     }
 
     /// Remove the recovery file and this transaction's backup directory.

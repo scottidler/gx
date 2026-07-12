@@ -321,6 +321,67 @@ fn test_finalize_restores_branch_and_stash() {
 }
 
 #[test]
+fn test_finalize_retaining_recovery_keeps_recovery_file() {
+    // F12 fail-closed (post-audit hardening): when the pushed safe-point save
+    // fails, the working tree is restored but the recovery file is RETAINED.
+    // finalize_retaining_recovery restores branch+stash exactly like finalize,
+    // but does NOT delete the recovery file. Break-the-code proof: swap the call
+    // for `finalize()` and the `load_recovery_state(...).is_ok()` assertion fails
+    // (finalize deletes the file), demonstrating the retain is load-bearing.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+
+    with_data_home(data.path(), || {
+        let original = crate::git::get_current_branch_name(repo.path()).unwrap();
+
+        std::fs::write(repo.path().join("wip.txt"), "work in progress").unwrap();
+        let sha = crate::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
+        git(&["checkout", "-q", "-b", "GX-retain"], repo.path());
+
+        let mut tx = Transaction::new(repo.path().to_path_buf(), "GX-retain".to_string(), true);
+        tx.set_original_branch(original.clone());
+        tx.set_stash_sha(sha);
+        tx.set_branch("GX-retain".to_string());
+        // Simulate reaching the pushed safe point: register a step + stamp Pushed
+        // so a recovery file exists on disk (write-ahead), as it would after push.
+        tx.push_step(RollbackStep::SwitchBranch {
+            repo: repo.path().to_path_buf(),
+            branch: original.clone(),
+        })
+        .unwrap();
+        tx.set_phase(Phase::Pushed).unwrap();
+        let tx_id = tx.recovery_path().unwrap();
+        assert!(
+            tx_id.exists(),
+            "recovery file must exist at the pushed phase"
+        );
+
+        let outcome = tx.finalize_retaining_recovery().unwrap();
+        assert!(outcome.stash_restored, "stash should be re-applied");
+
+        // Environment restored: back on the original branch with WIP re-applied.
+        assert_eq!(
+            crate::git::get_current_branch_name(repo.path()).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("wip.txt")).unwrap(),
+            "work in progress"
+        );
+
+        // The recovery file is RETAINED (the F12 backstop): a pushed branch not in
+        // the state store is still recorded here. `finalize()` would have deleted it.
+        assert!(
+            tx_id.exists(),
+            "finalize_retaining_recovery must NOT delete the recovery file"
+        );
+        let loaded = tx.recovery_path().unwrap();
+        assert_eq!(loaded, tx_id);
+    });
+}
+
+#[test]
 fn test_step_entry_roundtrip_and_legacy_bare_steps() {
     // Journaled shape round-trips with status + error.
     let entry = StepEntry {
