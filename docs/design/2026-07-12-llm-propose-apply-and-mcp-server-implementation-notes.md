@@ -1172,3 +1172,113 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
   persists; this phase worked WITH it by keeping MCP gating policy in the
   gx-mcp crate rather than gx-lib. `bump`'s workspace handling remains verified
   by source-read, per Phase 8 -- unchanged here.)
+
+## Phase 10: Chunk B e2e + shakedown
+
+### Design decisions
+- **`gx-mcp/tests/e2e_campaign_test.rs`** (new): a scripted JSON-RPC client
+  drives the FULL campaign round trip -- `create-propose` -> `change-get`
+  (read the diff) -> `create-apply` -> `undo-plan` -> `undo-execute` -- against
+  a fixture fleet (a real git repo + bare remote under a throwaway `tempdir`,
+  never `~/repos`). Every step asserts BOTH altitudes: the protocol level (no
+  JSON-RPC `error`, no tool-level `isError`) and the domain level (the branch
+  actually lands on the bare remote after apply; `undo-execute` actually
+  removes it, trues up state to `Abandoned`, and deletes the proposal
+  artifacts). This is the design's literal Phase 10 success criterion.
+- **JSON-RPC harness duplicated from `tests/mcp_tools_test.rs`** (Phase 9's
+  handshake/send/recv/call machinery), per this repo's established
+  no-shared-`tests/common`-module convention -- confirmed by re-reading Phase
+  8/9's own notes, which name this convention explicitly for every prior e2e
+  file in both `tests/` and `gx-mcp/tests/`.
+- **The fake agent + `gh` shim are the SAME fixtures Phases 5/7 already
+  proved**, driven this time over the MCP protocol instead of the CLI: the
+  agent script (`printf 'new value\n' > data.md`) is Phase 7's `write_agent`
+  pattern; the `gh` shim (PR-search-empty, PR-close-noop, branch-delete via
+  `$GX_TEST_REMOTES`) is Phase 5's `GH_SHIM` from `tests/e2e_llm_apply.rs`,
+  copied verbatim (not imported -- no shared test module in this repo) since
+  `undo-plan`'s GitHub reconcile shells out to `gh` exactly as the CLI's `gx
+  undo` does; MCP adds no new remote-reconcile mechanism.
+- **`Mcp::spawn` gained two params beyond Phase 9's harness**: an explicit
+  `path_env` (so the `gh` shim can be prepended ahead of the real `PATH`) and
+  `remotes` (forwarded as `$GX_TEST_REMOTES`, the env var the shim uses to
+  locate the bare repos). Phase 9's own tests never needed either, since none
+  of them exercise a real applied-and-then-undone campaign (they write state
+  files directly to test token refusals, never running a real remote
+  reconcile).
+- **The applied content is asserted via `git show <branch>:<path>`, not the
+  checked-out working tree.** Discovered live while writing this test: the
+  pipeline's `finalize()` (shared, unchanged since Phase 6) switches the
+  worktree back to the ORIGINAL branch (`main`) once the GX branch is pushed
+  -- exactly like a `sub`/`regex` create -- so `data.md` on disk after
+  `create-apply` reads the pristine "old value", and the applied "new value"
+  content lives only on the pushed (not checked-out) branch. Not a bug: this
+  is the identical, unmodified `process_single_repo` finalize step every
+  create type shares; the design's own "apply rides the unchanged pipeline"
+  premise. Fixed the test's assertion, not the code.
+- **CLI shakedown** (`docs/shakedown-llm-mcp.md`, new) exercised, live, on
+  freshly built `target/release/{gx,gx-mcp}` binaries against the same class
+  of fixture fleet: `gx create ... llm` (one-shot AND `--propose`+`gx apply`
+  split), the fail-closed confirm gate on both `gx apply` and `gx undo`
+  (non-TTY without `--yes`), `gx undo` on both an applied llm campaign and a
+  bare unapplied proposal (the local-only undo arm), `gx doctor`'s new STUCK
+  PROPOSALS section, and the failure-mode matrix (empty diff, agent nonzero
+  exit, drift-then-refuse, re-apply idempotency, malformed/missing change-id).
+- **The manual MCP-registration operator step is documented in the shakedown
+  doc with a concrete config snippet** (both the generic `mcpServers` JSON
+  shape and `claude mcp add`), per the phase's explicit requirement -- the
+  pre-existing `gx-mcp/README.md` "Registering with a client" section said
+  registration was manual but gave no example config; the shakedown doc adds
+  the worked example. The README itself was left as-is (documenting the
+  concept, not a step-by-step) since expanding it was not this phase's ask;
+  flagged as an open question below.
+- **Bite-proof, per the phase's testing mandate**: temporarily neutralized the
+  real remote-branch-delete call in `src/undo/core.rs::remove_remote_branch`
+  (gating it behind `if false && ...`), reran the new e2e test, watched the
+  `undo-execute must delete the pushed branch from the remote` assertion fail
+  exactly as expected, then reverted (confirmed `git diff` on the file is
+  empty after revert -- no residue).
+
+### Deviations
+- **`cargo install --path .` clarified as NOT building `gx-mcp`** (Phase 8's
+  `default-members = ["."]` scoping, re-confirmed here while writing the
+  shakedown's registration step): the operator must separately
+  `cargo build --release -p gx-mcp` to get the `gx-mcp` binary. This is
+  Phase 8's existing, deliberate design (gx-mcp is a workspace member, not the
+  root package), surfaced explicitly in the shakedown doc's registration
+  section so an operator following it does not expect `cargo install --path .`
+  alone to produce `gx-mcp`.
+- **Shakedown doc named `docs/shakedown-llm-mcp.md`**, not a versioned
+  `shakedown-vX.Y.Z.md` (house rule: never pre-name an unreleased version in a
+  filename or body). The workspace version (`0.4.1`) has not been bumped for
+  this feature; the doc states this plainly in its header rather than
+  guessing at the next release's number.
+
+### Tradeoffs
+- **One new e2e file (`gx-mcp/tests/e2e_campaign_test.rs`) vs. extending
+  `mcp_tools_test.rs`** -- chose a new file: Phase 9's file is scoped to
+  gating + confirm-token refusals (its own module doc says so explicitly);
+  this phase's file is scoped to the one designed-for HAPPY-PATH round trip.
+  Mirrors the Phase 7 precedent (a new file for a new success-criterion class
+  rather than growing an existing one past its stated scope).
+- **The scripted e2e test does not use rmcp's own client transport** (matches
+  Phase 8's tradeoff for the handshake test, for the same reason): a raw
+  newline-delimited JSON-RPC harness proves the actual bytes on the actual
+  wire, which is what "the scripted client completes the full campaign round
+  trip" and the design's stdout-hygiene concern both actually ask for.
+- **Live CLI shakedown reused the exact fixture shape (fake agent + `gh`
+  shim + bare remote) as the automated e2e suites** rather than inventing a
+  fresh scenario -- chose reuse: the shakedown's job is to prove the SHIPPED
+  binary behaves as the tests already proved the SOURCE does; a different
+  fixture would risk exercising a different code path than the one under
+  test, undermining the comparison.
+
+### Open questions
+- **`gx-mcp/README.md`'s "Registering with a client" section stays thin**
+  (says registration is manual, gives no example config) while the shakedown
+  doc carries the concrete `mcpServers` JSON / `claude mcp add` snippets. Not
+  fixed here (out of this phase's named scope: "operator step called out
+  explicitly in the shakedown doc", not a README rewrite) -- worth folding the
+  worked example back into the README as a follow-up, per Scott's call.
+- Cross-repo/system-mutating bullets: none in this phase. The `main.rs`
+  lib/bin duplicate-module-tree debt from Phase 3 persists, untouched by this
+  phase.
