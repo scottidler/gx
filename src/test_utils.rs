@@ -3,6 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Process-wide lock serializing every test that mutates a shared environment
+/// variable (`XDG_DATA_HOME`, `XDG_CONFIG_HOME`, ...). `std::env::set_var` is
+/// global to the process, so tests across modules must share ONE lock: three
+/// independent per-module locks over the same variable do NOT serialize each
+/// other and raced under load (a concurrent test flipped `XDG_DATA_HOME` out
+/// from under another, stranding its recovery fixtures).
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Get the path to the compiled gx binary for testing
 pub fn get_gx_binary_path() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();

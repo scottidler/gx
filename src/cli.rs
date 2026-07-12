@@ -487,6 +487,12 @@ pub enum RollbackAction {
         transaction_id: String,
         #[arg(short, long, help = "Skip validation before executing")]
         force: bool,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before executing recovery"
+        )]
+        yes: bool,
     },
     /// Validate recovery operations without executing
     Validate {

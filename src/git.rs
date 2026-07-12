@@ -1348,6 +1348,36 @@ pub fn branch_exists_remotely(repo_path: &std::path::Path, branch_name: &str) ->
     Ok(output.status.success() && !output.stdout.is_empty())
 }
 
+/// Read-only probe for whether `branch_name` exists on `origin`, using
+/// `ls-remote --exit-code` so an offline/error condition is distinguishable
+/// from a genuine absence. The `pushing`-phase recovery must fail closed when
+/// it cannot reach the remote rather than assume the branch never landed.
+///
+/// - exit 0 (matching ref found) -> `Ok(true)`
+/// - exit 2 (no matching ref) -> `Ok(false)`
+/// - any other exit / spawn failure -> `Err` (cannot classify)
+pub fn remote_branch_exists_probe(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    debug!(
+        "remote_branch_exists_probe: repo_path={} branch={branch_name}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["ls-remote", "--exit-code", "--heads", "origin", branch_name])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to probe remote branch: {}", e))?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(2) => Ok(false),
+        other => Err(eyre::eyre!(
+            "Could not probe remote for branch {branch_name} (git ls-remote exit {:?}): {}",
+            other,
+            String::from_utf8_lossy(&output.stderr)
+        )),
+    }
+}
+
 /// Delete a remote branch (for rollback of push operations)
 pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
     let output = Command::new("git")
@@ -1458,6 +1488,40 @@ pub fn stash_save_with_untracked(repo_path: &std::path::Path, message: &str) -> 
         .to_string();
     debug!("stash_save_with_untracked: created stash {sha}");
     Ok(sha)
+}
+
+/// Resolve the commit SHA of the stash whose reflog subject contains `message`.
+/// Returns `Ok(None)` when no stash matches (never created, or already popped).
+/// Used by the message-keyed `PopStashByMessage` recovery step (F5): before the
+/// stash's SHA is known, the message is the only handle recovery has.
+pub fn stash_sha_by_message(repo_path: &std::path::Path, message: &str) -> Result<Option<String>> {
+    debug!(
+        "stash_sha_by_message: repo_path={} message={message}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["stash", "list", "--format=%H %gs"])
+        .output()
+        .map_err(|e| eyre::eyre!("Failed to list stashes: {}", e))?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!(
+            "Failed to list stashes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some((sha, subject)) = line.split_once(' ') {
+            if subject.contains(message) {
+                debug!("stash_sha_by_message: matched stash {sha} for {message:?}");
+                return Ok(Some(sha.trim().to_string()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Apply a stash by its commit SHA. `git stash apply` accepts any stash-shaped

@@ -1,9 +1,6 @@
 use super::*;
-use std::sync::Mutex;
+use crate::test_utils::ENV_LOCK;
 use tempfile::TempDir;
-
-// Serialize env-var mutation across tests.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
     let guard = ENV_LOCK.lock().unwrap();

@@ -1,9 +1,9 @@
 use crate::cli::RollbackAction;
 use crate::state::StateManager;
-use crate::transaction::{RecoveryState, Transaction};
+use crate::transaction::{Phase, RecoveryOutcome, RecoveryState, StepStatus, Transaction};
 use chrono::{DateTime, Duration, Utc};
 use colored::*;
-use eyre::Result;
+use eyre::{Context, Result};
 use log::{debug, error, info, warn};
 
 /// Basic validation of a recovery state: the repo must still exist and be a git
@@ -36,12 +36,34 @@ fn step_kind(step: &crate::transaction::RollbackStep) -> &'static str {
     use crate::transaction::RollbackStep::*;
     match step {
         PopStash { .. } => "pop-stash",
+        PopStashByMessage { .. } => "pop-stash-by-message",
         SwitchBranch { .. } => "switch-branch",
         DeleteLocalBranch { .. } => "delete-local-branch",
-        DeleteRemoteBranch { .. } => "delete-remote-branch",
+        LegacyDeleteRemoteBranch { .. } => "legacy-delete-remote-branch",
         ResetCommit { .. } => "reset-commit",
         RestoreBackup { .. } => "restore-backup",
         RemoveCreatedFile { .. } => "remove-created-file",
+    }
+}
+
+/// Human label for a lifecycle phase.
+fn phase_label(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Mutating => "mutating",
+        Phase::Pushing => "pushing",
+        Phase::Pushed => "pushed",
+        Phase::Finalizing => "finalizing",
+    }
+}
+
+/// Human label for a per-step journal status.
+fn status_label(status: StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "pending",
+        StepStatus::Applied => "applied",
+        StepStatus::Done => "done",
+        StepStatus::Failed => "failed",
+        StepStatus::SkippedLegacy => "skipped-legacy",
     }
 }
 
@@ -52,7 +74,8 @@ pub fn handle_rollback(action: RollbackAction) -> Result<()> {
         RollbackAction::Execute {
             transaction_id,
             force,
-        } => execute_recovery(&transaction_id, force),
+            yes,
+        } => execute_recovery(&transaction_id, force, yes),
         RollbackAction::Validate { transaction_id } => validate_recovery(&transaction_id),
         RollbackAction::Cleanup {
             transaction_id,
@@ -110,24 +133,20 @@ fn list_recovery_states() -> Result<()> {
     Ok(())
 }
 
-/// Execute recovery for a specific transaction
-fn execute_recovery(transaction_id: &str, force: bool) -> Result<()> {
-    info!("Starting recovery for transaction: {transaction_id}");
+/// Execute recovery for a specific transaction. Prints the phase-aware plan,
+/// validates (unless `--force`), prompts for confirmation (unless `--yes`;
+/// fail-closed on non-interactive stdin), then dispatches on the recorded phase.
+/// This path NEVER mutates a remote: `mutating` reverses fully, `pushed`/
+/// `finalizing` (and `pushing` with the branch already on the remote) keep the
+/// pushed work and only restore the environment.
+fn execute_recovery(transaction_id: &str, force: bool, yes: bool) -> Result<()> {
+    info!("Starting recovery for transaction: {transaction_id} (force={force} yes={yes})");
 
-    // Load the transaction state
+    // Load the transaction state and print the plan.
     let state = Transaction::load_recovery_state(transaction_id)?;
+    print_recovery_plan(&state)?;
 
-    println!(
-        "{}",
-        format!("🔄 Executing recovery for: {transaction_id}")
-            .bold()
-            .blue()
-    );
-    println!("   Created: {}", state.created_at);
-    println!("   Steps: {}", state.steps.len());
-    println!();
-
-    // Validate before executing unless forced
+    // Validate before executing unless forced (`--force` == skip validation only).
     if !force {
         println!("{}", "🔍 Validating recovery operations...".yellow());
         let (errors, warnings) = validate_recovery_state(&state);
@@ -157,13 +176,98 @@ fn execute_recovery(transaction_id: &str, force: bool) -> Result<()> {
         println!();
     }
 
-    // Execute the recovery
+    // Confirm before executing unless --yes; fail closed on non-interactive stdin.
+    if !confirm_execute(transaction_id, yes)? {
+        println!("{}", "Aborted; no changes made.".yellow());
+        return Ok(());
+    }
+
+    // Execute the recovery, dispatching on phase inside the engine.
     println!("{}", "🔄 Executing rollback operations...".blue());
-    Transaction::execute_recovery(transaction_id)?;
+    let outcome = Transaction::execute_recovery(transaction_id)?;
 
     println!();
-    println!("{}", "✅ Recovery completed successfully!".green().bold());
+    match outcome {
+        RecoveryOutcome::FullReverse => {
+            println!("{}", "✅ Recovery completed successfully!".green().bold());
+        }
+        RecoveryOutcome::KeepWork { branch } => {
+            println!(
+                "{}",
+                "✅ Environment restored; pushed work retained."
+                    .green()
+                    .bold()
+            );
+            match branch {
+                Some(b) => println!("   Retained branch: {b}"),
+                None => println!("   The pushed branch was retained."),
+            }
+            println!(
+                "{}",
+                "   Run `gx undo <change-id>` to reverse the pushed work (closes the PR first)."
+                    .yellow()
+            );
+        }
+    }
     Ok(())
+}
+
+/// Print the phase-aware recovery plan: phase, age, branch, and each step with
+/// its journal status.
+fn print_recovery_plan(state: &RecoveryState) -> Result<()> {
+    let created = DateTime::parse_from_rfc3339(&state.created_at)?.with_timezone(&Utc);
+    let age = Utc::now().signed_duration_since(created);
+
+    println!(
+        "{}",
+        format!("🔄 Recovery plan for: {}", state.transaction_id)
+            .bold()
+            .blue()
+    );
+    println!("   Change ID: {}", state.change_id);
+    println!("   Phase: {}", phase_label(state.phase));
+    if let Some(branch) = &state.branch {
+        println!("   Branch: {branch}");
+    }
+    println!(
+        "   Created: {} ({} ago)",
+        created.format("%Y-%m-%d %H:%M:%S UTC"),
+        format_duration(age)
+    );
+    println!("   Steps: {}", state.steps.len());
+    for entry in &state.steps {
+        println!(
+            "     {} {} [{}]",
+            "•".blue(),
+            step_kind(&entry.step),
+            status_label(entry.status)
+        );
+    }
+    println!();
+    Ok(())
+}
+
+/// Prompt for confirmation before executing recovery. Fails closed on a
+/// non-interactive stdin (pass `--yes` for automation).
+fn confirm_execute(transaction_id: &str, yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if yes {
+        debug!("--yes supplied; skipping rollback confirmation prompt");
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "Refusing to execute recovery {transaction_id} without confirmation on non-interactive stdin; pass --yes to proceed"
+        ));
+    }
+    print!("Execute this recovery? (y/N): ");
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }
 
 /// Validate recovery operations without executing

@@ -452,29 +452,47 @@ fn process_single_repo(
     //    pristine checkout of HEAD during mutation. status --porcelain counts
     //    untracked (??) entries, so the dirty predicate already includes them.
     match git::has_uncommitted_changes(repo_path) {
-        Ok(true) => match git::stash_save_with_untracked(
-            repo_path,
-            &format!("GX auto-stash for {change_id}"),
-        ) {
-            Ok(sha) => {
-                transaction.set_stash_sha(sha.clone());
-                // Write-ahead: persist PopStash immediately after the stash exists.
-                if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::PopStash {
+        Ok(true) => {
+            let message = format!("GX auto-stash for {change_id}");
+            // Write-ahead (F5): register the stash-restore step keyed by message
+            // BEFORE the stash exists, so a crash in the window between creating
+            // the stash and learning its SHA still records the WIP to restore.
+            if let Err(e) =
+                transaction.push_step(crate::transaction::RollbackStep::PopStashByMessage {
                     repo: repo_path.clone(),
-                    stash_sha: sha,
-                }) {
+                    message: message.clone(),
+                })
+            {
+                transaction.rollback();
+                return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
+            }
+            match git::stash_save_with_untracked(repo_path, &message) {
+                Ok(sha) => {
+                    transaction.set_stash_sha(sha.clone());
+                    // Swap the placeholder for the SHA-keyed step now that the
+                    // stash exists (the SHA survives concurrent stash mutation).
+                    if let Err(e) =
+                        transaction.swap_last_step(crate::transaction::RollbackStep::PopStash {
+                            repo: repo_path.clone(),
+                            stash_sha: sha,
+                        })
+                    {
+                        transaction.rollback();
+                        return dry_run_error(
+                            repo,
+                            change_id,
+                            format!("Failed to persist recovery: {e}"),
+                        );
+                    }
+                }
+                Err(e) => {
+                    // The stash was never created; roll back to clear the
+                    // placeholder (it resolves to a harmless no-op).
                     transaction.rollback();
-                    return dry_run_error(
-                        repo,
-                        change_id,
-                        format!("Failed to persist recovery: {e}"),
-                    );
+                    return dry_run_error(repo, change_id, format!("Failed to stash changes: {e}"));
                 }
             }
-            Err(e) => {
-                return dry_run_error(repo, change_id, format!("Failed to stash changes: {e}"));
-            }
-        },
+        }
         Ok(false) => {}
         Err(e) => {
             return dry_run_error(
@@ -911,10 +929,14 @@ fn commit_changes_with_rollback(
     files_affected: &[String],
     transaction: &mut Transaction,
 ) -> Result<()> {
-    use crate::transaction::RollbackStep;
+    use crate::transaction::{Phase, RollbackStep};
 
     // Whether the branch pre-existed gx's run (so rollback won't delete it).
     let branch_existed = git::branch_exists_locally(repo_path, change_id).unwrap_or(false);
+
+    // Record the GX branch name so recovery (phase reporting, the `pushing`
+    // probe, `gx undo`) need not re-derive it.
+    transaction.set_branch(change_id.to_string());
 
     // Write-ahead: register branch deletion before creating the branch.
     transaction.push_step(RollbackStep::DeleteLocalBranch {
@@ -937,12 +959,14 @@ fn commit_changes_with_rollback(
     git::add_files(repo_path, files_affected).context("Failed to stage files")?;
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
 
-    // Write-ahead: register remote branch deletion before pushing.
-    transaction.push_step(RollbackStep::DeleteRemoteBranch {
-        repo: repo_path.to_path_buf(),
-        branch: change_id.to_string(),
-    })?;
+    // Stamp `pushing` write-ahead: a kill after this stamp but before the push
+    // completes is classified at recovery time by a read-only ls-remote probe.
+    // Rollback no longer registers a remote-delete step - `gx undo` owns remote
+    // reversal, so nothing on the rollback path can ever delete a pushed branch.
+    transaction.set_phase(Phase::Pushing)?;
     git::push_branch(repo_path, change_id).context("Failed to push branch")?;
+    // Stamp `pushed`: the branch is now shared; recovery keeps the work.
+    transaction.set_phase(Phase::Pushed)?;
 
     Ok(())
 }

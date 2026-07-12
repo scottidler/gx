@@ -1,9 +1,6 @@
 use super::*;
-use std::sync::Mutex;
+use crate::test_utils::ENV_LOCK;
 use tempfile::TempDir;
-
-// Serialize all env-var-touching tests to prevent parallel races.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_xdg_config_dir_honors_env_and_falls_back() {
