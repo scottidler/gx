@@ -1,4 +1,44 @@
 use super::*;
+use crate::state::{ChangeState, ChangeStatus};
+
+#[test]
+fn test_stuck_proposals_names_a_bare_proposal_campaign() {
+    // Ringer addendum #3: `gx doctor` must name a campaign sitting at the
+    // bare-proposal aggregate status (never applied or undone).
+    let mut proposed = ChangeState::new("GX-stuck".to_string(), None);
+    proposed.mark_proposed(
+        "org/repo",
+        "deadbeef".to_string(),
+        vec!["README.md".to_string()],
+        Some("/tmp/org/repo".to_string()),
+    );
+    assert_eq!(
+        proposed.status,
+        ChangeStatus::Proposed,
+        "sanity: mark_proposed must set the aggregate status (the other half of this fix)"
+    );
+
+    let mut merged = ChangeState::new("GX-done".to_string(), None);
+    merged.status = ChangeStatus::FullyMerged;
+
+    let stuck = stuck_proposals(vec![merged, proposed]);
+    // The bite: a naive "just list everything" would report GX-done too.
+    assert_eq!(
+        stuck
+            .iter()
+            .map(|s| s.change_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["GX-stuck"],
+        "only the bare-proposal campaign is reported, sorted by change-id"
+    );
+}
+
+#[test]
+fn test_stuck_proposals_is_empty_with_no_bare_proposals() {
+    let mut merged = ChangeState::new("GX-done".to_string(), None);
+    merged.status = ChangeStatus::FullyMerged;
+    assert!(stuck_proposals(vec![merged]).is_empty());
+}
 
 #[test]
 fn test_version_compare_pads_shorter() {

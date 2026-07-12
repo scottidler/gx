@@ -15,11 +15,16 @@
 //! regular files (any content incl. binary) and executable-bit/mode-only
 //! changes are SUPPORTED; symlinks, gitlinks/submodules, and non-UTF-8 paths are
 //! REJECTED as a loud per-repo `failed` outcome NAMING THE PATH.
+//!
+//! Every propose worktree lives under a gx-owned tmp root
+//! ([`worktree_tmp_root`]), not the bare OS temp dir (Phase 7, ringer addendum
+//! #7): a crashed prior run's leftover worktree is therefore IDENTIFIABLE and
+//! self-healed by [`prune_leftover_worktrees`] at the top of every propose.
 
 use super::manifest::{
     self, FileAction, FileEntry, ProposalManifest, ProposalOutcome, RepoProposal,
 };
-use crate::config::Config;
+use crate::config::{xdg_data_dir, Config};
 use crate::lock::{ChangeLock, RepoLock};
 use crate::repo::Repo;
 use crate::state::{ChangeState, StateManager};
@@ -88,6 +93,13 @@ pub fn execute_propose(
     let timeout = Duration::from_secs(config.llm_timeout_seconds());
     let proposal_dir = manifest::proposal_dir(change_id)?;
 
+    // Self-heal a crashed prior run's leftover temp worktrees (ringer addendum
+    // #7) BEFORE this run creates any of its own: everything under the root
+    // right now necessarily predates this call, so pruning here can never
+    // race this run's own in-flight worktrees.
+    let tmp_root = worktree_tmp_root()?;
+    prune_leftover_worktrees(&tmp_root);
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallel_jobs.max(1))
         .build()
@@ -96,7 +108,16 @@ pub fn execute_propose(
     let repo_proposals: Vec<RepoProposal> = pool.install(|| {
         repos
             .par_iter()
-            .map(|repo| propose_single_repo(repo, prompt, &agent_command, timeout, &proposal_dir))
+            .map(|repo| {
+                propose_single_repo(
+                    repo,
+                    prompt,
+                    &agent_command,
+                    timeout,
+                    &proposal_dir,
+                    &tmp_root,
+                )
+            })
             .collect()
     });
 
@@ -172,6 +193,7 @@ fn propose_single_repo(
     agent_command: &str,
     timeout: Duration,
     proposal_dir: &Path,
+    tmp_root: &Path,
 ) -> RepoProposal {
     debug!(
         "propose_single_repo: slug={} path={}",
@@ -203,10 +225,20 @@ fn propose_single_repo(
         }
     };
 
-    // 3. Temp dir OUTSIDE the real worktree; the worktree checkout goes in a
-    //    child path git creates, the agent log sibling to it (so the log is
-    //    never captured by `git add -A`).
-    let tmp = match tempfile::TempDir::new() {
+    // 3. Temp dir OUTSIDE the real worktree, under the gx-owned tmp root (NOT
+    //    the bare OS temp dir - ringer addendum #7): the worktree checkout
+    //    goes in a child path git creates, the agent log sibling to it (so the
+    //    log is never captured by `git add -A`). Living under `tmp_root` is
+    //    what lets a later propose IDENTIFY this as a leftover if the process
+    //    dies before step 5 below removes it.
+    if let Err(e) = std::fs::create_dir_all(tmp_root) {
+        return failed(
+            &repo.slug,
+            base_sha,
+            format!("Failed to create propose tmp root: {e}"),
+        );
+    }
+    let tmp = match tempfile::Builder::new().prefix("wt-").tempdir_in(tmp_root) {
         Ok(t) => t,
         Err(e) => {
             return failed(
@@ -259,6 +291,96 @@ fn propose_single_repo(
             files,
         },
         Err(e) => failed(&repo.slug, base_sha, e.to_string()),
+    }
+}
+
+/// `$XDG_DATA_HOME/gx/tmp/propose` - the gx-owned root every propose temp
+/// worktree lives under (design Risks row: "worktrees under a gx-owned tmp
+/// root"; ringer addendum #7). Housing every propose worktree here, rather
+/// than the bare OS temp dir, is what makes a crashed prior run's leftovers
+/// IDENTIFIABLE at the top of the next propose.
+fn worktree_tmp_root() -> Result<PathBuf> {
+    Ok(xdg_data_dir()
+        .ok_or_else(|| eyre::eyre!("Could not determine data dir (set HOME or XDG_DATA_HOME)"))?
+        .join("gx")
+        .join("tmp")
+        .join("propose"))
+}
+
+/// Self-heal a crashed prior run's leftover temp worktrees (ringer addendum
+/// #7). Called ONCE at the top of [`execute_propose`], before this run
+/// creates any of its own entries under `tmp_root`: everything found there
+/// necessarily predates this call (this run hasn't created anything yet), so
+/// pruning can never race this run's own in-flight worktrees. Only ever reads/
+/// removes entries under our OWN `tmp_root` - a repo's other worktrees (gx or
+/// otherwise, living anywhere else) are never touched.
+fn prune_leftover_worktrees(tmp_root: &Path) {
+    let entries = match std::fs::read_dir(tmp_root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            warn!(
+                "prune_leftover_worktrees: cannot read {}: {e}",
+                tmp_root.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let leftover = entry.path();
+        if leftover.is_dir() {
+            prune_one_leftover(&leftover);
+        }
+    }
+}
+
+/// Prune a single leftover propose tmp entry: resolve the repo it belongs to
+/// via the worktree's own `.git` back-pointer (survives the crash even though
+/// gx's in-process mapping does not), remove the worktree registration there,
+/// then remove the leftover directory itself. If the owning repo is currently
+/// locked (a live gx operation in progress), leave the WHOLE leftover for a
+/// later propose rather than yanking a worktree out from under it.
+fn prune_one_leftover(leftover: &Path) {
+    let worktree = leftover.join("wt");
+    if worktree.exists() {
+        match git::resolve_worktree_repo(&worktree) {
+            Ok(Some(repo_root)) => match RepoLock::acquire(&repo_root) {
+                Ok(_lock) => {
+                    if let Err(e) = git::worktree_remove(&repo_root, &worktree) {
+                        warn!(
+                            "prune_one_leftover: git worktree remove failed for {}: {e}",
+                            worktree.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "prune_one_leftover: {} is locked; leaving {} for a later propose: {e}",
+                        repo_root.display(),
+                        leftover.display()
+                    );
+                    return;
+                }
+            },
+            Ok(None) => debug!(
+                "prune_one_leftover: {} has no resolvable owning repo; removing directly",
+                worktree.display()
+            ),
+            Err(e) => warn!(
+                "prune_one_leftover: failed to resolve owning repo for {}: {e}",
+                worktree.display()
+            ),
+        }
+    }
+    match std::fs::remove_dir_all(leftover) {
+        Ok(()) => info!(
+            "prune_one_leftover: removed leftover propose worktree {}",
+            leftover.display()
+        ),
+        Err(e) => warn!(
+            "prune_one_leftover: failed to remove leftover {}: {e}",
+            leftover.display()
+        ),
     }
 }
 

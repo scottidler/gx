@@ -497,3 +497,102 @@ fn test_process_single_repo_rejects_llm_change() {
         );
     });
 }
+
+/// Ringer addendum #7: a crashed prior run leaves its temp worktree (and its
+/// git-side registration) behind under the gx-owned tmp root. The NEXT
+/// propose - for a totally unrelated change - must self-heal it before doing
+/// its own work: neither the leftover directory nor its `git worktree list`
+/// registration should survive.
+#[test]
+fn test_propose_prunes_leftover_worktree_from_a_crashed_prior_run() {
+    with_data_home(|| {
+        let ws = TempDir::new().unwrap();
+        let scripts = TempDir::new().unwrap();
+        let repo_path = ws.path().join("org").join("crashed");
+        init_repo(&repo_path, &[("README.md", b"# repo\n")]);
+        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+
+        // Simulate a crashed prior run: a worktree registered under the
+        // gx-owned tmp root that was never cleaned up (the process died
+        // before `worktree_remove` ran).
+        let tmp_root = worktree_tmp_root().unwrap();
+        let leftover = tmp_root.join("wt-crashed-run");
+        let leftover_wt = leftover.join("wt");
+        std::fs::create_dir_all(&leftover).unwrap();
+        git::worktree_add_detached(&repo_path, &leftover_wt, &base_sha).unwrap();
+        assert!(leftover_wt.exists(), "sanity: leftover worktree exists");
+        let list_before = run_git_command(&["worktree", "list"], &repo_path);
+        assert!(
+            String::from_utf8_lossy(&list_before.stdout).contains("wt-crashed-run"),
+            "sanity: git must know about the leftover registration"
+        );
+
+        // A fresh, unrelated propose for the SAME repo.
+        let repo = Repo::new(repo_path.clone()).unwrap();
+        let agent = fake_agent(scripts.path(), "add.sh", "printf 'hello\\n' > proposed.txt");
+        let config = llm_config(agent.to_str().unwrap(), 60);
+        let summary = execute_propose(
+            std::slice::from_ref(&repo),
+            "GX-heals",
+            "add a file",
+            &config,
+            1,
+        )
+        .unwrap();
+        assert_eq!(summary.proposed, 1, "this run's own propose must succeed");
+
+        // The bite: without the prune, the leftover directory AND its git
+        // registration would still be there after this call.
+        assert!(
+            !leftover.exists(),
+            "the leftover propose tmp dir must be removed"
+        );
+        let list_after = run_git_command(&["worktree", "list"], &repo_path);
+        assert!(
+            !String::from_utf8_lossy(&list_after.stdout).contains("wt-crashed-run"),
+            "the leftover worktree's git registration must be pruned"
+        );
+    });
+}
+
+/// The prune must touch ONLY entries under the gx-owned tmp root: a worktree
+/// registered elsewhere (a normal, live worktree a user or another tool
+/// created) must survive a propose pass untouched.
+#[test]
+fn test_propose_does_not_touch_a_non_gx_worktree() {
+    with_data_home(|| {
+        let ws = TempDir::new().unwrap();
+        let scripts = TempDir::new().unwrap();
+        let repo_path = ws.path().join("org").join("liveworktree");
+        init_repo(&repo_path, &[("README.md", b"# repo\n")]);
+        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+
+        // A worktree OUTSIDE the gx tmp root - not ours to touch.
+        let elsewhere = TempDir::new().unwrap();
+        let other_wt = elsewhere.path().join("someone-elses-worktree");
+        git::worktree_add_detached(&repo_path, &other_wt, &base_sha).unwrap();
+        assert!(other_wt.exists());
+
+        let repo = Repo::new(repo_path.clone()).unwrap();
+        let agent = fake_agent(scripts.path(), "noop.sh", "exit 0");
+        let config = llm_config(agent.to_str().unwrap(), 60);
+        execute_propose(
+            std::slice::from_ref(&repo),
+            "GX-leave-others",
+            "noop",
+            &config,
+            1,
+        )
+        .unwrap();
+
+        assert!(
+            other_wt.exists(),
+            "a non-gx worktree directory must survive a propose pass"
+        );
+        let list_after = run_git_command(&["worktree", "list"], &repo_path);
+        assert!(
+            String::from_utf8_lossy(&list_after.stdout).contains("someone-elses-worktree"),
+            "a non-gx worktree's git registration must be left alone"
+        );
+    });
+}

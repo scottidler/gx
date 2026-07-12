@@ -712,3 +712,183 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 - None new. (Cross-repo/system-mutating bullets: none in this phase. The
   `main.rs` lib/bin duplicate-module-tree debt from Phase 3 persists,
   unaffected by this phase's changes.)
+
+## Phase 7: Chunk A e2e with a fake agent
+
+### Design decisions
+- **New e2e file `tests/e2e_llm_matrix.rs`** drives the real binary through
+  both entry points with a deterministic fake-agent script, matching (not
+  sharing code with, per this repo's established no-`tests/common`-module
+  convention) the fixture pattern Phases 4-6 built in `tests/e2e_llm_apply.rs`
+  / `tests/e2e_llm_cli.rs`: `make_fixture` (repo + bare remote), `write_agent`
+  (an executable one-liner script), `write_config` (points `create.llm.agent-
+  command` at it), `worktree_snapshot` (HEAD + sorted porcelain + tracked
+  listing + `data.md` bytes) for the byte-identity assertions.
+- **Six scenarios**, each its own test with its own workspace/remote/data-home
+  fixture (no cross-test interference): happy path (one-shot push), garbage
+  patch, agent nonzero exit, agent timeout, empty diff, and drift-then-refuse.
+  Every FAILURE scenario snapshots the real worktree before and asserts it is
+  IDENTICAL after - the design's literal success criterion.
+- **"Garbage patch" = a payload-fidelity-matrix rejection (a symlink), not a
+  hand-crafted diff.** The design deliberately never lets the agent emit a
+  patch directly (Alternatives Considered: rejected for exactly the fidelity
+  reasons this phase's success criteria worry about) - gx computes the diff
+  itself from real file edits, so there is no "patch" for the agent to
+  garbage-up. The one thing an agent CAN produce that gx cannot turn into a
+  deterministic patchset is a rejected payload kind (symlink/gitlink/non-
+  UTF-8 path, all already unit-tested at the propose-core level, Phase 4).
+  This phase adds the SAME rejection at the e2e/binary level for the "garbage"
+  row of the matrix.
+- **Per-repo agent/propose/apply failures exit the PROCESS successfully
+  (status 0) with the failure reported in stdout** (design: a bad generation
+  is a per-repo outcome, not a fleet-level abort - `execute_propose` and
+  `execute_apply` both return `Ok` with a `failed`/`drifted_or_failed` count).
+  Every failure-mode test therefore asserts `status.success()` PLUS the
+  specific stdout text naming the failure, not a nonzero exit code - asserting
+  a nonzero exit for these would be testing behavior the design explicitly
+  does not want.
+- **`GX_CRASH_POINT`-at-every-apply-phase-stamp on the happy path and undo-
+  after-apply are NOT re-implemented here** - both were already proven by
+  Phase 5/6's `tests/e2e_llm_apply.rs` (`test_apply_crash_matrix_parity_with_
+  sub`, `test_undo_reverses_applied_llm_campaign_and_removes_proposal`) and
+  the split-vs-one-shot equivalence by `tests/e2e_llm_cli.rs`. Re-deriving
+  them in a new file would be pure duplication; the new file's module doc
+  points at the existing tests instead so a reader knows where each success
+  criterion actually lives.
+- **Repo slugs in these fixtures are `<tmpdir-name>/app`, not `app`** (no
+  recognizable git-host URL to derive `org/repo` from a local bare remote, so
+  `resolve_slug`'s fallback uses the parent directory's name - a random
+  `TempDir`, not a literal `"app"`). Discovered live while writing the drift
+  test (a hardcoded `state["repositories"]["app"]` read back `null`); fixed by
+  looking up the sole entry in the map rather than assuming the key. Flagging
+  this because `tests/e2e_llm_cli.rs`'s existing parity test hardcodes the
+  same `"app"` key when comparing one-shot vs split state - that comparison
+  still passes today only because BOTH sides independently resolve to the
+  same wrong (`null`) value, so it is not actually exercising the field it
+  names. Not fixed in this phase (out of scope: it is Phase 6's file, not
+  Phase 7's, and the parity test's PASS/FAIL verdict is unaffected either
+  way) - flagged as an open question below.
+
+### Ringer addendum #3 (bare-proposal aggregate status + doctor)
+- **`ChangeState::mark_proposed`** (`src/state.rs`) now calls
+  `self.update_overall_status()`, matching every other `mark_*`/`set_pr_info`
+  method - it was the one holdout that mutated `repositories` without
+  re-deriving the aggregate.
+- **New `ChangeStatus::Proposed` variant** (`src/state.rs`), reachable from
+  `update_overall_status` only when EVERY repository is `RepoChangeStatus::
+  Proposed` (`proposed == total`, checked last, after the merged/PR-created
+  buckets so a mixed campaign still resolves via whichever bucket its
+  further-along repos earn - the existing "mix resolves via the more-advanced
+  bucket" pattern, not a new one). `CHANGE_STATE_VERSION` bumped 2 -> 3 (same
+  fail-closed reasoning as Phase 4's bump: an older gx reading `"status":
+  "Proposed"` at the change level fails loudly on the unknown variant).
+- **`gx doctor`** gained a `STUCK PROPOSALS` section (`report_stuck_proposals`,
+  `src/doctor.rs`), distinct from the existing `ORPHANED PROPOSALS` section
+  (which finds a proposal DIR with no change state at all): this one lists
+  every change state whose aggregate status IS `Proposed` - persisted,
+  recorded, but never applied or undone - naming the change-id, repo count,
+  and last-updated time, with a one-line remedy (`gx apply` or `gx undo`). The
+  filter logic is factored into a pure `stuck_proposals(Vec<ChangeState>) ->
+  Vec<ChangeState>` helper (mirroring the file's existing `version_compare`/
+  `extract_version` pattern) so it is unit-testable without capturing stdout.
+- Regression tests (both bite-proven: reverted the fix, watched each fail,
+  restored it): `state::tests::test_mark_proposed_sets_truthful_aggregate_
+  status` (an all-Proposed campaign resolves to `ChangeStatus::Proposed`, not
+  `InProgress`; a mixed proposed+merged campaign does NOT misreport
+  `Proposed`) and `doctor::tests::test_stuck_proposals_names_a_bare_proposal_
+  campaign` (a `FullyMerged` change is excluded; only the bare proposal is
+  named).
+
+### Ringer addendum #7 (startup worktree prune)
+- **Every propose worktree now lives under a gx-owned tmp root**
+  (`worktree_tmp_root() -> $XDG_DATA_HOME/gx/tmp/propose`,
+  `src/create/core/propose.rs`) instead of the bare OS temp dir
+  (`tempfile::TempDir::new()`, which resolves to `$TMPDIR`/`/tmp` with no
+  gx-owned namespace). This is the prerequisite the design's Risk row names
+  ("worktrees under a gx-owned tmp root") - it is what makes a crashed prior
+  run's leftover IDENTIFIABLE at all.
+- **`prune_leftover_worktrees`** runs ONCE at the top of `execute_propose`,
+  before this run creates any of its own entries under the root: everything
+  found there at that moment necessarily predates this call, so pruning can
+  never race this run's own in-flight worktrees (no timestamp heuristic or
+  PID check needed - the ordering itself is the invariant). For each leftover
+  entry, `git::resolve_worktree_repo` (new, `src/git.rs`) resolves the owning
+  repo via the worktree's OWN `.git` back-pointer (`git rev-parse --git-
+  common-dir`, run with CWD = the leftover worktree) - the git metadata
+  survives the crash even though gx's in-process mapping does not. The repo's
+  `RepoLock` is acquired before touching it (skip + warn + leave the WHOLE
+  leftover for a later propose if it's currently locked, rather than yanking a
+  worktree out from under a live operation); `git worktree remove --force`
+  cleans the registration, then the leftover directory is removed regardless
+  of whether the git call succeeded (a dangling directory with no resolvable
+  owning repo is still safely removed - it can only be OUR artifact, since we
+  only ever look inside our own tmp root).
+- **Only entries under our own `tmp_root` are ever read or removed** - a
+  worktree registered anywhere else (gx's real per-repo worktrees, a user's
+  own `git worktree add`, another tool's) is never enumerated, let alone
+  touched. This is structural (the prune only calls `read_dir` on `tmp_root`
+  itself), not a filter that could under-exclude.
+- Regression tests (both bite-proven), `create::core::propose::tests`:
+  `test_propose_prunes_leftover_worktree_from_a_crashed_prior_run` (a leftover
+  worktree manually registered under `worktree_tmp_root()` - simulating a
+  crashed process that never reached its own `worktree_remove` - is gone,
+  BOTH the directory and the `git worktree list` registration, after the next
+  propose for the same repo) and `test_propose_does_not_touch_a_non_gx_
+  worktree` (a normal worktree registered OUTSIDE the tmp root survives a
+  propose pass, directory and registration both).
+
+### Deviations
+- **`gx doctor`'s new section is a straight `STUCK PROPOSALS` report, not a
+  `--purge` target.** Unlike orphaned artifacts/proposal dirs (which are pure
+  disk cleanup, safe to blast away), a stuck proposal's remedy is a decision
+  (`gx apply` or `gx undo`) the operator makes, not a deletion doctor should
+  make for them - `--purge` stays scoped to what it already covers.
+- **The leftover-worktree prune's `RepoLock` skip-and-leave-for-later is a
+  fail-closed choice the addendum text doesn't spell out explicitly** ("propose
+  prunes gx-tagged leftover worktrees before running" doesn't say what to do
+  under contention). Chosen because pulling a worktree out from under a
+  concurrent live gx operation on that repo would be a NEW safety hole this
+  fix would introduce while closing another; leaving it for the next propose
+  (which will retry the prune) costs nothing since the leftover was already
+  stale.
+- **`resolve_worktree_repo` shells out to `git rev-parse --git-common-dir`**
+  rather than parsing the worktree's `.git` file directly (a one-line
+  `gitdir: <path>` pointer). Chose the shell-out: git itself resolves the
+  exact common-dir semantics (including the relative-vs-absolute path-format
+  quirk handled by the join+canonicalize below it) more reliably than
+  re-implementing that parse, and every other worktree operation in this
+  module (`worktree_add_detached`, `worktree_remove`, `stage_all`, `diff_
+  cached_*`) already shells out to git rather than touching `.git` internals
+  directly - consistent with the existing seam.
+
+### Tradeoffs
+- **One new e2e file (`tests/e2e_llm_matrix.rs`) vs. extending one of the
+  existing two** - chose a new file: the existing two are scoped to specific
+  phases' success criteria in their own module docs (Phase 5's crash-matrix +
+  undo, Phase 6's CLI-surface + parity); folding six more scenarios into
+  either would blur what each file is actually proving. The new file's module
+  doc explicitly cross-references what it does NOT re-implement and why.
+- **No shared `tests/common` module for the fixture helpers**, matching the
+  repo's existing convention (noted explicitly in Phase 6's notes) - some
+  literal duplication of `make_fixture`/`git`/`git_stdout`/`gx_binary` across
+  three files is the accepted cost of that convention, not something this
+  phase introduces.
+- **`prune_leftover_worktrees` removes a leftover directory even when its
+  owning repo can't be resolved** (`Ok(None)` or an `Err` from `resolve_
+  worktree_repo`) rather than leaving it untouched out of caution - chose
+  removal: the directory can ONLY be a gx propose artifact (nothing else ever
+  writes under `tmp_root`), so an unresolvable owner just means the git-side
+  registration is already gone (or never fully created before the crash), not
+  that the directory belongs to something else worth protecting.
+
+### Open questions
+- **`tests/e2e_llm_cli.rs::test_split_propose_then_apply_equals_one_shot`
+  hardcodes `state["repositories"]["app"]`, which is actually `null`** (the
+  real key is `<tmpdir-name>/app`, discovered while writing this phase's drift
+  test). The test's assertion (`repo_action(&one_shot_json) ==
+  repo_action(&split_json)`) still passes because both sides resolve to the
+  same `null`, so it is a false-negative-proof but not exercising the field it
+  names. Not fixed here (it is Phase 6's file, and fixing it is a one-line
+  change with zero behavior implication for the phase this doc is
+  scoped to) - flagged for a follow-up phase or a dedicated fix, per Scott's
+  call.

@@ -3,6 +3,7 @@
 //! or deleted repos ([A2], [A24]).
 
 use crate::config::xdg_data_dir;
+use crate::state::{ChangeStatus, StateManager};
 use crate::transaction::Transaction;
 use chrono::{DateTime, Utc};
 use eyre::Result;
@@ -30,7 +31,47 @@ pub fn run_doctor(purge: bool) -> Result<()> {
 
     report_orphans(purge)?;
     report_proposal_orphans(purge)?;
+    report_stuck_proposals()?;
     Ok(())
+}
+
+/// Report bare `Proposed` campaigns (ringer addendum #3): a change state whose
+/// aggregate `ChangeStatus` is `Proposed` has persisted artifacts and change
+/// state but was never applied OR undone. Distinct from
+/// `report_proposal_orphans` (which finds a proposal dir with NO change state
+/// at all) - this finds a change state that IS recorded but stuck at the
+/// bare-proposal bucket, so an operator can see it and act (`gx apply` or
+/// `gx undo`) instead of it sitting invisible in `status`/`review`.
+fn report_stuck_proposals() -> Result<()> {
+    let stuck = stuck_proposals(StateManager::new()?.list()?);
+
+    println!("\nSTUCK PROPOSALS (proposed, never applied or undone):");
+    if stuck.is_empty() {
+        println!("  none");
+        return Ok(());
+    }
+    for state in &stuck {
+        println!(
+            "  {} ({} repo(s), updated {})",
+            state.change_id,
+            state.repositories.len(),
+            state.updated_at.to_rfc3339()
+        );
+    }
+    println!("  (run `gx apply <change-id>` to apply, or `gx undo <change-id>` to discard)");
+    Ok(())
+}
+
+/// Pure filter: every change state sitting at the bare-proposal aggregate
+/// bucket, sorted by change-id. Extracted from [`report_stuck_proposals`] so
+/// the "which campaigns are stuck" logic is testable without capturing stdout.
+fn stuck_proposals(states: Vec<crate::state::ChangeState>) -> Vec<crate::state::ChangeState> {
+    let mut stuck: Vec<_> = states
+        .into_iter()
+        .filter(|s| s.status == ChangeStatus::Proposed)
+        .collect();
+    stuck.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    stuck
 }
 
 /// Report (and optionally purge) orphaned proposal directories: a

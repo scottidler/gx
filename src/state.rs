@@ -15,11 +15,12 @@ use std::path::PathBuf;
 ///
 /// Bumped 1 -> 2 for Phase 4 (design doc
 /// `2026-07-12-llm-propose-apply-and-mcp-server.md`): the new
-/// `RepoChangeStatus::Proposed` variant. Combined with `deny_unknown_fields`,
-/// an OLDER gx reading a state file that carries `"status": "Proposed"` fails
-/// loudly on the unknown enum variant (fail closed, correct) rather than
-/// silently mis-loading it.
-const CHANGE_STATE_VERSION: u32 = 2;
+/// `RepoChangeStatus::Proposed` variant. Bumped 2 -> 3 for Phase 7 (ringer
+/// addendum #3): the new `ChangeStatus::Proposed` aggregate variant. Combined
+/// with `deny_unknown_fields`, an OLDER gx reading a state file that carries
+/// `"status": "Proposed"` (repo- or change-level) fails loudly on the unknown
+/// enum variant (fail closed, correct) rather than silently mis-loading it.
+const CHANGE_STATE_VERSION: u32 = 3;
 
 /// Default `version` for a change state file that predates the field (serde
 /// fills this in for version-less files written by an older gx), matching
@@ -103,6 +104,11 @@ pub struct RepoChangeState {
 pub enum ChangeStatus {
     /// Change is in progress
     InProgress,
+    /// Every repository has a persisted proposal (`RepoChangeStatus::Proposed`)
+    /// and none has been applied yet (ringer addendum #3, Phase 7): a bare
+    /// `gx create ... llm --propose` campaign, truthfully distinct from
+    /// `InProgress` so it doesn't read as an active/stuck run.
+    Proposed,
     /// All PRs created successfully
     PrsCreated,
     /// Some PRs merged
@@ -196,6 +202,7 @@ impl ChangeState {
             repo.local_path = local_path;
         }
         self.updated_at = Utc::now();
+        self.update_overall_status();
     }
 
     /// Update PR info for a repository
@@ -264,7 +271,12 @@ impl ChangeState {
 
     /// Update overall status based on repository states. `Failed` is reachable
     /// (F14) when every repository failed; a mix of failed and successful
-    /// repos still resolves via the merged/PR-created buckets below.
+    /// repos still resolves via the merged/PR-created buckets below. `Proposed`
+    /// (ringer addendum #3, Phase 7) is reachable only when EVERY repository is
+    /// still a bare proposal - a mixed campaign (some applied, some still
+    /// `Proposed` stragglers) falls through to whatever bucket its applied
+    /// repos earn, matching the existing "mix resolves via the more-advanced
+    /// bucket" pattern.
     fn update_overall_status(&mut self) {
         let total = self.repositories.len();
         if total == 0 {
@@ -294,6 +306,12 @@ impl ChangeState {
             })
             .count();
 
+        let proposed = self
+            .repositories
+            .values()
+            .filter(|r| r.status == RepoChangeStatus::Proposed)
+            .count();
+
         if failed == total {
             self.status = ChangeStatus::Failed;
         } else if merged == total {
@@ -302,6 +320,8 @@ impl ChangeState {
             self.status = ChangeStatus::PartiallyMerged;
         } else if with_prs == total {
             self.status = ChangeStatus::PrsCreated;
+        } else if proposed == total {
+            self.status = ChangeStatus::Proposed;
         }
     }
 
@@ -662,6 +682,53 @@ mod tests {
         let repo = state.repositories.get("org/repo").unwrap();
         assert_eq!(repo.status, RepoChangeStatus::PrMerged);
         assert_eq!(state.status, ChangeStatus::FullyMerged);
+    }
+
+    #[test]
+    fn test_mark_proposed_sets_truthful_aggregate_status() {
+        // Ringer addendum #3: a bare (unapplied) proposal must report a
+        // truthful aggregate `ChangeStatus::Proposed`, not the stale default
+        // `InProgress` a never-undone proposal was stuck at before this fix
+        // (`mark_proposed` never called `update_overall_status`).
+        let mut state = ChangeState::new("GX-proposed".to_string(), None);
+        state.mark_proposed(
+            "org/repo1",
+            "deadbeef".to_string(),
+            vec!["README.md".to_string()],
+            Some("/tmp/org/repo1".to_string()),
+        );
+        assert_eq!(
+            state.repositories.get("org/repo1").unwrap().status,
+            RepoChangeStatus::Proposed
+        );
+        assert_eq!(
+            state.status,
+            ChangeStatus::Proposed,
+            "an all-Proposed campaign must resolve to ChangeStatus::Proposed, not InProgress"
+        );
+
+        // A mixed campaign (one repo proposed, one already merged) must NOT
+        // wrongly report `Proposed` for the whole change - it resolves via the
+        // existing partial bucket. This is the bite: without the `proposed ==
+        // total` guard (as opposed to `proposed > 0`), this would misfire.
+        state.mark_proposed(
+            "org/repo2",
+            "cafebabe".to_string(),
+            vec![],
+            Some("/tmp/org/repo2".to_string()),
+        );
+        state.set_pr_info(
+            "org/repo2",
+            1,
+            "https://github.com/org/repo2/pull/1".to_string(),
+            false,
+        );
+        state.mark_merged("org/repo2");
+        assert_eq!(
+            state.status,
+            ChangeStatus::PartiallyMerged,
+            "a mix of Proposed + merged must not misreport Proposed"
+        );
     }
 
     #[test]

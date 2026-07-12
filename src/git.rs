@@ -1940,6 +1940,48 @@ pub fn stage_all(worktree_path: &std::path::Path) -> Result<()> {
     }
 }
 
+/// Resolve the real repo root that owns a (possibly leftover) linked
+/// worktree, via the worktree's OWN `.git` back-pointer
+/// (`git rev-parse --git-common-dir`, which always names the MAIN repo's
+/// `.git` for a linked worktree). Used by the propose pass's startup prune
+/// (ringer addendum #7, design Risks: "worktrees under a gx-owned tmp root")
+/// to self-heal a crashed prior run's leftover worktree: the git metadata
+/// survives the crash even though gx's own in-process mapping does not.
+/// Returns `None` if the path is gone or is no longer a valid git worktree
+/// (already pruned by something else, or never one).
+pub fn resolve_worktree_repo(
+    worktree_path: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>> {
+    debug!(
+        "resolve_worktree_repo: worktree_path={}",
+        worktree_path.display()
+    );
+    if !worktree_path.exists() {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .context("Failed to execute git rev-parse --git-common-dir")?;
+    if !output.status.success() {
+        debug!(
+            "resolve_worktree_repo: {} is not a valid git worktree",
+            worktree_path.display()
+        );
+        return Ok(None);
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    // `--git-common-dir` is relative to CWD unless the process runs outside
+    // the repo; joining then canonicalizing resolves either form.
+    let common_dir = worktree_path.join(&raw);
+    let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
+    Ok(common_dir.parent().map(|p| p.to_path_buf()))
+}
+
 /// Unified `git diff --cached <base_sha>` in `worktree_path`, as a display
 /// string. This is the DISPLAY patch for the proposal (design "diff for
 /// display, blobs for apply"); apply never consumes it. Decoded lossily since
