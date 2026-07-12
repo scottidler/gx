@@ -1329,3 +1329,55 @@ fn undo_bare_proposal_is_local_only_with_zero_remote_invocations() {
     }
     drop(guard);
 }
+
+#[test]
+fn execute_undo_fails_fast_while_change_lock_is_held() {
+    // Audit fix #1: the whole undo RMW - the per-repo CleanupProposal
+    // proposal-dir deletion AND the final state true-up - serializes under ONE
+    // ChangeLock acquired at the TOP of execute_undo (before the par_iter). A
+    // concurrent apply/undo already holding this change's lock makes undo fail
+    // fast rather than interleaving the artifact/state RMW. Bite check: remove
+    // the top-of-execute_undo `ChangeLock::acquire` and undo completes Ok while
+    // the lock is held (interleaving), so this test's expected error vanishes.
+    let guard = crate::test_utils::env_lock();
+    let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+    let data_home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let change_id = "GX-undo-serialize";
+    // A saved change state makes `state_existed` true, so execute_undo takes the
+    // ChangeLock (the guard is skipped only for a recovery-only campaign).
+    let manager = StateManager::new().unwrap();
+    let state = ChangeState::new(change_id.to_string(), Some("x".to_string()));
+    manager.save(&state).unwrap();
+
+    let plan_set = UndoPlanSet {
+        plan: vec![],
+        actionable: vec![],
+        state_existed: true,
+    };
+
+    // Simulate a concurrent apply/undo already holding this change's lock.
+    let held = crate::lock::ChangeLock::acquire(change_id).unwrap();
+
+    let err = execute_undo(
+        &plan_set,
+        change_id,
+        &Config::default(),
+        1,
+        crate::confirm::already_confirmed(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("change lock"),
+        "undo must fail fast while the change lock is held: {err}"
+    );
+
+    drop(held);
+    match prior_data_home {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}

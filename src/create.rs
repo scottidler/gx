@@ -189,6 +189,19 @@ pub fn process_create_command(
         .or_else(|| crate::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
+    // Change-level lock (Phase 7 [F6]): the wrapper OWNS it for a committing run
+    // and lets the guard outlive the synchronous `execute_create` call (the core
+    // no longer self-locks, so apply can hold ONE guard across its whole RMW -
+    // audit fix #1). A dry run mutates no state and needs no lock.
+    let _change_lock = if commit_message.is_some() {
+        Some(
+            crate::lock::ChangeLock::acquire(&change_id)
+                .map_err(|e| eyre::eyre!("Cannot start create for {change_id}: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     // The wrapper already confirmed (TTY prompt above, or --yes); the core
     // never prompts, so it always receives an already-satisfied confirmation.
     let results = core::execute_create(

@@ -33,7 +33,8 @@ fn default_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeState {
-    /// Schema version. Defaults to 1 so version-less files from an older gx load.
+    /// Schema version. A version-less file from an older gx (the field predates
+    /// this schema) deserializes to `default_version()` = `CHANGE_STATE_VERSION`.
     #[serde(default = "default_version")]
     pub version: u32,
 
@@ -398,6 +399,19 @@ impl StateManager {
         let json = fs::read_to_string(&file_path).context("Failed to read change state file")?;
         let state: ChangeState =
             serde_json::from_str(&json).context("Failed to parse change state file")?;
+
+        // Numeric fail-closed guard (belt-and-suspenders alongside the semantic
+        // `deny_unknown_fields` + unknown-enum-variant protections): a state file
+        // written by a NEWER gx (higher schema version) may carry fields or
+        // encodings this gx cannot interpret. Refuse loudly, naming BOTH versions,
+        // instead of silently mis-loading or emitting a cryptic serde error.
+        if state.version > CHANGE_STATE_VERSION {
+            return Err(eyre::eyre!(
+                "change state {change_id} was written by a newer gx (state schema v{}); \
+                 this gx supports v{CHANGE_STATE_VERSION} - upgrade gx",
+                state.version
+            ));
+        }
         Ok(Some(state))
     }
 
@@ -824,6 +838,47 @@ mod tests {
         let (manager, _temp) = create_test_manager();
         let loaded = manager.load("nonexistent").unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_load_refuses_newer_schema_version_naming_both_versions() {
+        // Numeric fail-closed guard (audit fix #4): a state file stamped with a
+        // schema version HIGHER than this gx supports must be refused loudly,
+        // naming BOTH the file's version and the version this gx supports -
+        // never silently mis-loaded. Bite check: remove the `version >
+        // CHANGE_STATE_VERSION` guard in `load` and this test fails (the newer
+        // file loads as if it were current).
+        let (manager, _temp) = create_test_manager();
+        let mut state = ChangeState::new("GX-from-the-future".to_string(), None);
+        state.version = 99; // a version no build of this gx has ever emitted
+        manager.save(&state).unwrap();
+
+        let err = manager
+            .load("GX-from-the-future")
+            .expect_err("a newer-schema state file must fail to load")
+            .to_string();
+        assert!(
+            err.contains("v99") && err.contains(&format!("v{CHANGE_STATE_VERSION}")),
+            "the refusal must name BOTH versions (file v99, supported v{CHANGE_STATE_VERSION}): {err}"
+        );
+        assert!(
+            err.contains("newer gx"),
+            "the refusal must point at a newer gx: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_accepts_current_schema_version() {
+        // The guard is strictly `>`: the current version (and anything older,
+        // including version-less files that default to current) must still load.
+        let (manager, _temp) = create_test_manager();
+        let state = ChangeState::new("GX-current".to_string(), None);
+        assert_eq!(state.version, CHANGE_STATE_VERSION);
+        manager.save(&state).unwrap();
+        assert!(
+            manager.load("GX-current").unwrap().is_some(),
+            "a state at the current schema version must load"
+        );
     }
 
     #[test]

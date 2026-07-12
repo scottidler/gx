@@ -56,6 +56,16 @@ pub fn execute_apply(
 ) -> Result<ApplyReport> {
     debug!("execute_apply: change_id={change_id} confirmation={confirmation:?}");
 
+    // Serialize the ENTIRE apply read-modify-write under ONE ChangeLock guard
+    // (addendum disposition, design doc lines 189 & 737-739): the manifest +
+    // token read, the state load, the pipeline write, AND the straggler
+    // reconcile all happen while this guard is held, so a concurrent `gx apply`
+    // or `gx undo` on the same change-id fails fast rather than interleaving the
+    // artifact/state RMW. The guard is passed as a witness into `execute_create`
+    // so it does NOT re-acquire (same-process double-open would fail-fast).
+    let _change_lock = crate::lock::ChangeLock::acquire(change_id)
+        .map_err(|e| eyre::eyre!("Cannot apply {change_id}: change is locked ({e})"))?;
+
     // 1. Proposal artifacts must exist; a missing manifest is a loud error
     //    NAMING the expected path (design apply-pass semantics).
     let dir = manifest::proposal_dir(change_id)?;
@@ -169,11 +179,9 @@ pub fn execute_apply(
     }
 
     if !stragglers.is_empty() {
-        // Held for the whole load-mutate-save so a concurrent op on this
-        // change-id cannot interleave (same discipline as execute_create/undo).
-        let _change_lock = crate::lock::ChangeLock::acquire(change_id).with_context(|| {
-            format!("Failed to acquire change lock to record apply stragglers for {change_id}")
-        })?;
+        // `_change_lock` (acquired at the top of this fn) still covers this
+        // load-mutate-save, so no re-acquire is needed: the whole apply RMW is
+        // one critical section.
         let mut fresh = manager.load(change_id)?.unwrap_or_else(|| {
             ChangeState::new(change_id.to_string(), Some(manifest.prompt.clone()))
         });

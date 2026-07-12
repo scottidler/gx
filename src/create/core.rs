@@ -120,12 +120,18 @@ fn join_diff(diff_parts: &[String]) -> Option<String> {
     }
 }
 
-/// Execute a `gx create` run across pre-filtered, pre-confirmed repos: lock
-/// the change, initialize state tracking, process each repo in parallel, and
-/// return the structured results. Never prints and never prompts - the caller
-/// (the CLI wrapper today; an MCP `create-apply` tool later) already resolved
-/// which repos to target and confirmed (TTY, `--yes`, or a verified token)
-/// before calling this.
+/// Execute a `gx create` run across pre-filtered, pre-confirmed repos:
+/// initialize state tracking, process each repo in parallel, and return the
+/// structured results. Never prints and never prompts - the caller (the CLI
+/// wrapper today; `apply::execute_apply` and an MCP `create-apply` tool) already
+/// resolved which repos to target and confirmed (TTY, `--yes`, or a verified
+/// token) before calling this.
+///
+/// **Locking contract:** for a committing run (`commit_message.is_some()`) the
+/// CALLER must hold the [`crate::lock::ChangeLock`] for `change_id` across this
+/// call. This core does not acquire it (so apply can hold ONE guard across its
+/// whole RMW); a caller that mutates state without holding the lock breaks the
+/// cross-process serialization guarantee.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_create(
     repos: &[Repo],
@@ -144,22 +150,18 @@ pub fn execute_create(
         commit_message.is_some()
     );
 
-    // Change-level lock (Phase 7 [F6]): held for the whole run so another
-    // process's `changes/<id>.json` read-modify-write (`review sync`,
+    // Change-level lock (Phase 7 [F6]): the CALLER holds it for the whole run so
+    // another process's `changes/<id>.json` read-modify-write (`review sync`,
     // `cleanup`, `undo`, ...) can never interleave with this run's incremental
-    // saves. The in-process `Mutex<ChangeState>` below still serializes this
-    // run's own rayon workers against EACH OTHER; this lock is the
-    // cross-process half, so it is acquired ONCE here rather than per-repo
-    // (per-repo would make sibling workers in the SAME run fail-fast against
-    // each other, since the lock itself doesn't queue).
-    let _change_lock = if commit_message.is_some() {
-        Some(
-            crate::lock::ChangeLock::acquire(change_id)
-                .map_err(|e| eyre::eyre!("Cannot start create for {change_id}: {e}"))?,
-        )
-    } else {
-        None
-    };
+    // saves. This core does NOT acquire it - the CLI wrapper
+    // (`create::process_create_command`) and `apply::execute_apply` acquire the
+    // `ChangeLock` and let their guard outlive this synchronous call, exactly as
+    // `rollback::core::execute_recovery` trusts its wrapper to hold the RepoLock
+    // (Phase 3). This is what lets apply span the ENTIRE load->verify->apply->
+    // state-write RMW under ONE guard (addendum disposition, doc lines 189 &
+    // 737-739) without this core re-acquiring and fail-fasting against the
+    // caller's own guard. The in-process `Mutex<ChangeState>` below still
+    // serializes this run's own rayon workers against EACH OTHER.
 
     // Initialize state tracking if we're going to make changes (not dry run).
     let change_state = if commit_message.is_some() {
@@ -1130,15 +1132,30 @@ fn apply_patchset_change(
         ));
     }
 
-    // (2) Verify every add/modify blob under the RepoLock BEFORE writing any of
-    //     them, so a tampered proposal is refused with nothing written. Read the
-    //     verified bytes into memory here; the write loop below only touches the
-    //     worktree once every blob passes.
-    let mut verified: Vec<(&manifest::FileEntry, Option<Vec<u8>>)> =
+    // (2) Verify every add/modify blob AND confirm every path is worktree-
+    //     confined, both under the RepoLock and BEFORE writing any of them, so a
+    //     tampered blob OR an escaping path is refused with nothing written. The
+    //     confirm token binds CONTENT (per-blob sha256), not the PATH: a
+    //     proposal manifest carrying `../escape`, an absolute path, or a `.git/`
+    //     write must still be refused at the one write seam that enforces the
+    //     policy (`file::validate_new_file_path`, design "the one write path that
+    //     enforces the policy directly"). Read the verified bytes into memory
+    //     here; the write loop below only touches the worktree once EVERY entry
+    //     passes (path + blob), so a single rejecting path is a loud per-repo
+    //     refusal with nothing written.
+    let mut verified: Vec<(&manifest::FileEntry, PathBuf, Option<Vec<u8>>)> =
         Vec::with_capacity(rp.files.len());
     for entry in &rp.files {
+        // Path confinement first: reject absolute paths, `..` traversal, `.git/`
+        // writes, and symlink-escape for BOTH the write and the delete branch.
+        let full = file::validate_new_file_path(repo_path, &entry.path).with_context(|| {
+            format!(
+                "refusing to apply {slug}: unsafe path in proposal: {}",
+                entry.path
+            )
+        })?;
         match entry.action {
-            FileAction::Delete => verified.push((entry, None)),
+            FileAction::Delete => verified.push((entry, full, None)),
             FileAction::Add | FileAction::Modify => {
                 let want = entry.sha256.as_deref().ok_or_else(|| {
                     eyre::eyre!(
@@ -1164,15 +1181,15 @@ fn apply_patchset_change(
                         bytes.len()
                     ));
                 }
-                verified.push((entry, Some(bytes)));
+                verified.push((entry, full, Some(bytes)));
             }
         }
     }
 
-    // All blobs verified: mutate through the existing backup/write seam.
-    for (entry, bytes) in verified {
+    // All paths confined and all blobs verified: mutate through the existing
+    // backup/write seam using the validated absolute path.
+    for (entry, full, bytes) in verified {
         let rel = Path::new(&entry.path);
-        let full = repo_path.join(rel);
         match entry.action {
             FileAction::Delete => {
                 if !full.exists() {

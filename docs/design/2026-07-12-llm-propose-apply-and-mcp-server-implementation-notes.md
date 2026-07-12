@@ -1282,3 +1282,118 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 - Cross-repo/system-mutating bullets: none in this phase. The `main.rs`
   lib/bin duplicate-module-tree debt from Phase 3 persists, untouched by this
   phase.
+
+## Audit fixes (post-implementation-audit, 2026-07-12)
+
+Not a phase: a targeted hardening pass folding the review-panel implementation
+audit's 3 BLOCKING must-fixes + 1 cheap nit into one commit (base `e3df247`).
+Findings #5 (no llm+PR e2e test) and #6 (whether MCP `create-apply` should hard
+error vs signal `applied:0`) are owner-decides and were SURFACED to Scott, not
+touched here. Every fix carries a bite-proven regression test (broke the fix,
+watched the test fail, restored - proofs recorded below). `otto ci` green.
+
+### Design decisions
+- **#1 ChangeLock spans the FULL apply RMW** - `create::core::apply::execute_apply`
+  (`src/create/core/apply.rs`) now acquires ONE `ChangeLock` at the TOP of the
+  function (before the manifest+token read, the state load, the pipeline write,
+  and the straggler reconcile), matching the addendum disposition (doc lines 189
+  & 737-739: "ChangeLock covers every read-modify-write of the proposal dir;
+  state and artifacts serialize under the same lock"). The now-redundant narrow
+  acquire in the straggler-reconcile block was removed - the top-level guard
+  covers it. To avoid a same-process double-acquire deadlock (flock is
+  per-open-fd; a second open of the same lock path fail-fasts), the ChangeLock
+  acquisition was HOISTED OUT of `execute_create` into its callers: the CLI
+  wrapper `create::process_create_command` (`src/create.rs`) now acquires the
+  lock for a committing run and lets its guard outlive the synchronous
+  `execute_create` call, and `execute_apply` holds it across its call. This is
+  the exact `rollback::core::execute_recovery` witness pattern already
+  documented in Phase 3 (core trusts the wrapper to hold the lock; core never
+  self-locks).
+- **#1 ChangeLock spans the FULL undo RMW** - `undo::core::execute_undo`
+  (`src/undo/core.rs`) now acquires ONE `ChangeLock` at the TOP (before the
+  `par_iter`), so the per-repo `CleanupProposal` proposal-dir deletion AND the
+  final state true-up serialize under the SAME guard. The narrow acquire in the
+  final save block was removed. Acquisition is still gated on
+  `plan_set.state_existed` (a recovery-only campaign has no change-state file
+  and no proposal dir to serialize). `undo_one` never acquires the ChangeLock,
+  so holding it across the campaign cannot deadlock; per-repo work takes the
+  distinct `RepoLock`, keeping ChangeLock->RepoLock ordering consistent with
+  apply/create.
+- **#2 dropped the version pin on the workspace-internal path dep** -
+  `gx-mcp/Cargo.toml` changed `gx = { version = "0.4.1", path = ".." }` to
+  `gx = { path = ".." }`. A path dependency on a workspace-internal crate needs
+  no version requirement; the `^0.4.1` requirement would reject a `bump -m`
+  that sets `[workspace.package].version` to 0.5.0 and break `cargo build`.
+- **#3 path-confinement seam in `Change::Patchset` apply** -
+  `apply_patchset_change` (`src/create/core.rs`) now validates EVERY manifest
+  entry's path through `file::validate_new_file_path` (rejects absolute paths,
+  `..` traversal, `.git/` writes, symlink-escape) in the pre-write verify loop,
+  BEFORE any blob is written or file deleted, for BOTH the write and delete
+  branches. A rejecting path is a loud per-repo refusal with NOTHING written
+  (validation runs before the first mutation). The confirm token binds CONTENT
+  (per-blob sha256), not PATH, so this seam is what actually confines writes to
+  the worktree.
+- **#4 state-version comment + numeric fail-closed guard** - `src/state.rs`:
+  the stale `ChangeState::version` doc comment ("Defaults to 1") now truthfully
+  says it defaults to `CHANGE_STATE_VERSION`. `StateManager::load` gained a
+  numeric guard: a loaded state whose `version > CHANGE_STATE_VERSION` fails
+  loudly, naming BOTH the file's version and the version this gx supports
+  ("written by a newer gx (state schema vN); this gx supports vM - upgrade
+  gx"). This literally satisfies the acceptance criterion and beats the cryptic
+  serde failure; the existing semantic protections (`deny_unknown_fields` +
+  unknown `Proposed` enum variant) stay (belt-and-suspenders).
+
+### Deviations
+- **#1 lock hoisted out of `execute_create` rather than added as a
+  `held_lock: bool`/witness param** - same effect (apply holds one guard across
+  its whole RMW), correct seam: the witness-param form left `execute_create` a
+  fallback locker, which made the serialization test un-bite-able (breaking
+  only apply's top acquire still left execute_create locking). Hoisting matches
+  the established `rollback::core::execute_recovery` pattern (Phase 3) and makes
+  the bite honest: with locking removed from apply's top, no lock remains, so
+  apply interleaves and the test fails.
+- **#3 the escape-path regression test hand-crafts a proposal manifest** (via
+  the `manifest` module types) rather than driving a real agent: `git add -A` +
+  `git diff` can never emit a `../escape` or `.git/` path (git won't track
+  outside the worktree), so the ONLY way to exercise the apply-side path seam is
+  a manifest carrying such a path directly - which is exactly the threat the
+  token (content hash) does not guard.
+- No other deviations from the fix brief.
+
+### Tradeoffs
+- **#3 path validation placed in the pre-write verify loop** (alongside the
+  per-blob hash check) vs. in the write loop - chose the verify loop: it runs
+  BEFORE any mutation, so a single rejecting path aborts with nothing written,
+  matching "a rejecting path is a LOUD per-repo refusal with NOTHING written."
+  The validated absolute path is captured and carried into the write loop
+  (`verified: Vec<(&FileEntry, PathBuf, Option<Vec<u8>>)>`) so the write side
+  uses the validated path, not a re-`join`.
+- **#4 guard is `version > CHANGE_STATE_VERSION` (strict `>`)** vs. `!=` -
+  chose `>`: an OLDER state file (lower version, or version-less defaulting to
+  current) must still load; only a NEWER schema this gx cannot interpret is
+  refused. `test_load_accepts_current_schema_version` pins the non-refusal side.
+
+### Open questions
+- #5 (no llm+PR-creation e2e) and #6 (MCP `create-apply` hard-error vs
+  `applied:0` signal) are owner-decides: SURFACED to Scott separately, NOT
+  fixed here.
+- The `main.rs` lib/bin duplicate-module-tree debt (Phase 3) still persists;
+  untouched by this pass.
+
+### Bite proofs (each broken, observed failing, restored)
+- **#1 apply** - `create::core::apply::tests::test_apply_fails_fast_while_change_lock_is_held`:
+  removed the top-of-`execute_apply` `ChangeLock::acquire` -> apply created the
+  GX branch while the lock was held (interleaved) -> FAILED. Restored -> pass.
+- **#1 undo** - `undo::core::tests::execute_undo_fails_fast_while_change_lock_is_held`:
+  removed the top-of-`execute_undo` acquire -> undo completed `Ok` while the
+  lock was held (no fail-fast) -> FAILED. Restored -> pass.
+- **#3** - `create::core::apply::tests::test_apply_refuses_escaping_path_and_writes_nothing`:
+  replaced `validate_new_file_path` with a bare `repo_path.join` -> the
+  `.git/hooks/pre-commit` payload applied -> FAILED. Restored -> pass.
+- **#4** - `state::tests::test_load_refuses_newer_schema_version_naming_both_versions`:
+  removed the `version > CHANGE_STATE_VERSION` guard -> a version-99 state
+  loaded silently -> FAILED. Restored -> pass.
+- **#2** - verified by build (not a unit test): `cargo build --workspace`
+  succeeds with the fix; temporarily setting `[workspace.package].version` to
+  0.5.0 and rebuilding the workspace still resolves the `gx` path dep (both
+  crates compile as 0.5.0, no `^0.4.1` conflict); restored to 0.4.1.

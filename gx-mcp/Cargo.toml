@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 env_logger = "0.11.11"
 eyre = "0.6.12"
-gx = { version = "0.4.1", path = ".." }
+gx = { path = ".." }
 log = "0.4.33"
 rmcp = { version = "2.2.0", features = ["server", "macros"] }
 schemars = "1.2.1"

@@ -811,6 +811,28 @@ pub fn execute_undo(
         plan_set.actionable.len(),
         plan_set.state_existed
     );
+
+    // Hold ONE ChangeLock guard across the ENTIRE undo read-modify-write
+    // (addendum disposition, design doc lines 737-739): the per-repo
+    // `CleanupProposal` arm deletes the proposal dir (an artifact RMW) inside
+    // the parallel section below, and the final true-up rewrites change state -
+    // both must serialize under the SAME lock so a concurrent `gx apply`/`gx
+    // undo` on this change-id fails fast rather than interleaving. Acquired
+    // BEFORE the par_iter so it covers the proposal-dir deletion, not just the
+    // state save. Skipped for a recovery-only campaign: no change-state file and
+    // no proposal dir exist to serialize (saving one would fabricate a spurious
+    // state file). `undo_one` never acquires the ChangeLock, so holding it here
+    // across the campaign cannot deadlock; per-repo work takes the (distinct)
+    // RepoLock, keeping the ChangeLock->RepoLock ordering consistent with apply.
+    let _change_lock = if plan_set.state_existed {
+        Some(
+            crate::lock::ChangeLock::acquire(change_id)
+                .context("Failed to acquire change lock for undo")?,
+        )
+    } else {
+        None
+    };
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallel_jobs)
         .build()
@@ -824,20 +846,18 @@ pub fn execute_undo(
             .collect()
     });
 
-    // Change-level lock (Phase 7 [F6]): reload the freshest state, fold in
-    // this run's outcomes, and save -- all as one atomic critical section --
-    // so a concurrent `review sync`/`cleanup`/another `undo` on the SAME
-    // change-id can never interleave and lose an update. The lock is held
-    // only for this final load-mutate-save, not across the (possibly long)
-    // campaign execution above, which never touches `changes/<id>.json`
-    // directly. Skipped for a recovery-only campaign: there is no change-state
-    // file to true up (its record was the recovery files, now drained), and
-    // saving one would fabricate a spurious state file for a change that never
-    // had one.
+    // Change-level lock (Phase 7 [F6], hardened by the addendum disposition):
+    // reload the freshest state, fold in this run's outcomes, and save -- all
+    // as one atomic critical section -- so a concurrent `review sync`/
+    // `cleanup`/another `undo` on the SAME change-id can never interleave and
+    // lose an update. The `_change_lock` acquired at the TOP of this fn already
+    // covers this final load-mutate-save (and the proposal-dir deletion above),
+    // so no re-acquire is needed. Skipped for a recovery-only campaign: there is
+    // no change-state file to true up (its record was the recovery files, now
+    // drained), and saving one would fabricate a spurious state file for a
+    // change that never had one.
     if plan_set.state_existed {
         let manager = StateManager::new()?;
-        let _change_lock = crate::lock::ChangeLock::acquire(change_id)
-            .context("Failed to acquire change lock before saving undo results")?;
         let mut state = manager
             .load(change_id)?
             .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during undo"))?;

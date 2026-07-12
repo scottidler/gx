@@ -342,3 +342,154 @@ fn test_apply_refuses_on_token_mismatch() {
         );
     });
 }
+
+#[test]
+fn test_apply_refuses_escaping_path_and_writes_nothing() {
+    // Audit fix #3: the confirm token binds CONTENT (per-blob sha256), NOT the
+    // PATH. A proposal manifest carrying a `.git/`-targeting path must still be
+    // refused at the path-confinement seam (`file::validate_new_file_path`),
+    // nothing written. Without that seam a hostile/buggy manifest would write an
+    // executable hook straight INTO the repo's .git dir. Bite check: drop the
+    // `validate_new_file_path` call in `apply_patchset_change`'s verify loop and
+    // this test fails (the hook lands and/or the repo applies).
+    with_data_home(|| {
+        let ws = TempDir::new().unwrap();
+        let (repo_path, _branch) = repo_with_remote(ws.path());
+        let repo = Repo::new(repo_path.clone()).unwrap();
+        let slug = repo.slug.clone();
+        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+        let change_id = "GX-apply-escape";
+
+        // Hand-craft a proposal whose only file targets `.git/hooks/pre-commit`.
+        let evil: &[u8] = b"#!/bin/sh\necho pwned\n";
+        let entry = manifest::FileEntry {
+            path: ".git/hooks/pre-commit".to_string(),
+            action: manifest::FileAction::Add,
+            mode: "100755".to_string(),
+            sha256: Some(crate::hash::sha256_hex(evil)),
+            size: evil.len() as u64,
+        };
+        let rp = manifest::RepoProposal {
+            slug: slug.clone(),
+            base_sha: base_sha.clone(),
+            outcome: manifest::ProposalOutcome::Proposed,
+            error: None,
+            files: vec![entry],
+        };
+        let m = manifest::ProposalManifest::new(
+            change_id.to_string(),
+            "inject a hook".to_string(),
+            "fake-agent".to_string(),
+            vec![rp],
+        );
+        let dir = manifest::proposal_dir(change_id).unwrap();
+        manifest::write_manifest(&dir, &m).unwrap();
+        manifest::write_blob(&dir, &slug, ".git/hooks/pre-commit", evil).unwrap();
+
+        // Record the Proposed repo in change state so apply resolves it.
+        let mgr = StateManager::new().unwrap();
+        let mut state = ChangeState::new(change_id.to_string(), Some("inject".to_string()));
+        state.mark_proposed(
+            &slug,
+            base_sha,
+            vec![".git/hooks/pre-commit".to_string()],
+            Some(repo_path.to_string_lossy().to_string()),
+        );
+        mgr.save(&state).unwrap();
+
+        let hook = repo_path.join(".git").join("hooks").join("pre-commit");
+        let hook_before = std::fs::read(&hook).ok();
+
+        let report = execute_apply(
+            change_id,
+            Some("apply"),
+            None,
+            &Config::default(),
+            1,
+            Confirmation::AlreadyConfirmed,
+        )
+        .unwrap();
+        assert_eq!(
+            report.applied, 0,
+            "an escaping-path proposal must not apply"
+        );
+        assert_eq!(report.drifted_or_failed, 1);
+
+        // Repo stays Proposed with a loud error naming the unsafe path.
+        let rs_state = mgr.load(change_id).unwrap().unwrap();
+        let rs = rs_state.repositories.get(&slug).unwrap();
+        assert_eq!(rs.status, RepoChangeStatus::Proposed);
+        let err = rs.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("unsafe path") && err.contains(".git"),
+            "error must name the unsafe path: {:?}",
+            rs.error
+        );
+
+        // NOTHING written: the .git hook is untouched (still absent, or its prior
+        // bytes) and no GX branch was created.
+        assert_eq!(
+            std::fs::read(&hook).ok(),
+            hook_before,
+            "the .git hook must be untouched by a refused apply"
+        );
+        assert!(
+            !local_branch_exists(&repo_path, change_id),
+            "an escaping-path proposal must not create the GX branch"
+        );
+    });
+}
+
+#[test]
+fn test_apply_fails_fast_while_change_lock_is_held() {
+    // Audit fix #1: the ENTIRE apply RMW (manifest+token read, state load,
+    // pipeline write, straggler reconcile) is serialized under ONE ChangeLock
+    // acquired at the TOP of execute_apply. A concurrent apply/undo already
+    // holding this change's lock makes apply fail fast and write nothing, rather
+    // than interleaving the artifact/state RMW. Bite check: remove the
+    // `ChangeLock::acquire` at the top of execute_apply (the core no longer
+    // self-locks) and apply proceeds to create the GX branch while the lock is
+    // held - both assertions below fail.
+    with_data_home(|| {
+        let ws = TempDir::new().unwrap();
+        let scripts = TempDir::new().unwrap();
+        let (repo_path, _branch) = repo_with_remote(ws.path());
+        let repo = Repo::new(repo_path.clone()).unwrap();
+        let agent = fake_agent(scripts.path(), "printf 'applied\\n' > README.md");
+        let config = llm_config(agent.to_str().unwrap());
+        let change_id = "GX-apply-serialize";
+        execute_propose(
+            std::slice::from_ref(&repo),
+            change_id,
+            "rewrite",
+            &config,
+            1,
+        )
+        .unwrap();
+
+        // Simulate a concurrent apply/undo already holding this change's lock.
+        // (flock is per-open-fd, so this same-process second acquire inside
+        // execute_apply contends and fails fast - Phase 2's proven property.)
+        let held = crate::lock::ChangeLock::acquire(change_id).unwrap();
+
+        let err = execute_apply(
+            change_id,
+            Some("apply"),
+            None,
+            &config,
+            1,
+            Confirmation::AlreadyConfirmed,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("locked"),
+            "apply must fail fast while the change lock is held: {err}"
+        );
+        assert!(
+            !local_branch_exists(&repo_path, change_id),
+            "a lock-blocked apply must not create the GX branch (no interleaving)"
+        );
+        drop(held);
+    });
+}
