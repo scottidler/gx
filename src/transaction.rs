@@ -421,6 +421,10 @@ impl Transaction {
         // Stamp `finalizing` write-ahead: a crash from here on leaves a recovery
         // file that keeps the pushed work (execute restores only the environment).
         self.set_phase(Phase::Finalizing)?;
+        // Crash hook (Phase 8): `finalizing` is stamped and the recovery file
+        // still holds every keep-work step; recovery keeps the shared work
+        // (remote branch retained) and restores only the environment.
+        crate::crash::maybe_crash("mid-finalize");
         let mut outcome = FinalizeOutcome::default();
 
         if let Some(branch) = &self.original_branch {

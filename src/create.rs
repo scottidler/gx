@@ -502,6 +502,10 @@ fn process_single_repo(
                             format!("Failed to persist recovery: {e}"),
                         );
                     }
+                    // Crash hook (Phase 8): the stash exists and its restore step
+                    // is persisted (phase `mutating`); an abort here must recover
+                    // to a byte-identical worktree with the branch never created.
+                    crate::crash::maybe_crash("after-stash");
                 }
                 Err(e) => {
                     // The stash was never created; roll back to clear the
@@ -535,15 +539,23 @@ fn process_single_repo(
             );
         }
     };
+    // Write-ahead: ALWAYS register the switch-back to the user's original branch,
+    // even in the common `head == original_branch` case where no switch-to-head
+    // is needed. Keep-work recovery (`pushed`/`finalizing`) restores the
+    // environment by executing SwitchBranch/PopStash steps ONLY; without this
+    // step, a keep-work recovery after a push/finalize crash would strand the
+    // user on the GX branch instead of returning them to their original branch
+    // (finalize's own switch-back never runs on a crash). In full reverse this
+    // step is a harmless no-op: DeleteLocalBranch already force-switches off the
+    // GX branch to head, which equals the original branch in the common case.
+    if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::SwitchBranch {
+        repo: repo_path.clone(),
+        branch: original_branch.clone(),
+    }) {
+        transaction.rollback();
+        return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
+    }
     if head != original_branch {
-        // Write-ahead: persist the switch-back before switching away.
-        if let Err(e) = transaction.push_step(crate::transaction::RollbackStep::SwitchBranch {
-            repo: repo_path.clone(),
-            branch: original_branch.clone(),
-        }) {
-            transaction.rollback();
-            return dry_run_error(repo, change_id, format!("Failed to persist recovery: {e}"));
-        }
         if let Err(e) = git::switch_branch(repo_path, &head) {
             transaction.rollback();
             return dry_run_error(
@@ -1088,6 +1100,9 @@ fn commit_changes_with_rollback(
     })?;
     git::create_branch(repo_path, change_id)
         .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
+    // Crash hook (Phase 8): the GX branch exists and its delete step is
+    // persisted (phase `mutating`); recovery full-reverses, remote branch absent.
+    crate::crash::maybe_crash("after-branch");
 
     // Record the pre-commit HEAD so rollback resets to a known target, and
     // register the reset write-ahead before committing.
@@ -1100,15 +1115,24 @@ fn commit_changes_with_rollback(
     // Stage only the specific files we modified - never "git add .".
     git::add_files(repo_path, files_affected).context("Failed to stage files")?;
     git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
+    // Crash hook (Phase 8): the commit is on the GX branch and the reset step is
+    // persisted (phase `mutating`); recovery full-reverses, remote branch absent.
+    crate::crash::maybe_crash("after-commit");
 
     // Stamp `pushing` write-ahead: a kill after this stamp but before the push
     // completes is classified at recovery time by a read-only ls-remote probe.
     // Rollback no longer registers a remote-delete step - `gx undo` owns remote
     // reversal, so nothing on the rollback path can ever delete a pushed branch.
     transaction.set_phase(Phase::Pushing)?;
+    // Crash hook (Phase 8): `pushing` is stamped but the push has NOT run; the
+    // ls-remote probe finds the branch absent and dispatches a full reverse.
+    crate::crash::maybe_crash("before-push");
     git::push_branch(repo_path, change_id).context("Failed to push branch")?;
     // Stamp `pushed`: the branch is now shared; recovery keeps the work.
     transaction.set_phase(Phase::Pushed)?;
+    // Crash hook (Phase 8): the branch is pushed and `pushed` is stamped;
+    // recovery keeps the shared work (remote branch retained).
+    crate::crash::maybe_crash("after-push");
 
     Ok(expected_sha)
 }

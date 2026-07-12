@@ -672,3 +672,139 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None. No cross-repo/system-mutating bullets in Phase 7.
+
+## Phase 8: Crash-injection tests
+
+### Design decisions
+- New `src/crash.rs` module (`pub mod crash` in `lib.rs`, `mod crash` in
+  `main.rs`) exposing `maybe_crash(point)` + the `CRASH_POINTS` vocabulary and
+  the `GX_CRASH_POINT` env-var name. Compiled into every build, INERT unless
+  `$GX_CRASH_POINT` names a point; on a match it logs and calls
+  `std::process::abort()` (NOT `exit`) so NO `Drop` runs and the write-ahead
+  recovery file/backups are left exactly as a real SIGKILL would — the whole
+  point of the hook. Every crash point sits AFTER the write-ahead persist that
+  makes it recoverable.
+- Six call sites wired at the exact phase boundaries: `after-stash`,
+  `after-branch`, `after-commit`, `before-push` (after the `pushing` stamp,
+  before `git push`), `after-push` (after the `pushed` stamp) in
+  `src/create.rs`, and `mid-finalize` (after the `finalizing` stamp) in
+  `src/transaction.rs:Transaction::finalize`.
+- `maybe_crash` fails LOUD on a typo'd point: a set-but-unrecognized
+  `$GX_CRASH_POINT` logs an error naming the known vocabulary and no-ops, rather
+  than silently never crashing (also gives `CRASH_POINTS` a real production use
+  so it is not dead code) — `src/crash.rs:maybe_crash`.
+- e2e crash matrix (`tests/e2e_crash_injection.rs:test_crash_matrix_all_six_points`):
+  one dirty single-repo fixture with a bare remote per point (dirty via an
+  untracked `wip.txt`, so every run stashes and arms `after-stash`; a tracked
+  0755 `run.sh` proves git's tracked exec bit survives). For each of the six
+  points: spawn the REAL `gx create --commit`, assert it dies; read the sole
+  recovery file and assert its recorded phase; assert `gx rollback list` shows
+  `Phase: <expected>`; run `gx rollback execute --force --yes`; then assert
+  worktree byte-identity and remote/local branch retention.
+- Worktree byte-identity is asserted via a `worktree_snapshot` = HEAD sha +
+  sorted `git status --porcelain` + `git ls-files -s` (tracked mode + blob sha)
+  + the two data files' contents, compared before/after. This is the MODE
+  CAVEAT-correct comparison: git tracks only the exec bit (100755/100644), and
+  `finalize`'s branch switch recreates changed files under the process umask, so
+  raw `std::fs` rwx bits would false-fail on group-bit drift — `ls-files -s`
+  compares git's own tracked state (mode + blob) instead.
+- Remote/local retention matrix: `after-push`/`mid-finalize` (`pushed`/
+  `finalizing` -> keep-work) RETAIN the branch remote AND local; `before-push`
+  (`pushing` -> ls-remote probe finds it absent -> full reverse) and the three
+  `mutating` points (`after-stash`/`after-branch`/`after-commit`) leave the
+  branch ABSENT.
+- Direct tests added to `src/transaction/tests.rs`:
+  `test_execute_recovery_against_real_interrupted_run_file` (recovery from a file
+  a real `Transaction` persisted, not a hand-authored fixture),
+  `test_finalize_stash_conflict_surfaces_stash_error` (the Q2
+  `FinalizeOutcome.stash_error` path: a conflicting stash re-apply surfaces the
+  SHA and leaves the stash undropped), and
+  `test_legacy_delete_remote_branch_file_executes_as_skipped_legacy`
+  (hand-authored JSON with the pre-rename `DeleteRemoteBranch` key loads via the
+  serde alias and executes as `skipped-legacy`, converging + cleaning up).
+- Grep-guard (`src/crash/tests.rs:test_crash_hook_call_sites_are_exactly_the_wired_points`):
+  scans production source (excludes `*/tests.rs` and the hook's own module),
+  asserts EXACTLY six `crate::crash::maybe_crash("<point>")` call sites, one per
+  vocabulary point, only in `create.rs` (5) and `transaction.rs` (1), no call
+  with an unknown point, and that `std::process::abort(` appears in no
+  production file but the hook (Risks-table mitigation). Plus a behavioral
+  inertness test that `maybe_crash` returns without aborting when the env var is
+  unset or names a different point.
+- `gx rollback list` and `gx rollback validate` now surface the recorded phase
+  (and `list` a per-step status summary; `validate` a per-step status line) —
+  `src/rollback.rs`. See Deviations: this closes an API-table item Phase 2 left
+  unimplemented and is load-bearing for the crash matrix's "list shows the right
+  phase" assertion.
+
+### Deviations
+- **Behavior fix in the create path (correct seam, recorded):** the design's
+  keep-work recovery ("execute SwitchBranch/PopStash step kinds") presupposes a
+  SwitchBranch-to-original step exists, but Phase 2/3 only registered one when
+  `head != original_branch`. In the common case (user already on the base
+  branch) NO switch-back step existed, so a keep-work recovery after an
+  `after-push`/`mid-finalize` crash would strand the worktree on the GX branch
+  (finalize's own switch-back never runs on a crash). Fixed by ALWAYS registering
+  the write-ahead `SwitchBranch { branch: original }` step in
+  `commit_changes_with_rollback`; the actual switch-to-head stays conditional.
+  This is a NO-OP for full reverse (DeleteLocalBranch already force-switches off
+  the GX branch to head, which equals original in the common case), so no
+  full-reverse test changed — `src/create.rs`. Same effect the design intends,
+  correct seam; the crash matrix is what exposed it.
+- `gx rollback list`/`validate` gaining the phase (+ per-step status) output was
+  listed in the design's API table but not implemented in Phase 2. Added here
+  because the Phase 8 crash matrix asserts `list` shows the right phase and the
+  Phase 8 direct-test bullet covers `list`/`validate` output. Small, aligned
+  with the API table, `src/rollback.rs`.
+- Exact signatures/placement are approximate in the doc; the hook is a single
+  `crate::crash::maybe_crash(point)` seam rather than inline `if env::var(...)`
+  blocks at each site, keeping the six call sites one-liners and grep-checkable.
+  Same effect, correct seam.
+- The crash matrix uses ONE repo per point (not a multi-repo org) so the crash
+  fires deterministically and the recovery file is unambiguous (`abort()` kills
+  the whole process, so multiple in-flight repos would race). The design says
+  "a fixture org with bare remotes"; a single-repo org per point is the precise
+  form that makes the phase assertion deterministic. Same effect.
+
+### Tradeoffs
+- The e2e spawns the real binary and aborts it (real SIGKILL-equivalent) rather
+  than simulating a crash in-process, per F15's mandate ("no test kills a real
+  process"). Cost: six full `gx create` spawns + rollbacks (~8s total); accepted
+  as the whole point of the phase.
+- `maybe_crash` reads the env var on every call (six times per committing run)
+  rather than caching it once. A committing gx run makes far heavier git/network
+  calls per repo; one `getenv` per phase boundary is negligible and keeps the
+  hook a pure, stateless, inert-by-default function.
+- The grep-guard matches the fully-qualified `crate::crash::maybe_crash(` form
+  and excludes test files. A call written as `maybe_crash(` after a local `use`
+  would evade it; accepted because the repo convention (and every wired site)
+  uses the fully-qualified form, and the exclusion is required so the guard does
+  not count its own assertion strings.
+
+### Break-the-code proofs
+- **Phase 1 retain-on-failure (REQUIRED bite):** temporarily reverted
+  `Transaction::execute_recovery`'s `FullReverse` arm to remove artifacts
+  unconditionally (dropping the `if !state.all_complete() { return Err }`
+  guard). `cargo test --lib test_rollback_retains_artifacts_on_failed_step`
+  then FAILED (panic at `src/transaction/tests.rs:407` — the first run no longer
+  surfaces an error / the recovery file no longer survives). Restored; test
+  passes again.
+- **Phase 8 keep-work switch-back fix (crash matrix bite):** temporarily
+  reverted `commit_changes_with_rollback` to register the SwitchBranch step only
+  when `head != original` (the pre-Phase-8 behavior). `cargo test --test
+  e2e_crash_injection` then FAILED with `[after-push] worktree must be
+  byte-identical to pre-run after recovery` (keep-work stranded the worktree on
+  the GX branch). Restored; the full six-point matrix passes again. This proves
+  both that the crash matrix bites and that the switch-back fix is load-bearing.
+- Bite rationale for the other new tests (not separately re-run, cheap-revert
+  cost not warranted; each targets an already-bite-proven earlier-phase fix):
+  `test_execute_recovery_against_real_interrupted_run_file` exercises the same
+  Phase 1/2 journal+phase machinery already bite-proven by the retain test;
+  `test_finalize_stash_conflict_surfaces_stash_error` pins the Phase 2 Q2
+  conflict policy (drop the stash and it disappears — the pre-Q2 footgun);
+  `test_legacy_delete_remote_branch_file_executes_as_skipped_legacy` pins the
+  Phase 2 retire-not-delete decision (remove the serde alias / no-op and the
+  file fails to load or mutates a remote); the grep-guard fails the instant a
+  seventh crash site or a stray `abort()` is added.
+
+### Open questions
+- None. No cross-repo/system-mutating bullets in Phase 8.

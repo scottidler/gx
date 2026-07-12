@@ -10,6 +10,7 @@ mod cleanup;
 mod cli;
 mod clone;
 mod config;
+mod crash;
 mod create;
 mod diff;
 mod doctor;

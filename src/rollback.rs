@@ -107,6 +107,7 @@ fn list_recovery_states() -> Result<()> {
         );
         println!("   Change ID: {}", state.change_id);
         println!("   Repository: {}", state.repo_path.display());
+        println!("   Phase: {}", phase_label(state.phase));
         println!(
             "   Created: {} ({} ago)",
             created_time.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -122,6 +123,17 @@ fn list_recovery_states() -> Result<()> {
             }
             for (kind, count) in type_counts {
                 println!("     {} {}: {}", "•".blue(), kind, count);
+            }
+
+            // Per-step journal status summary (design API table: `list` adds a
+            // per-step status summary): count how many steps are in each state.
+            println!("   Step Status:");
+            let mut status_counts = std::collections::BTreeMap::new();
+            for entry in &state.steps {
+                *status_counts.entry(status_label(entry.status)).or_insert(0) += 1;
+            }
+            for (status, count) in status_counts {
+                println!("     {} {}: {}", "•".blue(), status, count);
             }
         }
         println!();
@@ -291,7 +303,16 @@ fn validate_recovery(transaction_id: &str) -> Result<()> {
             .blue()
     );
     println!("   Created: {}", state.created_at);
+    println!("   Phase: {}", phase_label(state.phase));
     println!("   Steps: {}", state.steps.len());
+    for entry in &state.steps {
+        println!(
+            "     {} {} [{}]",
+            "•".blue(),
+            step_kind(&entry.step),
+            status_label(entry.status)
+        );
+    }
     println!();
 
     let (errors, warnings) = validate_recovery_state(&state);

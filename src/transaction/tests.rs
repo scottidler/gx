@@ -865,6 +865,185 @@ fn test_execute_pushing_phase_with_remote_keeps_work() {
     });
 }
 
+// ---- Phase 8: crash-injection direct tests (F15) ----
+
+#[test]
+fn test_execute_recovery_against_real_interrupted_run_file() {
+    // Drive a Transaction through a real mutating-phase forward run (branch +
+    // commit) that persists its own recovery file, then "crash" by never
+    // finalizing and recover from the file the transaction itself wrote (not a
+    // hand-authored fixture). This exercises execute_recovery end to end against
+    // the exact on-disk shape the create path produces.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+
+    with_data_home(data.path(), || {
+        let base = crate::git::get_current_branch_name(repo.path()).unwrap();
+        let sha_before = crate::git::get_head_sha(repo.path()).unwrap();
+
+        let mut tx = Transaction::new(repo.path().to_path_buf(), "GX-int".to_string(), true);
+        let tx_id = tx.transaction_id.clone();
+        tx.set_original_branch(base.clone());
+        tx.set_branch("GX-int".to_string());
+
+        // Forward mutation mirroring commit_changes_with_rollback (mutating phase).
+        tx.push_step(RollbackStep::DeleteLocalBranch {
+            repo: repo.path().to_path_buf(),
+            branch: "GX-int".to_string(),
+            branch_existed: false,
+        })
+        .unwrap();
+        git(&["checkout", "-q", "-b", "GX-int"], repo.path());
+        tx.push_step(RollbackStep::ResetCommit {
+            repo: repo.path().to_path_buf(),
+            expected_sha: sha_before.clone(),
+        })
+        .unwrap();
+        std::fs::write(repo.path().join("README.md"), "MUTATED\n").unwrap();
+        git(&["add", "-A"], repo.path());
+        git(&["commit", "--quiet", "-m", "gx change"], repo.path());
+        assert_ne!(crate::git::get_head_sha(repo.path()).unwrap(), sha_before);
+
+        // "Crash": drop the transaction without finalizing. The recovery file the
+        // transaction persisted survives on disk.
+        drop(tx);
+        let loaded = Transaction::load_recovery_state(&tx_id).unwrap();
+        assert_eq!(loaded.phase, Phase::Mutating);
+        assert_eq!(loaded.steps.len(), 2);
+
+        // Recover from the real file.
+        let outcome = Transaction::execute_recovery(&tx_id).unwrap();
+        assert_eq!(outcome, RecoveryOutcome::FullReverse);
+
+        // Worktree is back at the pre-run safe point: on base, GX branch gone,
+        // README restored, artifacts cleaned up.
+        assert_eq!(
+            crate::git::get_current_branch_name(repo.path()).unwrap(),
+            base
+        );
+        assert!(!crate::git::branch_exists_locally(repo.path(), "GX-int").unwrap());
+        assert_eq!(crate::git::get_head_sha(repo.path()).unwrap(), sha_before);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "# repo\n"
+        );
+        assert!(Transaction::load_recovery_state(&tx_id).is_err());
+    });
+}
+
+#[test]
+fn test_finalize_stash_conflict_surfaces_stash_error() {
+    // The Q2 conflict path: finalize re-applies the stash, the apply conflicts,
+    // and the outcome carries `stash_error` with the SHA (the stash is NOT
+    // dropped, so the user can recover it manually). Exercised directly.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+
+    with_data_home(data.path(), || {
+        git(&["init", "--quiet"], repo.path());
+        git(&["config", "user.email", "t@e.com"], repo.path());
+        git(&["config", "user.name", "T"], repo.path());
+        git(&["config", "commit.gpgsign", "false"], repo.path());
+        std::fs::write(repo.path().join("data.txt"), "base\n").unwrap();
+        git(&["add", "-A"], repo.path());
+        git(&["commit", "--quiet", "-m", "init"], repo.path());
+
+        let base = crate::git::get_current_branch_name(repo.path()).unwrap();
+
+        // WIP: modify the tracked file, stash it (base -> wip), tree back to base.
+        std::fs::write(repo.path().join("data.txt"), "wip\n").unwrap();
+        let sha = crate::git::stash_save_with_untracked(repo.path(), "GX auto-stash").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("data.txt")).unwrap(),
+            "base\n"
+        );
+
+        // Now the same file's committed content diverges (as a pull would bring):
+        // re-applying the stash's base->wip diff onto "pulled" conflicts.
+        std::fs::write(repo.path().join("data.txt"), "pulled\n").unwrap();
+        git(&["add", "-A"], repo.path());
+        git(&["commit", "--quiet", "-m", "divergent"], repo.path());
+
+        let mut tx = Transaction::new(repo.path().to_path_buf(), "GX-conf".to_string(), true);
+        tx.set_original_branch(base);
+        tx.set_stash_sha(sha.clone());
+
+        let outcome = tx.finalize().unwrap();
+        assert!(
+            !outcome.stash_restored,
+            "a conflicting apply is not a clean restore"
+        );
+        let (err_sha, _msg) = outcome
+            .stash_error
+            .expect("a stash-apply conflict must surface as stash_error");
+        assert_eq!(err_sha, sha, "stash_error must carry the stash SHA");
+
+        // The stash was NOT dropped: it is still recoverable.
+        let list = run_git_command(&["stash", "list"], repo.path());
+        assert!(
+            !String::from_utf8_lossy(&list.stdout).trim().is_empty(),
+            "the conflicting stash must be preserved, not dropped"
+        );
+    });
+}
+
+#[test]
+fn test_legacy_delete_remote_branch_file_executes_as_skipped_legacy() {
+    // A recovery file hand-authored with the PRE-RENAME step name
+    // `DeleteRemoteBranch` (as an older gx serialized it) must load via the serde
+    // alias, and executing it must mark that step `skipped-legacy` (never touching
+    // a remote) so the recovery converges and cleans up.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+
+    with_data_home(data.path(), || {
+        let tx_id = "tx-legacy-file";
+        let recovery_dir = data.path().join("gx").join("recovery");
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+        let json = format!(
+            r#"{{
+                "transaction_id": "{tx_id}",
+                "change_id": "GX-legacy",
+                "repo_path": {repo:?},
+                "created_at": "2026-07-11T00:00:00Z",
+                "phase": "pushed",
+                "branch": "GX-legacy",
+                "steps": [
+                    {{ "step": {{ "SwitchBranch": {{ "repo": {repo:?}, "branch": "{base}" }} }}, "status": "pending" }},
+                    {{ "step": {{ "DeleteRemoteBranch": {{ "repo": {repo:?}, "branch": "GX-legacy" }} }}, "status": "pending" }}
+                ]
+            }}"#,
+            repo = repo.path(),
+            base = crate::git::get_current_branch_name(repo.path()).unwrap(),
+        );
+        std::fs::write(recovery_dir.join(format!("{tx_id}.json")), json).unwrap();
+
+        // Loads via the alias as the retired variant.
+        let loaded = Transaction::load_recovery_state(tx_id).unwrap();
+        assert!(matches!(
+            loaded.steps[1].step,
+            RollbackStep::LegacyDeleteRemoteBranch { .. }
+        ));
+
+        // `pushed` phase -> keep-work; the legacy step is a no-op marked
+        // skipped-legacy regardless. Since only env-restore + skipped-legacy
+        // steps run/complete and none fail, the recovery converges.
+        let outcome = Transaction::execute_recovery(tx_id).unwrap();
+        assert_eq!(
+            outcome,
+            RecoveryOutcome::KeepWork {
+                branch: Some("GX-legacy".to_string())
+            }
+        );
+        assert!(
+            !recovery_file(tx_id).unwrap().exists(),
+            "a skipped-legacy step must converge and clean up"
+        );
+    });
+}
+
 #[test]
 fn test_no_remote_mutation_reachable_from_rollback() {
     // Grep-proof: no code path from `rollback` reaches a remote-mutating git/gh

@@ -6,6 +6,7 @@ pub mod cleanup;
 pub mod cli;
 pub mod clone;
 pub mod config;
+pub mod crash;
 pub mod create;
 pub mod diff;
 pub mod doctor;
