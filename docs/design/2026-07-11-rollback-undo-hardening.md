@@ -653,3 +653,57 @@ Severity: C=critical, H=high, M=medium, L=low. All verified against v0.3.2
 | F13 | L | String-sniffed git errors | `cleanup.rs:268`, `git.rs:1369` | 7 |
 | F14 | L | `Failed`/`Abandoned` unreachable; failed campaigns never age out | `state.rs:337-340` | 4 |
 | F15 | L | No test kills a real process, runs the rollback CLI, or executes remote deletion | `tests/`, `transaction/tests.rs` | 8 |
+
+## Implementation Audit Addendum (2026-07-12)
+
+The 8 phases landed one commit each (`743f3f3`..`b515570`), then a review-panel
+implementation audit ran (Architect/Gemini + Staff Engineer/Codex, Mode 2).
+Split verdict: Architect PASS (zero gaps); Staff Engineer found unhappy-path
+robustness gaps. Both confirmed the load-bearing invariant (no remote-mutating
+call reachable from `rollback`). Findings were adjudicated against the code and
+resolved over two hardening commits, then re-audited to consensus.
+
+### Findings and resolution
+
+- **A1 [Critical] F12 not fail-closed.** `record_pushed_state` was best-effort
+  and `finalize()` deleted the recovery file unconditionally, and
+  `StateManager::new()` degraded to `None` with a warning in commit mode. On a
+  double fault (push succeeds, then state save fails or the manager is absent) a
+  pushed branch was recorded in NEITHER store, breaking the design's F12
+  guarantee. **Fixed** (`15f2397`): commit-mode `StateManager::new()` failure is
+  now a hard error before any repo is mutated; `record_pushed_state` returns a
+  result and the recovery file is deleted ONLY when the pushed safe point is
+  durably saved (else `finalize_retaining_recovery()` keeps it and the repo is
+  reported `Committed` with the retained path). Invariant now enforced: recovery
+  file deleted implies state contains the repo.
+- **A2 [Med] undo offline merged-state hazard.** When GitHub reconcile failed,
+  `gx undo` could plan branch-deletion instead of a revert for a merged PR.
+  **Fixed** (`15f2397`): an org whose PR state cannot be verified is held
+  `UnverifiedOffline` (no remote mutation); local-only cleanup and recovery
+  drains still proceed.
+- **A3 [Med] `cleanup_old` TOCTOU.** The first fix locked the delete but decided
+  from a stale pre-lock `list()` snapshot, so a change revived between the
+  listing and the lock could be wrongly deleted. **Fixed** (`f8a3d26`):
+  `cleanup_if_stale` reloads the change file under its `ChangeLock` and
+  re-evaluates the predicate on the fresh copy; lock now covers reload +
+  re-check + delete.
+- **A4 [new gap] undo stranded a recovery-only pushed REMOTE.** The A1 retain
+  path points the user at `gx undo`, but undo refused to run without a
+  change-state file and classified a recovery-only repo as local-only regardless
+  of recovery phase, orphaning the pushed remote branch. **Fixed** (`f8a3d26`):
+  undo runs from recovery files alone; a recovery-only `Pushed`/`Finalizing`/
+  `Pushing` repo is classified pushed-no-PR and its REMOTE branch is deleted
+  (pre-probed with `ls-remote --exit-code`) before the recovery record is
+  discarded; a `Mutating`-phase recovery-only repo stays local-only.
+- **[Pushed back] review approve/delete best-effort state save.** A state-save
+  failure after a GitHub merge/delete is logged, not surfaced on the result.
+  Left as-is by design: `gx review sync` is the reconciliation mechanism that
+  trues this up, so the loop is self-healing. Not a defect.
+
+Each fix carries a biting test with a break-the-code proof (recorded in the
+implementation-notes file). The Staff Engineer re-audited both hardening commits
+and confirmed all findings CLOSED with no new gap. Consensus reached; no open
+questions remain.
+
+**Shipped in:** hardening commits `15f2397` and `f8a3d26` on top of the 8 phase
+commits. (Release version recorded here once the tag is cut.)
