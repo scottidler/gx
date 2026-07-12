@@ -152,6 +152,70 @@ fn build_plan_adds_recovery_only_repo_as_committed_local_only() {
 }
 
 #[test]
+fn build_plan_classifies_recovery_only_repo_by_phase() {
+    // FIX B (second post-audit hardening): a recovery-only repo (recorded ONLY
+    // in a recovery file, F12) must be classified by its recovery PHASE, not
+    // unconditionally local-only. A pushed-phase crash (`Pushed`/`Finalizing`,
+    // or a `Pushing` stamp) is a pushed-no-PR entry whose REMOTE branch undo
+    // must delete; only a pre-push `Mutating` crash stays local-only.
+    //
+    // Break-the-code proof: the pre-fix `build_plan` hardcoded
+    // `action: UndoAction::DeleteLocal` for every recovery-only repo, so the
+    // pushed/finalizing/pushing assertions below (DeleteRemoteAndLocal) fail.
+    // Fabricated (non-git) paths: build_plan resolves a slug via `Repo::new`,
+    // which falls back gracefully when the path is not a git checkout. The
+    // classification under test depends only on the recorded `phase`.
+    let make_rec = |tx: &str, phase: Phase| RecoveryState {
+        version: 1,
+        transaction_id: tx.to_string(),
+        change_id: "GX-phase".to_string(),
+        repo_path: PathBuf::from(format!("/nonexistent/gx-phase-test/{tx}")),
+        created_at: "2026-07-11T00:00:00Z".to_string(),
+        phase,
+        branch: Some("GX-phase".to_string()),
+        steps: vec![],
+    };
+
+    let state = ChangeState::new("GX-phase".to_string(), None);
+    let recs = vec![
+        make_rec("tx-mutating", Phase::Mutating),
+        make_rec("tx-pushing", Phase::Pushing),
+        make_rec("tx-pushed", Phase::Pushed),
+        make_rec("tx-finalizing", Phase::Finalizing),
+    ];
+
+    let plan = build_plan(&state, &recs, &[], &BTreeSet::new());
+    let action_for = |tx: &str| {
+        plan.iter()
+            .find(|p| p.recovery_tx_ids == vec![tx.to_string()])
+            .unwrap()
+            .action
+            .clone()
+    };
+
+    assert_eq!(
+        action_for("tx-mutating"),
+        UndoAction::DeleteLocal,
+        "a pre-push mutating crash stays local-only"
+    );
+    assert_eq!(
+        action_for("tx-pushing"),
+        UndoAction::DeleteRemoteAndLocal,
+        "a pushing-phase crash must reverse the remote (pre-probe makes an unpushed branch a no-op)"
+    );
+    assert_eq!(
+        action_for("tx-pushed"),
+        UndoAction::DeleteRemoteAndLocal,
+        "a pushed-phase recovery-only repo must delete its remote branch"
+    );
+    assert_eq!(
+        action_for("tx-finalizing"),
+        UndoAction::DeleteRemoteAndLocal,
+        "a finalizing-phase recovery-only repo must delete its remote branch"
+    );
+}
+
+#[test]
 fn build_plan_holds_remote_action_when_org_unverified() {
     // FIX 2 (post-audit hardening): when a repo's org fetch FAILED during
     // reconcile, its merge state is UNVERIFIED -- a repo recorded PrOpen might
@@ -624,6 +688,157 @@ fn undo_one_treats_never_pushed_remote_branch_as_no_op() {
     match prior_path {
         Some(v) => unsafe { std::env::set_var("PATH", v) },
         None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_data_home {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}
+
+#[test]
+#[cfg(unix)]
+fn undo_one_recovery_only_pushed_deletes_remote_and_local() {
+    // FIX B (second post-audit hardening): a recovery-only `Pushed`-phase repo
+    // (recorded ONLY in a recovery file, no state entry) must have its REMOTE
+    // GX branch deleted, not just the local one -- honoring the design's undo
+    // table ("pushed, no PR -> delete remote branch -> delete local branch").
+    // The remote delete is ordered BEFORE the drain removes the recovery file,
+    // so a crash can never strand the remote with no record.
+    //
+    // Break-the-code proof: with the pre-fix `build_plan` (recovery-only ->
+    // `DeleteLocal`) the action carries no remote delete, so the remote GX
+    // branch survives and the `!branch_on_bare` assertion fails.
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+    let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+    let prior_path = std::env::var("PATH").ok();
+    let prior_remotes = std::env::var("GX_TEST_REMOTES").ok();
+
+    let data_home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    // A bare remote with `main` pushed, and a GX branch pushed to it.
+    let remotes = TempDir::new().unwrap();
+    let bare = remotes.path().join("repo.git");
+    run_git_command(
+        &["init", "--quiet", "--bare", bare.to_str().unwrap()],
+        remotes.path(),
+    );
+
+    let repo_dir = TempDir::new().unwrap();
+    let repo = repo_dir.path();
+    run_git_command(&["init", "--quiet", "-b", "main"], repo);
+    run_git_command(&["config", "user.email", "t@e.com"], repo);
+    run_git_command(&["config", "user.name", "T"], repo);
+    run_git_command(&["config", "commit.gpgsign", "false"], repo);
+    std::fs::write(repo.join("README.md"), "# r\n").unwrap();
+    run_git_command(&["add", "-A"], repo);
+    run_git_command(&["commit", "--quiet", "-m", "init"], repo);
+    run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
+    run_git_command(&["push", "--quiet", "-u", "origin", "main"], repo);
+    // The GX branch: created locally AND pushed to the remote (the pushed crash).
+    run_git_command(&["branch", "GX-recovery-only"], repo);
+    run_git_command(&["push", "--quiet", "origin", "GX-recovery-only"], repo);
+    assert!(
+        branch_on_bare(&bare, "GX-recovery-only"),
+        "sanity: GX branch must be on the remote before undo"
+    );
+
+    // A live `Pushed`-phase recovery file for this repo (no state entry).
+    let tx_id = "gx-tx-recovery-only-1";
+    let rec = RecoveryState {
+        version: 1,
+        transaction_id: tx_id.to_string(),
+        change_id: "GX-recovery-only".to_string(),
+        repo_path: repo.to_path_buf(),
+        created_at: "2026-07-11T00:00:00Z".to_string(),
+        phase: Phase::Pushed,
+        branch: Some("GX-recovery-only".to_string()),
+        steps: vec![],
+    };
+    let recovery_dir = data_home.path().join("gx").join("recovery");
+    fs::create_dir_all(&recovery_dir).unwrap();
+    let recovery_file = recovery_dir.join(format!("{tx_id}.json"));
+    fs::write(&recovery_file, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+
+    // A `gh` shim that performs the REAL ref delete on the DELETE api call,
+    // locating the bare via `$GX_TEST_REMOTES`; any other invocation fails loud.
+    let shim = r#"#!/bin/sh
+if [ "$1" = "api" ]; then
+  path="$2"
+  case "$path" in
+    repos/*/git/refs/heads/*)
+      rest="${path#repos/}"
+      rest="${rest#*/}"
+      repo="${rest%%/*}"
+      branch="${path#*refs/heads/}"
+      git --git-dir "$GX_TEST_REMOTES/$repo.git" update-ref -d "refs/heads/$branch"
+      exit $?
+      ;;
+  esac
+fi
+echo "gh shim: unexpected invocation: $*" >&2
+exit 1
+"#;
+    let shim_dir = TempDir::new().unwrap();
+    let gh = shim_dir.path().join("gh");
+    fs::write(&gh, shim).unwrap();
+    let mut perms = fs::metadata(&gh).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh, perms).unwrap();
+    let new_path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe {
+        std::env::set_var("PATH", &new_path);
+        std::env::set_var("GX_TEST_REMOTES", remotes.path());
+    }
+
+    // The recovery-only plan `build_plan` produces for a pushed-phase repo.
+    let plan = UndoPlan {
+        slug: "org/repo".to_string(),
+        repo_path: Some(repo.to_path_buf()),
+        branch: Some("GX-recovery-only".to_string()),
+        pr_number: None,
+        status: None,
+        action: UndoAction::DeleteRemoteAndLocal,
+        recovery_tx_ids: vec![tx_id.to_string()],
+        merge_commit_oid: None,
+        base_ref_name: None,
+    };
+
+    let outcome = undo_one(&plan, "GX-recovery-only", &Config::default());
+
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Undone,
+        "recovery-only pushed undo should succeed: {:?}",
+        outcome.kind
+    );
+    assert!(
+        !branch_on_bare(&bare, "GX-recovery-only"),
+        "the REMOTE GX branch must be deleted (not stranded)"
+    );
+    assert!(
+        !crate::git::branch_exists_locally(repo, "GX-recovery-only").unwrap(),
+        "the local GX branch must be deleted"
+    );
+    assert!(
+        !recovery_file.exists(),
+        "the drained recovery file must be removed"
+    );
+
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_remotes {
+        Some(v) => unsafe { std::env::set_var("GX_TEST_REMOTES", v) },
+        None => unsafe { std::env::remove_var("GX_TEST_REMOTES") },
     }
     match prior_data_home {
         Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },

@@ -22,7 +22,7 @@ use crate::output::{display_review_results, StatusOptions};
 use crate::repo::Repo;
 use crate::review::{ReviewAction, ReviewResult};
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus, StateManager};
-use crate::transaction::{RecoveryState, Transaction};
+use crate::transaction::{Phase, RecoveryState, Transaction};
 use eyre::{Context, Result};
 use log::{debug, info, warn};
 use rayon::prelude::*;
@@ -127,6 +127,23 @@ fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAct
     }
 }
 
+/// Classify a recovery-only (not-in-state) repo by its recovery `phase`,
+/// honoring the design's undo table ("pushed, no PR -> delete remote branch ->
+/// delete local branch"; undo OWNS all remote reversal).
+///
+/// A phase that records a completed push — `Pushed`/`Finalizing`, or a
+/// `Pushing` stamp whose branch may already be on the remote — is a
+/// pushed-no-PR entry: undo must delete the REMOTE branch then the local one.
+/// The remote delete is pre-probed (`ls-remote --exit-code`), so a `Pushing`
+/// crash that never actually pushed is a safe no-op, not an error. A pre-push
+/// `Mutating` crash is local-only.
+fn recovery_only_action(phase: Phase) -> UndoAction {
+    match phase {
+        Phase::Pushed | Phase::Finalizing | Phase::Pushing => UndoAction::DeleteRemoteAndLocal,
+        Phase::Mutating => UndoAction::DeleteLocal,
+    }
+}
+
 /// True when a plan entry has real work: a non-`AlreadyGone` action, or a
 /// recovery file to drain. `AlreadyGone` with no recovery is informational.
 /// `UnverifiedOffline` is actionable so it is REPORTED (never silently dropped).
@@ -222,24 +239,33 @@ fn build_plan(
         });
     }
 
-    // Recovery-only repos: committed local only, never recorded in state.
+    // Recovery-only repos: recorded ONLY in a recovery file (crash between push
+    // and state save, F12), never in the change state. Classify by the recovery
+    // `phase` so a pushed-phase crash's REMOTE branch is not stranded: a pushed
+    // recovery-only repo is a pushed-no-PR entry (delete remote -> local), a
+    // pre-push `Mutating` one stays local-only. Resolve a real `org/repo` slug
+    // from the checkout so the remote delete can hit the gh API — the path leaf
+    // alone is not a valid repo slug.
     for (i, rec) in recoveries.iter().enumerate() {
         if used[i] {
             continue;
         }
-        let slug = rec
+        let leaf = rec
             .repo_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>")
             .to_string();
+        let slug = crate::repo::Repo::new(rec.repo_path.clone())
+            .map(|r| r.slug)
+            .unwrap_or(leaf);
         plans.push(UndoPlan {
             slug,
             repo_path: Some(rec.repo_path.clone()),
             branch: rec.branch.clone(),
             pr_number: None,
             status: None,
-            action: UndoAction::DeleteLocal,
+            action: recovery_only_action(rec.phase),
             recovery_tx_ids: vec![rec.transaction_id.clone()],
             merge_commit_oid: None,
             base_ref_name: None,
@@ -403,41 +429,57 @@ fn reconcile(
     }
 }
 
-/// Delete the pushed branch: the remote branch (via the token-consistent gh
-/// helper) when `remote` is set, then the local branch resolved through the
-/// recorded path. A local branch that is already gone is a no-op (checked, not
-/// error-sniffed); a recorded-but-missing path is reported, never skipped.
-///
-/// F13: the remote delete is pre-probed with `git ls-remote --exit-code`
-/// before ever calling the gh API, so a never-pushed or already-deleted
-/// remote branch (a 404 from `gh api ... DELETE`) is a no-op for this repo,
-/// not a per-repo failure -- an item Phase 5 explicitly deferred to Phase 7.
+/// Delete the pushed branch: the remote branch (when `remote` is set) then the
+/// local branch. See [`remove_remote_branch`] / [`remove_local_branch`] for the
+/// per-side existence-check semantics.
 fn delete_branches(plan: &UndoPlan, config: &Config, remote: bool) -> Result<(), String> {
+    if remote {
+        remove_remote_branch(plan, config)?;
+    }
+    remove_local_branch(plan)
+}
+
+/// Delete the pushed REMOTE branch via the token-consistent gh helper.
+///
+/// F13: the branch is pre-probed with `git ls-remote --exit-code` first, so a
+/// never-pushed or already-deleted remote branch (a 404 from `gh api ... DELETE`)
+/// is a no-op for this repo, not a per-repo failure. When no local checkout is
+/// available to probe from, it falls back to attempting the delete.
+fn remove_remote_branch(plan: &UndoPlan, config: &Config) -> Result<(), String> {
     let branch = plan
         .branch
         .as_deref()
         .ok_or_else(|| "no branch recorded".to_string())?;
 
-    if remote {
-        let exists_remotely = match &plan.repo_path {
-            Some(path) if crate::bare::is_git_path(path) => {
-                git::remote_branch_exists_probe(path, branch)
-                    .map_err(|e| format!("cannot verify remote branch {branch} (offline?): {e}"))?
-            }
-            // No local checkout to probe from: fall back to attempting the
-            // delete (the prior behavior for this edge).
-            _ => true,
-        };
-        if exists_remotely {
-            github::delete_remote_branch(&plan.slug, branch, config)
-                .map_err(|e| format!("failed to delete remote branch {branch}: {e}"))?;
-        } else {
-            debug!(
-                "remote branch {branch} already absent for {}; no-op",
-                plan.slug
-            );
+    let exists_remotely = match &plan.repo_path {
+        Some(path) if crate::bare::is_git_path(path) => {
+            git::remote_branch_exists_probe(path, branch)
+                .map_err(|e| format!("cannot verify remote branch {branch} (offline?): {e}"))?
         }
+        // No local checkout to probe from: fall back to attempting the delete
+        // (the prior behavior for this edge).
+        _ => true,
+    };
+    if exists_remotely {
+        github::delete_remote_branch(&plan.slug, branch, config)
+            .map_err(|e| format!("failed to delete remote branch {branch}: {e}"))?;
+    } else {
+        debug!(
+            "remote branch {branch} already absent for {}; no-op",
+            plan.slug
+        );
     }
+    Ok(())
+}
+
+/// Delete the local branch resolved through the recorded checkout. An
+/// already-gone branch is a no-op (checked, not error-sniffed); a
+/// recorded-but-missing path is reported, never silently skipped.
+fn remove_local_branch(plan: &UndoPlan) -> Result<(), String> {
+    let branch = plan
+        .branch
+        .as_deref()
+        .ok_or_else(|| "no branch recorded".to_string())?;
 
     match &plan.repo_path {
         Some(path) if crate::bare::is_git_path(path) => {
@@ -480,6 +522,24 @@ fn undo_one(plan: &UndoPlan, change_id: &str, config: &Config) -> UndoOutcome {
         },
         None => None,
     };
+
+    // Ordering guarantee for a recovery-only pushed repo: the recovery file is
+    // the SOLE record of this pushed branch, and the drain below removes it.
+    // Delete the REMOTE branch FIRST — while that record still exists — so a
+    // crash between the drain and the remote delete can never strand the remote
+    // GX branch with no gx record (undo OWNS all remote reversal). Repos WITH a
+    // state entry keep their record in the change-state file across the whole
+    // undo, so their drain-first ordering is unaffected. The post-drain
+    // `DeleteRemoteAndLocal` arm re-probes the (now-absent) remote as a no-op
+    // and deletes the local branch.
+    let recovery_only_remote = plan.status.is_none()
+        && !plan.recovery_tx_ids.is_empty()
+        && matches!(plan.action, UndoAction::DeleteRemoteAndLocal);
+    if recovery_only_remote {
+        if let Err(e) = remove_remote_branch(plan, config) {
+            return outcome(OutcomeKind::Failed(e));
+        }
+    }
 
     // 1. Recovery-file drain FIRST (panel finding): a `mutating`-phase crash
     //    that left WIP in a recovery file must be reversed through the rollback
@@ -776,30 +836,51 @@ pub fn process_undo_command(
     info!("Starting undo for change ID: {change_id}");
 
     let manager = StateManager::new()?;
-    let state = manager
-        .load(change_id)?
-        .ok_or_else(|| eyre::eyre!("No change state recorded for {change_id}; nothing to undo"))?;
 
-    // Reconcile against GitHub reality first (Phase 4 sync), then reload. The
-    // merged PRs carry the merge commit oid + base branch the revert path needs.
-    // This planning copy is read-only from here on: the authoritative
-    // load-mutate-save happens once more, under the change lock, right before
-    // the final save below.
-    let Reconciliation {
-        merged_prs,
-        failed_orgs,
-    } = reconcile(change_id, org, &state, config);
-    let state = manager
-        .load(change_id)?
-        .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during reconcile"))?;
-
-    // Gather live recovery files for this change-id (F12: a pushed branch may
-    // be recorded only in a recovery file, not the state).
+    // Gather live recovery files for this change-id FIRST (F12): a pushed branch
+    // may be recorded ONLY in a recovery file, with NO change-state file at all
+    // (crash between push and state save). Undo must still reverse such a repo,
+    // remote included, so it is never stranded.
     let recoveries: Vec<RecoveryState> = Transaction::list_recovery_states()
         .unwrap_or_default()
         .into_iter()
         .filter(|r| r.change_id == change_id)
         .collect();
+
+    let state_existed = manager.load(change_id)?.is_some();
+    if !state_existed && recoveries.is_empty() {
+        // A fully-absent change: nothing to reverse. Idempotent no-op (a second
+        // undo of a recovery-only campaign lands here once the recovery files
+        // have been drained), matching the "already gone" convergence policy.
+        println!("Nothing to undo for {change_id}.");
+        return Ok(());
+    }
+
+    // Reconcile against GitHub reality (Phase 4 sync) only when a state file
+    // exists — reconcile needs the recorded repos/orgs, and a recovery-only
+    // campaign is local by nature. The merged PRs carry the merge commit oid +
+    // base branch the revert path needs. This planning copy is read-only from
+    // here on: the authoritative load-mutate-save happens once more, under the
+    // change lock, right before the final save below.
+    let (merged_prs, failed_orgs) = if state_existed {
+        let state = manager.load(change_id)?.ok_or_else(|| {
+            eyre::eyre!("Change state for {change_id} disappeared before reconcile")
+        })?;
+        let Reconciliation {
+            merged_prs,
+            failed_orgs,
+        } = reconcile(change_id, org, &state, config);
+        (merged_prs, failed_orgs)
+    } else {
+        (Vec::new(), BTreeSet::new())
+    };
+
+    // Freshest state (post-reconcile) for planning, or an empty stand-in for a
+    // recovery-only campaign so `build_plan` produces only recovery-only entries.
+    let state = match manager.load(change_id)? {
+        Some(s) => s,
+        None => ChangeState::new(change_id.to_string(), None),
+    };
 
     let plan = build_plan(&state, &recoveries, &merged_prs, &failed_orgs);
     print_plan(&plan, change_id);
@@ -837,8 +918,11 @@ pub fn process_undo_command(
     // change-id can never interleave and lose an update. The lock is held
     // only for this final load-mutate-save, not across the (possibly long)
     // campaign execution above, which never touches `changes/<id>.json`
-    // directly.
-    {
+    // directly. Skipped for a recovery-only campaign: there is no change-state
+    // file to true up (its record was the recovery files, now drained), and
+    // saving one would fabricate a spurious state file for a change that never
+    // had one.
+    if state_existed {
         let _change_lock = crate::lock::ChangeLock::acquire(change_id)
             .context("Failed to acquire change lock before saving undo results")?;
         let mut state = manager

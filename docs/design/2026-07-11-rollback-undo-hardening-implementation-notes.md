@@ -914,3 +914,127 @@ closes a double-fault gap the eight phases left open.
 
 ### Open questions
 - None. No cross-repo/system-mutating bullets in this hardening pass.
+
+## Phase 10: Second post-audit hardening
+
+Two re-audit gaps (Staff Engineer/Codex re-check of the first hardening commit
+`15f2397`), each verified real against the code. Not new features -- each closes
+a double-fault the eight phases + Phase 9 left open.
+
+### Design decisions
+- **FIX A [reopened] `cleanup_old` decides from a stale pre-lock snapshot
+  (TOCTOU).** `cleanup_old` now uses the pre-lock `self.list()` snapshot ONLY as
+  a cheap candidate pre-filter (`is_cleanup_candidate`, a new free fn factoring
+  the terminal-status + age predicate). The authoritative decision moved into a
+  new `StateManager::cleanup_if_stale(change_id, cutoff)` --
+  `src/state.rs:cleanup_if_stale` -- which acquires the change's `ChangeLock`,
+  RELOADS the change file UNDER the lock, re-evaluates `is_cleanup_candidate` on
+  the FRESH copy, and only then deletes. A revived change (updated to a
+  non-terminal status, or refreshed past the cutoff, between the listing and the
+  lock) is SKIPPED with a `warn!`; an already-gone file is a no-op; a held lock
+  is skipped with a `warn!` (unchanged from Phase 9). This makes
+  lock + reload + re-check + delete one critical section, closing the window
+  where a racing `undo`/`review sync`/create-save updated-and-released a file
+  after `list()` but before the delete.
+- **FIX B [new gap] `gx undo` strands a recovery-only pushed branch's REMOTE.**
+  Three coordinated changes so undo honors the design's undo table
+  ("pushed, no PR -> delete remote branch -> delete local branch"; undo OWNS all
+  remote reversal) for a repo recorded ONLY in a recovery file:
+  - `process_undo_command` (`src/undo.rs`) now proceeds when recovery files for
+    the change-id exist even if the change-STATE file is absent. It gathers the
+    recovery files first; a fully-absent change (no state AND no recovery) is a
+    clean no-op (`"Nothing to undo"`, exit 0). Reconcile runs only when a state
+    file exists (a recovery-only campaign is local by nature); planning uses the
+    freshest state or an empty `ChangeState` stand-in. The final
+    reconcile-finalize-save is skipped when no state file existed (no file to
+    true up; saving one would fabricate a spurious record).
+  - `build_plan` (`src/undo.rs`) classifies a recovery-only repo by its recovery
+    `phase` via the new `recovery_only_action(phase)`: `Pushed`/`Finalizing`/
+    `Pushing` -> `DeleteRemoteAndLocal` (a pushed-no-PR entry); `Mutating` ->
+    `DeleteLocal` (local-only). It also resolves a real `org/repo` slug for the
+    entry via `crate::repo::Repo::new(rec.repo_path)` (falling back to the path
+    leaf) so the remote delete can hit the gh API -- the path leaf alone is not a
+    valid repo slug.
+  - `undo_one` (`src/undo.rs`) guarantees ordering for a recovery-only pushed
+    repo: it deletes the REMOTE branch (`remove_remote_branch`) FIRST, while the
+    recovery file (the sole record) still exists, BEFORE the drain removes it.
+    So a crash between the drain and the remote delete can never strand the
+    remote GX branch with no gx record. The post-drain `DeleteRemoteAndLocal`
+    arm re-probes the now-absent remote (a no-op) and deletes the local branch.
+  - `delete_branches` was refactored into `remove_remote_branch` +
+    `remove_local_branch` (`src/undo.rs`) so the remote side can be invoked
+    independently for the pre-drain ordering step; both keep the Phase-7
+    `ls-remote --exit-code` existence pre-probe (F13) so an already-absent remote
+    is a no-op. The remote delete uses the token-consistent
+    `github::delete_remote_branch`.
+- FIX B respects the Phase 9 `UnverifiedOffline` guard by construction: that
+  guard lives only in `build_plan`'s state-repo loop; recovery-only entries are
+  built in the second loop and are never reclassified to `UnverifiedOffline`.
+  A branch a recovery file explicitly recorded as pushed is a local fact, not a
+  PR-state question, so it is correctly deleted even when the org's PR state
+  could not be verified.
+
+### Deviations
+- FIX B changed `gx undo` on a fully-absent change (no state, no recovery) from
+  a hard error (the pre-Phase-10 `"No change state recorded ... nothing to
+  undo"`) to a clean `"Nothing to undo"` no-op (exit 0). This matches undo's
+  documented convergence policy (a second run of a recovery-only campaign, after
+  its recovery files are drained, lands here) and the existing all-`AlreadyGone`
+  no-op path. No test asserted the old error. Same intent (undo is idempotent),
+  correct exit semantics.
+- `build_plan` now performs a git-config read (`Repo::new`) for recovery-only
+  entries to resolve a real slug. `build_plan` was previously pure; this is a
+  filesystem read, deterministic given the checkout, and required so the remote
+  delete targets the right repo. The pure unit tests use `Mutating`-phase or
+  non-git-dir fixtures and are unaffected (`Repo::new` falls back gracefully).
+  Same effect, correct seam (the slug must come from the checkout the recovery
+  file points at).
+- The Pushing-phase recovery-only classification does NOT probe the remote in
+  `build_plan` (which would double-probe against the drain's own
+  `resolve_recovery_mode` probe). Instead it optimistically classifies
+  `Pushing -> DeleteRemoteAndLocal`; the remote delete's `ls-remote` pre-probe
+  makes an unpushed `Pushing` branch a safe no-op, and the drain's own probe
+  handles the local reverse. Net effect matches the task's
+  "pushing-probe-confirmed-pushed -> pushed-no-PR" without a redundant network
+  round-trip in the planner.
+
+### Tradeoffs
+- The FIX A biting test drives `cleanup_if_stale` directly (writing the on-disk
+  file as the revived, non-terminal copy the pre-lock snapshot did NOT see)
+  rather than injecting a mutation between `cleanup_old`'s internal `list()` and
+  its lock (which is not possible without a test hook). This exercises the exact
+  reload + re-check-under-lock seam and bites the pre-fix (lock + delete)
+  behavior; a positive control (aged-out terminal change IS deleted) rides
+  alongside. Chosen over adding a `GX_TEST_*` revive hook -- the extracted seam
+  is the honest, hook-free test surface.
+- The FIX B ordering guarantee (remote-before-drain) is a crash-WINDOW property:
+  absent a crash, both orderings produce the same end state, so it is correct by
+  construction rather than observable in a non-crash functional test. The
+  `undo_one`/e2e tests assert the end state (remote + local gone, recovery
+  drained); the ordering itself is documented, not separately bite-proven.
+
+### Break-the-code proofs
+- **FIX A** [`src/state.rs:test_cleanup_old_skips_revived_change_on_reload`]:
+  reverting `cleanup_if_stale` to lock + unconditional `self.delete()` (dropping
+  the reload + `is_cleanup_candidate` re-check on the fresh copy) made the
+  revived-change delete succeed -- the "the revived change file must survive
+  cleanup" assertion FAILED (panic at `src/state.rs:1051`). Restored; passes.
+- **FIX B (classification)** [`src/undo/tests.rs:build_plan_classifies_recovery_only_repo_by_phase`]:
+  reverting `build_plan`'s recovery-only arm to the pre-fix
+  `action: UndoAction::DeleteLocal` made the `Pushing`/`Pushed`/`Finalizing`
+  assertions FAIL (`left: DeleteLocal, right: DeleteRemoteAndLocal`). Restored;
+  passes.
+- **FIX B (end-to-end)** [`tests/e2e_undo_lifecycle.rs:test_undo_recovery_only_pushed_deletes_remote_branch`]:
+  against the same pre-fix `build_plan`, the spawned `gx undo` on a
+  recovery-only pushed repo left the REMOTE branch on the bare -- the
+  "recovery-only pushed REMOTE branch must be deleted by undo" assertion FAILED.
+  Restored; passes. This also proves the `process_undo_command` no-state-file
+  path (it ran from recovery files alone) and the second-run no-op.
+- **FIX B (execution)** [`src/undo/tests.rs:undo_one_recovery_only_pushed_deletes_remote_and_local`]:
+  proves `undo_one` on a recovery-only `DeleteRemoteAndLocal` plan really deletes
+  the remote (via a `gh` shim doing the real ref delete) AND the local branch AND
+  drains the recovery file. (It hardcodes the action, so it passes regardless of
+  `build_plan`; the classification bite is covered by the two tests above.)
+
+### Open questions
+- None. No cross-repo/system-mutating bullets in this hardening pass.

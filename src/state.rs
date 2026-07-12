@@ -399,39 +399,84 @@ impl StateManager {
     /// file out from under a concurrent `undo`/`review sync`/create save. If the
     /// lock is held by a live process, that change is SKIPPED (a `warn!`), never
     /// deleted under contention.
+    ///
+    /// The pre-lock [`list`](Self::list) snapshot is used ONLY to pick candidates
+    /// cheaply; it predates the per-change lock and can be stale (a racing
+    /// `undo`/`review sync`/create save may revive a change between the listing
+    /// and the delete). The authoritative decision is made in
+    /// [`cleanup_if_stale`](Self::cleanup_if_stale), which reloads the change
+    /// UNDER its lock and re-evaluates the predicate on the FRESH copy — closing
+    /// the TOCTOU where a stale snapshot would delete a just-updated file.
     pub fn cleanup_old(&self, days: u64) -> Result<usize> {
         let cutoff = Utc::now() - chrono::Duration::days(days as i64);
-        let states = self.list()?;
+        let snapshot = self.list()?;
         let mut deleted = 0;
 
-        for state in states {
-            // Clean up fully merged, abandoned, or failed changes (F14: `Failed`
-            // is now reachable, so a failed campaign must age out too, not sit
-            // around forever).
-            if (state.status == ChangeStatus::FullyMerged
-                || state.status == ChangeStatus::Abandoned
-                || state.status == ChangeStatus::Failed)
-                && state.updated_at < cutoff
-            {
-                match crate::lock::ChangeLock::acquire(&state.change_id) {
-                    Ok(_lock) => {
-                        self.delete(&state.change_id)?;
-                        deleted += 1;
-                        // `_lock` drops here, releasing the change lock after the
-                        // file is gone.
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Skipping cleanup of change {} - its change lock is held: {e}",
-                            state.change_id
-                        );
-                    }
-                }
+        for state in snapshot {
+            // Cheap pre-filter on the (possibly stale) snapshot: only lock the
+            // candidates it flags. The fresh-copy re-check happens under the lock.
+            if !is_cleanup_candidate(&state, cutoff) {
+                continue;
+            }
+            if self.cleanup_if_stale(&state.change_id, cutoff)? {
+                deleted += 1;
             }
         }
 
         Ok(deleted)
     }
+
+    /// Under the change lock, RELOAD the change file and delete it only if the
+    /// FRESH copy still qualifies for cleanup ([`is_cleanup_candidate`]).
+    ///
+    /// The pre-lock snapshot in [`cleanup_old`](Self::cleanup_old) can be stale:
+    /// a racing `undo`/`review sync`/create-save may have updated and released
+    /// the change file AFTER the listing but BEFORE this lock, reviving it. This
+    /// re-check on the reloaded copy is what makes lock + reload + re-check + delete
+    /// one critical section, so a revived change is never deleted from a stale
+    /// snapshot. A held lock, an already-gone file, or a revived change is
+    /// SKIPPED (returns `Ok(false)`), never deleted.
+    fn cleanup_if_stale(&self, change_id: &str, cutoff: DateTime<Utc>) -> Result<bool> {
+        let _lock = match crate::lock::ChangeLock::acquire(change_id) {
+            Ok(lock) => lock,
+            Err(e) => {
+                warn!("Skipping cleanup of change {change_id} - its change lock is held: {e}");
+                return Ok(false);
+            }
+        };
+        // Reload UNDER the lock and re-decide on the fresh copy (TOCTOU fix).
+        match self.load(change_id)? {
+            Some(fresh) => {
+                if is_cleanup_candidate(&fresh, cutoff) {
+                    self.delete(change_id)?;
+                    debug!("Cleaned up aged-out change {change_id}");
+                    // `_lock` drops here, releasing the change lock after the
+                    // file is gone.
+                    Ok(true)
+                } else {
+                    warn!(
+                        "Skipping cleanup of change {change_id} - it was revived since the pre-lock listing (status {:?}, updated {})",
+                        fresh.status, fresh.updated_at
+                    );
+                    Ok(false)
+                }
+            }
+            None => {
+                debug!("Change {change_id} already gone before cleanup; skipping");
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Whether a change qualifies for aging out: a terminal status (fully merged,
+/// abandoned, or failed — F14 made `Failed` reachable, so a failed campaign
+/// must age out too) whose last update is older than the cutoff.
+fn is_cleanup_candidate(state: &ChangeState, cutoff: DateTime<Utc>) -> bool {
+    matches!(
+        state.status,
+        ChangeStatus::FullyMerged | ChangeStatus::Abandoned | ChangeStatus::Failed
+    ) && state.updated_at < cutoff
 }
 
 /// Get the state directory path (`$XDG_DATA_HOME/gx/changes`), migrating from
@@ -987,6 +1032,61 @@ mod tests {
             let deleted2 = manager.cleanup_old(30).unwrap();
             assert_eq!(deleted2, 1, "once unlocked, the aged-out change is removed");
             assert!(!path.exists(), "the change file is deleted once unlocked");
+        });
+    }
+
+    #[test]
+    fn test_cleanup_old_skips_revived_change_on_reload() {
+        // FIX A (second post-audit hardening): cleanup_old decides candidacy from
+        // a pre-lock `list()` snapshot, but the authoritative delete must re-check
+        // the FRESH copy UNDER the change lock. This models the TOCTOU race: the
+        // snapshot flagged a change as aged-out (terminal + old), but a racing
+        // `undo`/`review sync`/create-save revived it to a NON-terminal status
+        // before cleanup acquired the lock. Reloading under the lock catches that
+        // and must NOT delete the just-updated file.
+        //
+        // Break-the-code proof: reverting `cleanup_if_stale` to lock + delete
+        // (dropping the reload + `is_cleanup_candidate` re-check on the fresh
+        // copy) deletes the revived change, so the "must survive" assertion fails.
+        with_xdg_data_home(|data_home| {
+            let manager = StateManager::new().unwrap();
+            let cutoff = Utc::now() - chrono::Duration::days(7);
+
+            // The on-disk file as it looks AFTER the race revived it: a fresh,
+            // non-terminal status (what the pre-lock snapshot did NOT see).
+            let mut revived = ChangeState::new("GX-revived".to_string(), None);
+            revived.add_repository("org/repo".to_string(), "GX-revived".to_string());
+            revived.status = ChangeStatus::InProgress;
+            revived.updated_at = Utc::now();
+            manager.save(&revived).unwrap();
+
+            let path = data_home.join("gx").join("changes").join("GX-revived.json");
+            assert!(path.exists(), "state file must exist before cleanup");
+
+            // cleanup_old flagged this change from a STALE snapshot; the fresh
+            // reload under the lock must veto the delete.
+            let deleted = manager.cleanup_if_stale("GX-revived", cutoff).unwrap();
+            assert!(
+                !deleted,
+                "a revived (non-terminal) change must NOT be deleted"
+            );
+            assert!(
+                path.exists(),
+                "the revived change file must survive cleanup"
+            );
+
+            // Positive control: a genuinely aged-out terminal change IS deleted by
+            // the same reload-and-recheck path.
+            let mut aged = ChangeState::new("GX-aged".to_string(), None);
+            aged.status = ChangeStatus::Abandoned;
+            aged.updated_at = Utc::now() - chrono::Duration::days(30);
+            manager.save(&aged).unwrap();
+            let aged_path = data_home.join("gx").join("changes").join("GX-aged.json");
+            assert!(aged_path.exists());
+
+            let deleted_aged = manager.cleanup_if_stale("GX-aged", cutoff).unwrap();
+            assert!(deleted_aged, "an aged-out terminal change must be deleted");
+            assert!(!aged_path.exists(), "the aged-out change file is removed");
         });
     }
 }
