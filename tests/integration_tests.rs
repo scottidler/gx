@@ -272,6 +272,21 @@ fn test_repository_filtering_edge_cases() {
 }
 
 #[test]
+fn test_rollback_validate_error_has_no_eyre_location_trailer() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let output = run_gx_command(&["rollback", "validate", "gx-tx-nope"], temp_dir.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    // The Display chain (cause) still reaches the user...
+    assert!(stderr.contains("Recovery state not found: gx-tx-nope"));
+    // ...but the eyre Debug trailer (source location / backtrace) does not.
+    assert!(!stderr.contains("Location:"));
+}
+
+#[test]
 fn test_logging_functionality() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     create_test_repo(temp_dir.path(), "test-repo", true);

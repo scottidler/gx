@@ -225,7 +225,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     use clap::{CommandFactory, FromArgMatches};
 
     // Render the log path at runtime from the same XDG source the logger uses,
@@ -256,4 +256,15 @@ fn main() -> Result<()> {
     run_application(&cli, &config).context("Application failed")?;
 
     Ok(())
+}
+
+fn main() {
+    // `Result`-returning `main` prints eyre's `Debug` impl on error, which
+    // appends a `Location: src/....rs:NN` (and backtrace) trailer to every
+    // user-facing error. Print just the Display chain (`.context()` chain,
+    // no Location) instead; full detail still reaches the log file.
+    if let Err(err) = run() {
+        eprintln!("Error: {err:#}");
+        std::process::exit(1);
+    }
 }
