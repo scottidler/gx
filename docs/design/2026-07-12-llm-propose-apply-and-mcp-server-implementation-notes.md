@@ -1397,3 +1397,13 @@ watched the test fail, restored - proofs recorded below). `otto ci` green.
   succeeds with the fix; temporarily setting `[workspace.package].version` to
   0.5.0 and rebuilding the workspace still resolves the `gx` path dep (both
   crates compile as 0.5.0, no `^0.4.1` conflict); restored to 0.4.1.
+
+### Owner disposition of #5 / #6 (Scott, 2026-07-12)
+- **#5 (no llm+PR-creation e2e): DEFERRED.** llm apply rides the deterministic
+  create pipeline, whose branch/commit/push/PR and undo-of-PR paths are already
+  e2e-tested; the missing coverage is the llm variant specifically, an evidence
+  gap, not a proven defect. Recorded here rather than blocking the release.
+- **#6 (MCP `create-apply` all-failed): KEEP SIGNALING.** `create-apply`
+  returns `Ok{applied:0, per-repo error}` when every repo fails, matching the
+  CLI's partial-apply semantics. The review panel demoted this to a judgment
+  call (the test bites; no safety hole). No hard JSON-RPC error is added.
