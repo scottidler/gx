@@ -3,7 +3,7 @@
 **Author:** Claude Code (from 2026-07-12 design session)
 **Reviewer:** Scott Idler
 **Date:** 2026-07-12
-**Status:** In Review
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 **External review:** Architect (Gemini) + Staff Engineer (Codex), 2026-07-12;
 all findings folded (see Resolved Decisions); one escalation answered by
