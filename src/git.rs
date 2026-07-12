@@ -1378,8 +1378,20 @@ pub fn remote_branch_exists_probe(repo_path: &std::path::Path, branch_name: &str
     }
 }
 
-/// Delete a remote branch (for rollback of push operations)
+/// Delete a remote branch (for `gx cleanup`; rollback never deletes remote
+/// branches -- that is `gx undo`'s job). Existence is checked explicitly
+/// FIRST via [`remote_branch_exists_probe`] (F13) so an already-absent branch
+/// is a no-op, never a caller sniffing the delete's stderr for
+/// "remote ref does not exist".
 pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
+    if !remote_branch_exists_probe(repo_path, branch_name)? {
+        debug!(
+            "Remote branch '{branch_name}' already absent in '{}'; no-op",
+            repo_path.display()
+        );
+        return Ok(());
+    }
+
     let output = Command::new("git")
         .current_dir(repo_path)
         .args(["push", "origin", "--delete", branch_name])
@@ -1394,14 +1406,10 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
         );
         Ok(())
     } else {
-        // Don't fail if branch doesn't exist remotely
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("remote ref does not exist") {
-            debug!("Remote branch '{branch_name}' already deleted");
-            Ok(())
-        } else {
-            Err(eyre::eyre!("Failed to delete remote branch: {}", stderr))
-        }
+        Err(eyre::eyre!(
+            "Failed to delete remote branch: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -1976,6 +1984,60 @@ mod tests {
         let staged = run_git_command(&["diff", "--cached", "--name-only"], p);
         let names = String::from_utf8_lossy(&staged.stdout);
         assert!(names.contains("f[1].txt"), "staged: {names:?}");
+    }
+
+    #[test]
+    fn test_delete_remote_branch_absent_is_no_op() {
+        // F13: an already-absent remote branch is a no-op (explicit
+        // `ls-remote --exit-code` probe), not something the caller has to
+        // sniff an error string for.
+        use crate::test_utils::run_git_command;
+        let bare_dir = tempfile::TempDir::new().unwrap();
+        let bare = bare_dir.path();
+        run_git_command(&["init", "--quiet", "--bare"], bare);
+
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo = repo_dir.path();
+        run_git_command(&["init", "--quiet", "-b", "main"], repo);
+        run_git_command(&["config", "user.email", "t@e.com"], repo);
+        run_git_command(&["config", "user.name", "T"], repo);
+        run_git_command(&["config", "commit.gpgsign", "false"], repo);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git_command(&["add", "-A"], repo);
+        run_git_command(&["commit", "--quiet", "-m", "init"], repo);
+        run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
+        run_git_command(&["push", "--quiet", "-u", "origin", "main"], repo);
+
+        // "GX-never-pushed" exists nowhere on the remote.
+        assert!(delete_remote_branch(repo, "GX-never-pushed").is_ok());
+    }
+
+    #[test]
+    fn test_delete_remote_branch_deletes_when_present() {
+        use crate::test_utils::run_git_command;
+        let bare_dir = tempfile::TempDir::new().unwrap();
+        let bare = bare_dir.path();
+        run_git_command(&["init", "--quiet", "--bare"], bare);
+
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo = repo_dir.path();
+        run_git_command(&["init", "--quiet", "-b", "main"], repo);
+        run_git_command(&["config", "user.email", "t@e.com"], repo);
+        run_git_command(&["config", "user.name", "T"], repo);
+        run_git_command(&["config", "commit.gpgsign", "false"], repo);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git_command(&["add", "-A"], repo);
+        run_git_command(&["commit", "--quiet", "-m", "init"], repo);
+        run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
+        run_git_command(&["push", "--quiet", "-u", "origin", "main"], repo);
+        run_git_command(&["branch", "GX-pushed"], repo);
+        run_git_command(&["push", "--quiet", "origin", "GX-pushed"], repo);
+        // `remote_branch_exists_probe` asks the remote directly (`ls-remote`),
+        // never a possibly-stale local `refs/remotes/origin/*` cache.
+        assert!(remote_branch_exists_probe(repo, "GX-pushed").unwrap());
+
+        delete_remote_branch(repo, "GX-pushed").unwrap();
+        assert!(!remote_branch_exists_probe(repo, "GX-pushed").unwrap());
     }
 
     // Rollback tests - these would need a real git repository to test properly

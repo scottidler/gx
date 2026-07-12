@@ -343,6 +343,11 @@ fn reconcile(
 /// helper) when `remote` is set, then the local branch resolved through the
 /// recorded path. A local branch that is already gone is a no-op (checked, not
 /// error-sniffed); a recorded-but-missing path is reported, never skipped.
+///
+/// F13: the remote delete is pre-probed with `git ls-remote --exit-code`
+/// before ever calling the gh API, so a never-pushed or already-deleted
+/// remote branch (a 404 from `gh api ... DELETE`) is a no-op for this repo,
+/// not a per-repo failure -- an item Phase 5 explicitly deferred to Phase 7.
 fn delete_branches(plan: &UndoPlan, config: &Config, remote: bool) -> Result<(), String> {
     let branch = plan
         .branch
@@ -350,8 +355,24 @@ fn delete_branches(plan: &UndoPlan, config: &Config, remote: bool) -> Result<(),
         .ok_or_else(|| "no branch recorded".to_string())?;
 
     if remote {
-        github::delete_remote_branch(&plan.slug, branch, config)
-            .map_err(|e| format!("failed to delete remote branch {branch}: {e}"))?;
+        let exists_remotely = match &plan.repo_path {
+            Some(path) if crate::bare::is_git_path(path) => {
+                git::remote_branch_exists_probe(path, branch)
+                    .map_err(|e| format!("cannot verify remote branch {branch} (offline?): {e}"))?
+            }
+            // No local checkout to probe from: fall back to attempting the
+            // delete (the prior behavior for this edge).
+            _ => true,
+        };
+        if exists_remotely {
+            github::delete_remote_branch(&plan.slug, branch, config)
+                .map_err(|e| format!("failed to delete remote branch {branch}: {e}"))?;
+        } else {
+            debug!(
+                "remote branch {branch} already absent for {}; no-op",
+                plan.slug
+            );
+        }
     }
 
     match &plan.repo_path {
@@ -686,8 +707,11 @@ pub fn process_undo_command(
 
     // Reconcile against GitHub reality first (Phase 4 sync), then reload. The
     // merged PRs carry the merge commit oid + base branch the revert path needs.
+    // This planning copy is read-only from here on: the authoritative
+    // load-mutate-save happens once more, under the change lock, right before
+    // the final save below.
     let merged_prs = reconcile(change_id, org, &state, config);
-    let mut state = manager
+    let state = manager
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during reconcile"))?;
 
@@ -729,10 +753,24 @@ pub fn process_undo_command(
             .collect()
     });
 
-    finalize_state(&mut state, &outcomes);
-    manager
-        .save(&state)
-        .context("Failed to save change state after undo")?;
+    // Change-level lock (Phase 7 [F6]): reload the freshest state, fold in
+    // this run's outcomes, and save -- all as one atomic critical section --
+    // so a concurrent `review sync`/`cleanup`/another `undo` on the SAME
+    // change-id can never interleave and lose an update. The lock is held
+    // only for this final load-mutate-save, not across the (possibly long)
+    // campaign execution above, which never touches `changes/<id>.json`
+    // directly.
+    {
+        let _change_lock = crate::lock::ChangeLock::acquire(change_id)
+            .context("Failed to acquire change lock before saving undo results")?;
+        let mut state = manager
+            .load(change_id)?
+            .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during undo"))?;
+        finalize_state(&mut state, &outcomes);
+        manager
+            .save(&state)
+            .context("Failed to save change state after undo")?;
+    }
 
     render_results(&outcomes, cli);
     Ok(())

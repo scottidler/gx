@@ -395,6 +395,101 @@ fn undo_one_drains_mutating_recovery_stash_before_deleting_branch() {
     drop(guard);
 }
 
+// ---- Phase 7 [F13]: undo tolerates an already-absent remote branch ----
+
+#[test]
+#[cfg(unix)]
+fn undo_one_treats_never_pushed_remote_branch_as_no_op() {
+    // Phase 5 explicitly deferred this to Phase 7: a branch that was never
+    // pushed (or already deleted remotely) must not fail the whole repo.
+    // `delete_branches` pre-probes with `git ls-remote --exit-code` BEFORE
+    // ever calling `github::delete_remote_branch` (a `gh api ... DELETE` that
+    // 404s on an absent ref) -- proven here with a `gh` shim that fails loudly
+    // if invoked at all: the probe must skip it entirely.
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+    let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+    let prior_path = std::env::var("PATH").ok();
+
+    let data_home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+    let remotes = TempDir::new().unwrap();
+    let bare = remotes.path().join("repo.git");
+    run_git_command(
+        &["init", "--quiet", "--bare", bare.to_str().unwrap()],
+        remotes.path(),
+    );
+
+    let repo_dir = TempDir::new().unwrap();
+    let repo = repo_dir.path();
+    run_git_command(&["init", "--quiet", "-b", "main"], repo);
+    run_git_command(&["config", "user.email", "t@e.com"], repo);
+    run_git_command(&["config", "user.name", "T"], repo);
+    run_git_command(&["config", "commit.gpgsign", "false"], repo);
+    std::fs::write(repo.join("README.md"), "# r\n").unwrap();
+    run_git_command(&["add", "-A"], repo);
+    run_git_command(&["commit", "--quiet", "-m", "init"], repo);
+    run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
+    run_git_command(&["push", "--quiet", "-u", "origin", "main"], repo);
+    // The GX branch exists LOCALLY only -- never pushed to `origin`.
+    run_git_command(&["branch", "GX-neverpushed"], repo);
+
+    // A `gh` shim that fails loudly if invoked -- proves the probe skips it.
+    let shim_dir = TempDir::new().unwrap();
+    let gh = shim_dir.path().join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\necho 'gh should not be called for an absent remote branch' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&gh).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh, perms).unwrap();
+    let new_path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe { std::env::set_var("PATH", &new_path) };
+
+    let plan = UndoPlan {
+        slug: "org/repo".to_string(),
+        repo_path: Some(repo.to_path_buf()),
+        branch: Some("GX-neverpushed".to_string()),
+        pr_number: None,
+        status: Some(RepoChangeStatus::BranchCreated),
+        action: UndoAction::DeleteRemoteAndLocal,
+        recovery_tx_ids: vec![],
+        merge_commit_oid: None,
+        base_ref_name: None,
+    };
+
+    let outcome = undo_one(&plan, "GX-neverpushed", &Config::default());
+
+    assert_eq!(
+        outcome.kind,
+        OutcomeKind::Undone,
+        "a never-pushed remote branch must be a no-op, not a failure: {:?}",
+        outcome.kind
+    );
+    assert!(
+        !crate::git::branch_exists_locally(repo, "GX-neverpushed").unwrap(),
+        "the local branch should still be deleted"
+    );
+
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_data_home {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}
+
 // ---- Phase 6: merged-PR revert path (success criteria) ----
 
 /// A `gh` PATH shim that answers only `pr create` with a fixed PR URL (the revert

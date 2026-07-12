@@ -6,9 +6,10 @@
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::git;
+use crate::lock::{ChangeLock, RepoLock};
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus, StateManager};
-use eyre::Result;
-use log::{info, warn};
+use eyre::{Context, Result};
+use log::{debug, info, warn};
 
 /// Result of a cleanup operation
 #[derive(Debug)]
@@ -117,7 +118,34 @@ fn cleanup_all_merged(
     let mut total_skipped = 0;
     let mut total_failed = 0;
 
-    for mut state in cleanable {
+    for candidate in cleanable {
+        let change_id = candidate.change_id.clone();
+
+        // Change-level lock (Phase 7 [F6]), then reload fresh: `list()` above
+        // may have read this change's state before another process's
+        // read-modify-write landed, so the listing copy is discarded and the
+        // authoritative load happens under the lock, right before mutating.
+        let _change_lock = match ChangeLock::acquire(&change_id) {
+            Ok(lock) => lock,
+            Err(e) => {
+                warn!("Failed to cleanup {change_id}: change is locked: {e}");
+                total_failed += 1;
+                continue;
+            }
+        };
+        let mut state = match state_manager.load(&change_id) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!("Change {change_id} disappeared before cleanup");
+                continue;
+            }
+            Err(e) => {
+                warn!("Failed to reload {change_id} before cleanup: {e}");
+                total_failed += 1;
+                continue;
+            }
+        };
+
         match cleanup_change(&mut state, include_remote, force) {
             Ok(result) => {
                 total_cleaned += result.repos_cleaned;
@@ -133,7 +161,7 @@ fn cleanup_all_merged(
                 }
             }
             Err(e) => {
-                warn!("Failed to cleanup {}: {}", state.change_id, e);
+                warn!("Failed to cleanup {change_id}: {e}");
                 total_failed += 1;
             }
         }
@@ -156,6 +184,12 @@ fn cleanup_single_change(
     include_remote: bool,
     force: bool,
 ) -> Result<()> {
+    // Change-level lock (Phase 7 [F6]): held across the whole load-mutate-save
+    // cycle below so a concurrent `review sync`/`approve`/`delete`/`undo` on
+    // this change-id can't interleave and lose an update.
+    let _change_lock = ChangeLock::acquire(change_id)
+        .with_context(|| format!("Failed to acquire change lock for {change_id}"))?;
+
     let mut state = state_manager
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("Change not found: {}", change_id))?;
@@ -253,23 +287,29 @@ fn cleanup_change(
             },
         };
 
-        // Delete local branch
-        match git::delete_local_branch(&local_path, &branch_name) {
-            Ok(()) => {
-                info!("🧹 Deleted local branch {} in {}", branch_name, repo_slug);
-                cleaned += 1;
-
-                // Mark as cleaned up in state
-                state.mark_cleaned_up(&repo_slug);
-            }
+        // Per-repo lock (Phase 7 [F6]): a second concurrent gx invocation must
+        // not interleave a branch delete with any other mutation on this repo.
+        let _lock = match RepoLock::acquire(&local_path) {
+            Ok(lock) => lock,
             Err(e) => {
-                // Check if branch doesn't exist (already deleted)
-                let err_str = e.to_string();
-                if err_str.contains("not found") || err_str.contains("does not exist") {
-                    info!("Branch {} already deleted in {}", branch_name, repo_slug);
+                warn!("Repository locked, skipping cleanup for {repo_slug}: {e}");
+                errors.push(format!("{repo_slug}: repository is locked: {e}"));
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Delete local branch. Existence is checked explicitly FIRST (F13) so
+        // an already-deleted branch is a no-op rather than the caller sniffing
+        // the delete error's text for "not found"/"does not exist".
+        match git::branch_exists_locally(&local_path, &branch_name) {
+            Ok(true) => match git::delete_local_branch(&local_path, &branch_name) {
+                Ok(()) => {
+                    info!("🧹 Deleted local branch {} in {}", branch_name, repo_slug);
+                    cleaned += 1;
                     state.mark_cleaned_up(&repo_slug);
-                    skipped += 1;
-                } else {
+                }
+                Err(e) => {
                     warn!(
                         "Failed to delete branch {} in {}: {}",
                         branch_name, repo_slug, e
@@ -277,20 +317,28 @@ fn cleanup_change(
                     errors.push(format!("{}: {}", repo_slug, e));
                     failed += 1;
                 }
+            },
+            Ok(false) => {
+                debug!("Branch {branch_name} already deleted in {repo_slug}");
+                state.mark_cleaned_up(&repo_slug);
+                skipped += 1;
+            }
+            Err(e) => {
+                warn!("Failed to check local branch {branch_name} in {repo_slug}: {e}");
+                errors.push(format!("{repo_slug}: {e}"));
+                failed += 1;
             }
         }
 
-        // Optionally delete remote branch
+        // Optionally delete remote branch. `git::delete_remote_branch` already
+        // pre-probes existence (F13), so an already-absent branch is a silent
+        // no-op; only a genuine failure is worth a warning here.
         if include_remote {
             if let Err(e) = git::delete_remote_branch(&local_path, &branch_name) {
-                // Remote branch might already be deleted by GitHub
-                let err_str = e.to_string();
-                if !err_str.contains("not found") && !err_str.contains("does not exist") {
-                    warn!(
-                        "Failed to delete remote branch {} in {}: {}",
-                        branch_name, repo_slug, e
-                    );
-                }
+                warn!(
+                    "Failed to delete remote branch {} in {}: {}",
+                    branch_name, repo_slug, e
+                );
             }
         }
     }

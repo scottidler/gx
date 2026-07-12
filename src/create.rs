@@ -203,6 +203,23 @@ pub fn process_create_command(
         }
     }
 
+    // Change-level lock (Phase 7 [F6]): held for the whole run so another
+    // process's `changes/<id>.json` read-modify-write (`review sync`,
+    // `cleanup`, `undo`, ...) can never interleave with this run's incremental
+    // saves. The in-process `Mutex<ChangeState>` below still serializes this
+    // run's own rayon workers against EACH OTHER; this lock is the
+    // cross-process half, so it is acquired ONCE here rather than per-repo
+    // (per-repo would make sibling workers in the SAME run fail-fast against
+    // each other, since the lock itself doesn't queue).
+    let _change_lock = if commit_message.is_some() {
+        Some(
+            crate::lock::ChangeLock::acquire(&change_id)
+                .map_err(|e| eyre::eyre!("Cannot start create for {change_id}: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     // Initialize state tracking if we're going to make changes (not dry run).
     let change_state = if commit_message.is_some() {
         let state = ChangeState::new(change_id.clone(), commit_message.clone());

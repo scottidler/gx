@@ -1,4 +1,5 @@
 use crate::cli::RollbackAction;
+use crate::lock::RepoLock;
 use crate::state::StateManager;
 use crate::transaction::{Phase, RecoveryOutcome, RecoveryState, StepStatus, Transaction};
 use chrono::{DateTime, Duration, Utc};
@@ -144,6 +145,13 @@ fn execute_recovery(transaction_id: &str, force: bool, yes: bool) -> Result<()> 
 
     // Load the transaction state and print the plan.
     let state = Transaction::load_recovery_state(transaction_id)?;
+
+    // Per-repo lock (Phase 7 [F6]): a second concurrent gx invocation must not
+    // interleave a mutation on this repo with the recovery interpreter. Held
+    // for the rest of this function (validate, confirm, execute).
+    let _lock = RepoLock::acquire(&state.repo_path)
+        .with_context(|| format!("Cannot execute recovery {transaction_id}"))?;
+
     print_recovery_plan(&state)?;
 
     // Validate before executing unless forced (`--force` == skip validation only).

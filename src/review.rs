@@ -357,19 +357,26 @@ pub fn process_review_approve_command(
             .collect()
     });
 
-    // Single race-free state update: load once, apply all outcomes, save once ([A10]).
-    if let Ok(manager) = StateManager::new() {
-        if let Ok(Some(mut state)) = manager.load(change_id) {
-            for result in &results {
-                match &result.error {
-                    None => state.mark_merged(&result.repo.slug),
-                    Some(e) => state.mark_failed(&result.repo.slug, e.clone()),
+    // Single race-free state update: load once, apply all outcomes, save once
+    // ([A10]), under the change-level lock (Phase 7 [F6]) so a concurrent
+    // `review sync`/`cleanup`/`undo` on the same change-id can't interleave.
+    match crate::lock::ChangeLock::acquire(change_id) {
+        Ok(_change_lock) => {
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    for result in &results {
+                        match &result.error {
+                            None => state.mark_merged(&result.repo.slug),
+                            Some(e) => state.mark_failed(&result.repo.slug, e.clone()),
+                        }
+                    }
+                    if let Err(e) = manager.save(&state) {
+                        warn!("Failed to save change state after approve: {e}");
+                    }
                 }
             }
-            if let Err(e) = manager.save(&state) {
-                warn!("Failed to save change state after approve: {e}");
-            }
         }
+        Err(e) => warn!("Failed to acquire change lock for {change_id}: {e}"),
     }
 
     // Display results
@@ -475,18 +482,24 @@ pub fn process_review_delete_command(
             .collect()
     });
 
-    // Single race-free state update: load once, mark closed, save once ([A10]).
-    if let Ok(manager) = StateManager::new() {
-        if let Ok(Some(mut state)) = manager.load(change_id) {
-            for result in &results {
-                if result.error.is_none() {
-                    state.mark_closed(&result.repo.slug);
+    // Single race-free state update: load once, mark closed, save once ([A10]),
+    // under the change-level lock (Phase 7 [F6]).
+    match crate::lock::ChangeLock::acquire(change_id) {
+        Ok(_change_lock) => {
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    for result in &results {
+                        if result.error.is_none() {
+                            state.mark_closed(&result.repo.slug);
+                        }
+                    }
+                    if let Err(e) = manager.save(&state) {
+                        warn!("Failed to save change state after delete: {e}");
+                    }
                 }
             }
-            if let Err(e) = manager.save(&state) {
-                warn!("Failed to save change state after delete: {e}");
-            }
         }
+        Err(e) => warn!("Failed to acquire change lock for {change_id}: {e}"),
     }
 
     // Display results
@@ -576,6 +589,11 @@ pub(crate) fn sync_change_state(
     change_id: &str,
 ) -> Result<(usize, usize, crate::state::ChangeStatus)> {
     debug!("sync_change_state: change_id={change_id} prs={}", prs.len());
+    // Change-level lock (Phase 7 [F6]): held for the whole load-mutate-save
+    // cycle so a concurrent `undo`/`cleanup`/`approve`/`delete` on the same
+    // change-id can never interleave and lose an update.
+    let _change_lock = crate::lock::ChangeLock::acquire(change_id)
+        .with_context(|| format!("Failed to acquire change lock for {change_id}"))?;
     let manager = StateManager::new()?;
     let mut state = manager
         .load(change_id)?
@@ -824,6 +842,21 @@ fn clone_repo_for_pr(org_dir: &Path, pr: &PrInfo, change_id: &str) -> ReviewResu
     // Create repo object - use slug fallback if the directory isn't a valid repo yet
     let repo =
         Repo::new(repo_dir.clone()).unwrap_or_else(|_| Repo::from_slug(pr.repo_slug.clone()));
+
+    // Per-repo lock (Phase 7 [F6]): a second concurrent gx invocation must not
+    // interleave a clone/pull with any other mutating command on this repo.
+    let _lock = match crate::lock::RepoLock::acquire(&repo_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            return ReviewResult {
+                repo,
+                change_id: change_id.to_string(),
+                pr_number: Some(pr.number),
+                action: ReviewAction::Cloned,
+                error: Some(format!("Repository is locked: {e}")),
+            };
+        }
+    };
 
     if repo_dir.exists() {
         // Repository already exists, pull latest
@@ -1205,6 +1238,57 @@ exit 0
             Some(v) => unsafe { std::env::set_var("PATH", v) },
             None => unsafe { std::env::remove_var("PATH") },
         }
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn test_sync_change_state_fails_fast_under_concurrent_change_lock() {
+        // Phase 7 [F6] success criterion: concurrent `review sync` + `undo` on
+        // one change-id lose no updates. `undo`'s final load-mutate-save holds
+        // the SAME `ChangeLock` `sync_change_state` acquires; simulate "undo
+        // mid-save" by holding the lock directly and confirm `sync_change_state`
+        // fails fast -- it never reads-mutates-saves while someone else holds
+        // the lock, so there is no window where one save can race and clobber
+        // the other's update.
+        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        let change_id = "GX-lock-contend";
+        let manager = StateManager::new().unwrap();
+        let mut state = ChangeState::new(change_id.to_string(), None);
+        state.add_repository("org/repo".to_string(), change_id.to_string());
+        manager.save(&state).unwrap();
+
+        // Simulate "undo" mid-save: hold the change-level lock directly.
+        let held = crate::lock::ChangeLock::acquire(change_id).unwrap();
+
+        let result = sync_change_state(&[], change_id);
+        assert!(
+            result.is_err(),
+            "sync_change_state must fail fast while the change lock is held, not race the save"
+        );
+
+        drop(held);
+
+        // Once released, the state on disk is exactly what it was before the
+        // failed attempt -- nothing was torn or partially applied.
+        let reloaded = manager.load(change_id).unwrap().expect("state intact");
+        assert_eq!(
+            reloaded.repositories.len(),
+            1,
+            "state must be unchanged by the failed sync attempt"
+        );
+
+        // And a sync AFTER release proceeds normally (the lock isn't stuck).
+        assert!(sync_change_state(&[], change_id).is_ok());
+
         match prior_data_home {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_DATA_HOME") },

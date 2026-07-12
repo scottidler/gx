@@ -539,3 +539,136 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None. No cross-repo/system-mutating bullets in Phase 6.
+
+## Phase 7: Lock coverage and reclaim race
+
+### Design decisions
+- `RepoLock` now covers `rollback execute` (`src/rollback.rs:execute_recovery`,
+  acquired right after `Transaction::load_recovery_state`, held through
+  validate/confirm/execute), `cleanup` (`src/cleanup.rs:cleanup_change`, per
+  repo, acquired before the local/remote branch deletes), and `review clone`
+  (`src/review.rs:clone_repo_for_pr`, acquired before the clone/pull). `undo`
+  already took it in Phase 5 (`src/undo.rs:undo_one`) — untouched here.
+- New `ChangeLock` (`src/lock.rs`), same RAII/acquire/reclaim shape as
+  `RepoLock`, keyed `locks/change-<fnv1a-hex(change_id)>.lock`. Both lock kinds
+  now share one `acquire_lock_file`/`reclaim_if_stale` implementation
+  (`src/lock.rs`) instead of duplicating the loop, so the F7 fix applies to
+  both uniformly.
+- `ChangeLock` acquired around every `changes/<id>.json` read-modify-write:
+  `review sync` (`src/review.rs:sync_change_state`, whole function body),
+  `review approve`/`delete` (`src/review.rs`, the load-mutate-save block after
+  the parallel PR pass), `cleanup` (`src/cleanup.rs:cleanup_single_change` and
+  `cleanup_all_merged`, the latter now RELOADS state fresh under the lock
+  rather than reusing `list()`'s pre-lock snapshot — see Deviations), and
+  `undo` (`src/undo.rs:process_undo_command`, only around the FINAL
+  reload-finalize-save, not the whole command — see Deviations). The
+  create-path incremental saves (`record_pushed_state`/`record_final_state`)
+  are covered by ONE `ChangeLock` acquired once for the whole `create` run in
+  `process_create_command`, not per-save — see Deviations.
+- F7 reclaim TOCTOU: `reclaim_if_stale` (`src/lock.rs`) renames the candidate
+  to a private, counter-suffixed staging name FIRST, re-verifies staleness on
+  the file it now exclusively owns via `is_stale_lock_content`, and only then
+  removes it. A losing racer's rename fails (ENOENT) and returns `Ok(true)`
+  (retry `acquire` from scratch) rather than ever calling `remove_file` on the
+  shared path. If the swept-up file turns out to be live (a racing reclaimer
+  already recreated it), it is restored via `fs::hard_link` (never a blind
+  `rename`, which would silently clobber a THIRD racer that legitimately
+  claimed the path in the interim) — see Deviations for how this was found.
+- F13: `git::delete_remote_branch` (`src/git.rs`) now pre-probes with
+  `remote_branch_exists_probe` (`ls-remote --exit-code`, already existed from
+  Phase 2) and no-ops on an absent branch, replacing the
+  `stderr.contains("remote ref does not exist")` sniff. `cleanup.rs`'s local
+  branch delete now pre-checks `git::branch_exists_locally` (`git rev-parse
+  --verify`, i.e. `show-ref`-equivalent) instead of sniffing
+  `err.contains("not found")`/`"does not exist"` on `delete_local_branch`'s
+  error.
+- `undo`'s `delete_branches` (`src/undo.rs`) pre-probes the remote branch via
+  `git::remote_branch_exists_probe` (using the recorded local checkout) before
+  ever calling `github::delete_remote_branch` (the `gh api ... DELETE` path),
+  so a never-pushed or already-deleted branch is a no-op for that repo instead
+  of a per-repo failure (the item Phase 5 explicitly deferred here). When no
+  local checkout is available to probe from, it falls back to attempting the
+  delete (the pre-Phase-7 behavior for that edge).
+
+### Deviations
+- **Root-caused a real concurrency bug found while writing the reclaim-race
+  test, not spec-mandated but load-bearing:** the first `reclaim_if_stale`
+  draft treated unparseable lock content (a file mid-write, between
+  `create_new` succeeding and its holder's `writeln!` landing) as STALE. Under
+  an 8-thread stress test this let every racer reclaim (and, via the naive
+  `rename`-based restore, sometimes clobber) every OTHER racer's
+  just-created-but-not-yet-written lock, so more than one thread's
+  `RepoLock::acquire` returned success. Fixed two ways: (1)
+  `is_stale_lock_content` now treats unparseable content as NOT stale (a lock
+  we cannot positively confirm dead is never reclaimed — this is the ORIGINAL
+  code's behavior too; my first rewrite had flipped it); (2) the restore
+  branch uses `fs::hard_link` (fails on an existing destination) instead of
+  `fs::rename` (silently clobbers), so a third racer that legitimately grabbed
+  the path during the check is never destroyed; (3) `acquire_lock_file`
+  re-reads `path` immediately after writing and confirms its OWN content is
+  still there before reporting success, retrying instead if a concurrent
+  reclaimer swept it away in that gap. All three are needed together; each is
+  covered by its own test (`test_is_stale_lock_content_treats_unparseable_as_not_stale`,
+  the hard_link comment in `reclaim_if_stale`, and
+  `test_concurrent_reclaim_never_loses_the_winning_live_lock`, which failed
+  reproducibly (2-3 times per 10-30 runs) before all three fixes and is now
+  clean across 50+ consecutive runs plus 8 full `cargo test` runs).
+- `undo`'s final `ChangeLock` acquisition wraps ONLY the reload-finalize-save
+  span (`src/undo.rs:process_undo_command`, after the parallel campaign
+  execution), not the whole command. The doc says the lock is "held around
+  every read-modify-write of `changes/<id>.json`" — the actual RMW unit here
+  is that final reload+mutate+save; the earlier reads (used for planning) and
+  `reconcile`'s own internal `sync_change_state` call (which takes its own
+  `ChangeLock` for its own RMW) are separate, narrower critical sections.
+  Holding one lock across the ENTIRE command (including user confirmation and
+  the potentially-long per-repo network/git work) would block a concurrent
+  `review sync` for that whole duration for no correctness benefit; the
+  narrower placement still closes the lost-update race the panel finding
+  requires.
+- `create`'s `ChangeLock` is acquired ONCE for the whole `process_create_command`
+  run (`src/create.rs`), not per-repo around each `record_pushed_state`/
+  `record_final_state` call. Per-repo acquisition would make sibling rayon
+  workers in the SAME run fail-fast against EACH OTHER (the lock has no
+  queueing/blocking semantics, matching `RepoLock`'s design), which would
+  silently drop incremental saves within a single `create` invocation. The
+  existing in-process `Mutex<ChangeState>` already serializes those workers
+  against each other; the single per-run `ChangeLock` adds the missing
+  cross-process half without conflicting with it.
+- `cleanup_all_merged` (`src/cleanup.rs`) now RELOADS each change's state
+  fresh, under its `ChangeLock`, discarding the pre-lock snapshot from
+  `state_manager.list()`. Not explicitly called out in the doc, but required
+  for the lock to actually close the lost-update race here: `list()`'s
+  snapshot predates lock acquisition, so saving it unmodified-except-for-our-
+  mutation would silently clobber any concurrent update that landed between
+  the listing and our save.
+- F13 fix scope: only the two Appendix A sites (`cleanup.rs`, `git.rs`) and
+  `undo`'s remote-branch delete (explicitly named in the task) were converted
+  to explicit existence checks. `src/review.rs`'s two OTHER
+  `github::delete_remote_branch` call sites (`purge_repo_branches`,
+  `delete_pr_and_branch`) still call the gh-api path directly without a
+  pre-probe; they were not named in Phase 7's scope and are left as-is to
+  avoid scope creep.
+
+### Tradeoffs
+- Shared `acquire_lock_file`/`reclaim_if_stale` between `RepoLock` and
+  `ChangeLock` vs. two independent copies — chosen for a single point of fix
+  for the reclaim TOCTOU (and the concurrency bug found above) rather than
+  keeping the logic in sync by hand across two files.
+- The two-process contention test hook (`GX_TEST_LOCK_DELAY_MS`, `src/lock.rs`)
+  is a small, narrowly-scoped, inert-unless-set env var read once right after
+  a successful acquire — the same "compiled in, inert by default" shape the
+  design already prescribes for Phase 8's `GX_CRASH_POINT`, borrowed early and
+  narrowly (one `sleep`, nothing else) so the two-process test can create a
+  deterministic contention window against a real spawned `gx rollback execute`
+  rather than racing on uncontrolled process-startup timing.
+- Considered a full OS-level advisory lock (`std::fs::File::lock`, stable
+  since Rust 1.89) to make reclaim airtight under ARBITRARY concurrent stress
+  with zero residual race window, which would have eliminated the need for the
+  reclaim-rename dance and the bug above entirely. Not chosen: the design doc
+  explicitly prescribes the rename-based reclaim mechanism; switching primitives
+  is a bigger, unrequested architecture change. The three-part fix above closes
+  the actual bug found (verified clean across 50+ stress-test runs and 8 full
+  `cargo test` runs) without deviating from the doc's prescribed mechanism.
+
+### Open questions
+- None. No cross-repo/system-mutating bullets in Phase 7.
