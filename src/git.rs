@@ -1405,6 +1405,137 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
     }
 }
 
+/// Count the parents of a commit. `git rev-list --parents -n 1 <oid>` prints the
+/// commit's own oid followed by each parent oid on one line; the parent count is
+/// the number of tokens minus one. One parent -> squash/rebase (plain
+/// `git revert`); two -> a true merge commit (`git revert -m 1`). This is the
+/// authoritative dispatch for the Phase 6 revert path -- never inferred from the
+/// PR's merge method.
+pub fn commit_parent_count(repo_path: &std::path::Path, oid: &str) -> Result<usize> {
+    debug!(
+        "commit_parent_count: repo_path={} oid={oid}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-list", "--parents", "-n", "1", oid])
+        .output()
+        .context("Failed to execute git rev-list --parents")?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!(
+            "Failed to list parents of {oid}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let line = String::from_utf8_lossy(&output.stdout);
+    let tokens = line.split_whitespace().count();
+    if tokens == 0 {
+        return Err(eyre::eyre!("git rev-list returned no output for {oid}"));
+    }
+    let parents = tokens - 1;
+    debug!("commit_parent_count: oid={oid} parents={parents}");
+    Ok(parents)
+}
+
+/// Fetch all refs from `origin`. Read-only with respect to the remote; used by
+/// the Phase 6 revert path so the revert branch is cut from the up-to-date base
+/// head that the merge actually landed on.
+pub fn fetch_origin(repo_path: &std::path::Path) -> Result<()> {
+    debug!("fetch_origin: repo_path={}", repo_path.display());
+    let ssh_command =
+        SshCommandDetector::get_ssh_command().context("Failed to get SSH command for fetch")?;
+    let output = Command::new("git")
+        .env("GIT_SSH_COMMAND", ssh_command)
+        .current_dir(repo_path)
+        .args(["fetch", "origin"])
+        .output()
+        .context("Failed to execute git fetch origin")?;
+
+    if output.status.success() {
+        debug!("Fetched origin in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to fetch origin: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Create and check out `branch_name` at `start_point` (e.g. `origin/main`).
+/// Fails if the branch already exists -- the caller detects collisions BEFORE
+/// calling this so it can report and refuse rather than force (Phase 6).
+pub fn create_branch_at(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    start_point: &str,
+) -> Result<()> {
+    debug!(
+        "create_branch_at: repo_path={} branch={branch_name} start_point={start_point}",
+        repo_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["checkout", "-b", branch_name, start_point])
+        .output()
+        .context("Failed to execute git checkout -b")?;
+
+    if output.status.success() {
+        debug!(
+            "Created branch '{branch_name}' at '{start_point}' in '{}'",
+            repo_path.display()
+        );
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to create branch '{}' at '{}': {}",
+            branch_name,
+            start_point,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Revert `oid` on the current branch (`--no-edit`). `mainline` selects the
+/// parent for a true merge commit (`Some(1)`), `None` for a single-parent
+/// (squash/rebase) commit. A conflicting revert returns `Err` and the working
+/// tree is left mid-revert: the caller reports the conflict per repo and leaves
+/// the revert branch for manual resolution (undo NEVER force-resolves).
+pub fn revert_commit(repo_path: &std::path::Path, oid: &str, mainline: Option<u32>) -> Result<()> {
+    debug!(
+        "revert_commit: repo_path={} oid={oid} mainline={mainline:?}",
+        repo_path.display()
+    );
+    let mut args: Vec<String> = vec!["revert".to_string(), "--no-edit".to_string()];
+    if let Some(m) = mainline {
+        args.push("-m".to_string());
+        args.push(m.to_string());
+    }
+    args.push(oid.to_string());
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(&arg_refs)
+        .output()
+        .context("Failed to execute git revert")?;
+
+    if output.status.success() {
+        debug!("Reverted {oid} in '{}'", repo_path.display());
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(eyre::eyre!(
+            "git revert of {oid} failed: {} {}",
+            stderr.trim(),
+            stdout.trim()
+        ))
+    }
+}
+
 /// Pull latest changes from the remote repository, fast-forward only.
 ///
 /// A non-fast-forward result is a per-repo error rather than a surprise merge

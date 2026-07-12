@@ -121,6 +121,10 @@ pub enum RepoChangeStatus {
     PrMerged,
     /// PR was closed without merging
     PrClosed,
+    /// A revert PR has been opened for a previously merged PR (`gx undo`
+    /// Phase 6 [F4]): the merged work is reversed via a revert PR, never by
+    /// touching the base branch. This is the terminal undo state for a merged row.
+    RevertPrOpen,
     /// Operation failed
     Failed,
     /// Local branch cleaned up
@@ -191,6 +195,16 @@ impl ChangeState {
             repo.status = RepoChangeStatus::PrClosed;
             self.updated_at = Utc::now();
             self.update_overall_status();
+        }
+    }
+
+    /// Mark a repository's merged PR as reverted via an open revert PR (`gx undo`
+    /// Phase 6 [F4]). The merged work is reversed by a revert PR, never by moving
+    /// the base branch; this is the terminal undo state for a merged row.
+    pub fn mark_revert_pr_open(&mut self, repo_slug: &str) {
+        if let Some(repo) = self.repositories.get_mut(repo_slug) {
+            repo.status = RepoChangeStatus::RevertPrOpen;
+            self.updated_at = Utc::now();
         }
     }
 

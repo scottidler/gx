@@ -40,7 +40,8 @@ enum UndoAction {
     DeleteRemoteAndLocal,
     /// Committed local only (recovery-derived, never pushed): delete local branch.
     DeleteLocal,
-    /// PR merged: reported as requiring a revert (Phase 6); NEVER reversed here.
+    /// PR merged: revert it via a `revert/<change-id>` PR (Phase 6 [F4]). The
+    /// base branch is NEVER touched directly and undo NEVER force-pushes.
     RequiresRevert { pr_number: Option<u64> },
     /// Already gone (cleaned up): record and skip.
     AlreadyGone,
@@ -59,6 +60,13 @@ struct UndoPlan {
     action: UndoAction,
     /// Transaction ids of live recovery files for this repo, drained FIRST.
     recovery_tx_ids: Vec<String>,
+    /// The merge commit oid of the landed PR, from the GitHub reconcile (Phase 6):
+    /// drives the parent-count dispatch for the revert. `None` unless the repo's
+    /// PR reconciled as `Merged`.
+    merge_commit_oid: Option<String>,
+    /// The base branch the merged PR landed on (from the reconcile). The revert
+    /// branch is cut from this branch's head; `None` unless merged.
+    base_ref_name: Option<String>,
 }
 
 /// Outcome of undoing one repo, used to render results and true up state.
@@ -75,8 +83,10 @@ enum OutcomeKind {
     Undone,
     /// Nothing to do (already gone): leave state untouched.
     Skipped,
-    /// Merged PR: reported, holds the aggregate at `PartiallyMerged` until Phase 6.
-    MergedPendingRevert,
+    /// Merged PR reverted: a `revert/<change-id>` PR was opened (Phase 6 [F4]).
+    /// Marks the row `RevertPrOpen`; the aggregate reaches `Abandoned` once every
+    /// merged row is reverted.
+    RevertPrOpened { pr_number: Option<u64> },
     /// A step failed; the error is reported and state is NOT advanced, so a
     /// re-run retries this repo.
     Failed(String),
@@ -91,7 +101,8 @@ fn org_of(repo_slug: &str) -> &str {
 /// Pure and directly unit-testable.
 fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAction {
     match status {
-        RepoChangeStatus::CleanedUp => UndoAction::AlreadyGone,
+        // Already reverted (revert PR open) or cleaned up: nothing more to do.
+        RepoChangeStatus::CleanedUp | RepoChangeStatus::RevertPrOpen => UndoAction::AlreadyGone,
         RepoChangeStatus::PrMerged => UndoAction::RequiresRevert { pr_number },
         RepoChangeStatus::PrOpen | RepoChangeStatus::PrDraft => match pr_number {
             Some(n) => UndoAction::ClosePr { pr_number: n },
@@ -126,12 +137,17 @@ fn same_repo(a: &Path, b: &Path) -> bool {
 /// directly unit-testable. A recovery file whose repo is not in the state file
 /// (crash between push and state save, F12) becomes its own committed-local-only
 /// entry so it is never stranded.
-fn build_plan(state: &ChangeState, recoveries: &[RecoveryState]) -> Vec<UndoPlan> {
+fn build_plan(
+    state: &ChangeState,
+    recoveries: &[RecoveryState],
+    merged_prs: &[github::PrInfo],
+) -> Vec<UndoPlan> {
     debug!(
-        "build_plan: change_id={} repos={} recoveries={}",
+        "build_plan: change_id={} repos={} recoveries={} merged_prs={}",
         state.change_id,
         state.repositories.len(),
-        recoveries.len()
+        recoveries.len(),
+        merged_prs.len()
     );
     let mut used = vec![false; recoveries.len()];
     let mut plans = Vec::new();
@@ -149,14 +165,23 @@ fn build_plan(state: &ChangeState, recoveries: &[RecoveryState]) -> Vec<UndoPlan
             }
         }
 
+        // For a merged repo, carry the merge commit oid + base branch from the
+        // reconcile so the revert can dispatch on parent count and cut its branch
+        // from the right base head. Match on slug; only merged PRs are supplied.
+        let merged = merged_prs
+            .iter()
+            .find(|p| p.repo_slug == repo_state.repo_slug);
+
         plans.push(UndoPlan {
             slug: repo_state.repo_slug.clone(),
             repo_path,
             branch: Some(repo_state.branch_name.clone()),
-            pr_number: repo_state.pr_number,
+            pr_number: repo_state.pr_number.or_else(|| merged.map(|p| p.number)),
             status: Some(repo_state.status.clone()),
             action: classify_action(&repo_state.status, repo_state.pr_number),
             recovery_tx_ids,
+            merge_commit_oid: merged.and_then(|p| p.merge_commit_oid.clone()),
+            base_ref_name: merged.map(|p| p.base_ref_name.clone()),
         });
     }
 
@@ -179,6 +204,8 @@ fn build_plan(state: &ChangeState, recoveries: &[RecoveryState]) -> Vec<UndoPlan
             status: None,
             action: UndoAction::DeleteLocal,
             recovery_tx_ids: vec![rec.transaction_id.clone()],
+            merge_commit_oid: None,
+            base_ref_name: None,
         });
     }
 
@@ -194,6 +221,7 @@ fn state_label(plan: &UndoPlan) -> &'static str {
         Some(RepoChangeStatus::PrOpen) => "PR open",
         Some(RepoChangeStatus::PrDraft) => "PR open (draft)",
         Some(RepoChangeStatus::PrClosed) => "PR closed",
+        Some(RepoChangeStatus::RevertPrOpen) => "revert PR open",
         Some(RepoChangeStatus::BranchCreated) => "pushed, no PR",
         Some(RepoChangeStatus::Failed) => "failed",
     }
@@ -210,8 +238,8 @@ fn action_label(plan: &UndoPlan) -> String {
         }
         UndoAction::DeleteLocal => "delete local branch".to_string(),
         UndoAction::RequiresRevert { pr_number } => match pr_number {
-            Some(n) => format!("PR #{n} merged -> requires revert (Phase 6); not reversed"),
-            None => "merged -> requires revert (Phase 6); not reversed".to_string(),
+            Some(n) => format!("PR #{n} merged -> open revert PR (never touches base branch)"),
+            None => "merged -> open revert PR (never touches base branch)".to_string(),
         },
         UndoAction::AlreadyGone => "already gone; skip".to_string(),
     }
@@ -267,7 +295,12 @@ fn confirm_undo(change_id: &str, count: usize, yes: bool) -> Result<bool> {
 /// taken from the recorded repo slugs (or an explicit `--org`); a per-org fetch
 /// failure is a warning, not a hard error, so an offline undo of local branches
 /// still proceeds on the recorded state.
-fn reconcile(change_id: &str, org: Option<&str>, state: &ChangeState, config: &Config) {
+fn reconcile(
+    change_id: &str,
+    org: Option<&str>,
+    state: &ChangeState,
+    config: &Config,
+) -> Vec<github::PrInfo> {
     let orgs: BTreeSet<String> = match org {
         Some(o) => std::iter::once(o.to_string()).collect(),
         None => state
@@ -288,7 +321,7 @@ fn reconcile(change_id: &str, org: Option<&str>, state: &ChangeState, config: &C
 
     if all_prs.is_empty() {
         debug!("reconcile: no PRs returned; leaving recorded state as-is");
-        return;
+        return all_prs;
     }
 
     match crate::review::sync_change_state(&all_prs, change_id) {
@@ -297,6 +330,13 @@ fn reconcile(change_id: &str, org: Option<&str>, state: &ChangeState, config: &C
         }
         Err(e) => warn!("Failed to reconcile change state for {change_id}: {e}"),
     }
+
+    // Return only the merged PRs; they carry the merge commit oid + base branch
+    // the Phase 6 revert path needs.
+    all_prs
+        .into_iter()
+        .filter(|p| p.state == github::PrState::Merged)
+        .collect()
 }
 
 /// Delete the pushed branch: the remote branch (via the token-consistent gh
@@ -334,9 +374,9 @@ fn delete_branches(plan: &UndoPlan, config: &Config, remote: bool) -> Result<(),
 /// Undo one repo: drain any live recovery file FIRST (via the same rollback
 /// interpreter `gx rollback execute` uses), then perform the campaign action,
 /// all under the per-repo lock.
-fn undo_one(plan: &UndoPlan, config: &Config) -> UndoOutcome {
+fn undo_one(plan: &UndoPlan, change_id: &str, config: &Config) -> UndoOutcome {
     debug!(
-        "undo_one: slug={} action={:?} recoveries={}",
+        "undo_one: slug={} change_id={change_id} action={:?} recoveries={}",
         plan.slug,
         plan.action,
         plan.recovery_tx_ids.len()
@@ -374,7 +414,7 @@ fn undo_one(plan: &UndoPlan, config: &Config) -> UndoOutcome {
     // 2. Campaign action.
     match &plan.action {
         UndoAction::AlreadyGone => outcome(OutcomeKind::Skipped),
-        UndoAction::RequiresRevert { .. } => outcome(OutcomeKind::MergedPendingRevert),
+        UndoAction::RequiresRevert { .. } => outcome(revert_merged(plan, change_id, config)),
         UndoAction::ClosePr { pr_number } => {
             if let Err(e) = github::close_pr(&plan.slug, *pr_number, config) {
                 return outcome(OutcomeKind::Failed(format!(
@@ -397,16 +437,154 @@ fn undo_one(plan: &UndoPlan, config: &Config) -> UndoOutcome {
     }
 }
 
+/// Revert a merged PR (Phase 6 [F4]): cut a `revert/<change-id>` branch from the
+/// base branch head, `git revert` the landed commit (parent-count dispatch:
+/// plain revert for a single-parent squash/rebase commit, `-m 1` for a true
+/// merge commit), push the branch, and open a revert PR linking the original.
+/// The base branch is NEVER moved and undo NEVER force-pushes.
+///
+/// Collision: an existing `revert/<change-id>` branch (local OR remote) FAILS
+/// this repo with a message naming the branch -- no reuse, no force, nothing
+/// touched. Conflict: a revert that conflicts is REPORTED and the revert branch
+/// is left mid-revert for manual resolution; undo never force-resolves.
+fn revert_merged(plan: &UndoPlan, change_id: &str, config: &Config) -> OutcomeKind {
+    let repo_path = match &plan.repo_path {
+        Some(p) if crate::bare::is_git_path(p) => p.clone(),
+        Some(p) => {
+            return OutcomeKind::Failed(format!("recorded local path missing: {}", p.display()))
+        }
+        None => return OutcomeKind::Failed("no local path recorded".to_string()),
+    };
+
+    // Fail closed: without the merge commit oid (reconcile offline, or the PR is
+    // not actually merged) we cannot revert precisely -- never guess.
+    let oid =
+        match &plan.merge_commit_oid {
+            Some(o) => o.clone(),
+            None => return OutcomeKind::Failed(
+                "merged PR has no merge commit oid available (reconcile offline?); cannot revert"
+                    .to_string(),
+            ),
+        };
+
+    // Base branch the merge landed on; fall back to the repo's head branch when
+    // the reconcile didn't supply one.
+    let base = match &plan.base_ref_name {
+        Some(b) => b.clone(),
+        None => match git::get_head_branch(&repo_path) {
+            Ok(b) => b,
+            Err(e) => {
+                return OutcomeKind::Failed(format!(
+                    "no base branch recorded and could not determine head branch: {e}"
+                ))
+            }
+        },
+    };
+
+    let revert_branch = format!("revert/{change_id}");
+    debug!(
+        "revert_merged: slug={} repo={} oid={oid} base={base} branch={revert_branch}",
+        plan.slug,
+        repo_path.display()
+    );
+
+    // Collision: refuse if the revert branch already exists (local OR remote).
+    // No reuse, no force; touch nothing.
+    match git::branch_exists_locally(&repo_path, &revert_branch) {
+        Ok(true) => {
+            return OutcomeKind::Failed(format!(
+                "revert branch {revert_branch} already exists locally; refusing to reuse or force (delete it and re-run)"
+            ))
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return OutcomeKind::Failed(format!(
+                "failed to check for local revert branch {revert_branch}: {e}"
+            ))
+        }
+    }
+    match git::remote_branch_exists_probe(&repo_path, &revert_branch) {
+        Ok(true) => {
+            return OutcomeKind::Failed(format!(
+                "revert branch {revert_branch} already exists on remote; refusing to reuse or force"
+            ))
+        }
+        Ok(false) => {}
+        Err(e) => {
+            // Fail closed: cannot verify remotely -> do not risk a collision.
+            return OutcomeKind::Failed(format!(
+                "cannot verify revert branch {revert_branch} on remote (offline?): {e}"
+            ));
+        }
+    }
+
+    // Cut the revert branch from the up-to-date base head the merge landed on.
+    if let Err(e) = git::fetch_origin(&repo_path) {
+        return OutcomeKind::Failed(format!("failed to fetch origin before revert: {e}"));
+    }
+    let start_point = format!("origin/{base}");
+    if let Err(e) = git::create_branch_at(&repo_path, &revert_branch, &start_point) {
+        return OutcomeKind::Failed(format!(
+            "failed to create revert branch {revert_branch} from {start_point}: {e}"
+        ));
+    }
+
+    // Parent-count dispatch: 2 parents -> true merge (`-m 1`); otherwise a
+    // single-parent squash/rebase commit (plain revert). Never inferred from the
+    // PR's merge method.
+    let parents = match git::commit_parent_count(&repo_path, &oid) {
+        Ok(n) => n,
+        Err(e) => return OutcomeKind::Failed(format!("failed to count parents of {oid}: {e}")),
+    };
+    let mainline = if parents >= 2 { Some(1) } else { None };
+
+    if let Err(e) = git::revert_commit(&repo_path, &oid, mainline) {
+        // Conflict (or any failure): leave the branch in place for manual
+        // resolution; never force-resolve.
+        return OutcomeKind::Failed(format!(
+            "revert of {oid} on {revert_branch} failed; branch left for manual resolution: {e}"
+        ));
+    }
+
+    if let Err(e) = git::push_branch(&repo_path, &revert_branch) {
+        return OutcomeKind::Failed(format!("failed to push revert branch {revert_branch}: {e}"));
+    }
+
+    match github::create_revert_pr(
+        &plan.slug,
+        &revert_branch,
+        &base,
+        change_id,
+        plan.pr_number,
+        config,
+    ) {
+        Ok(res) => {
+            info!(
+                "Opened revert PR #{} for {} ({})",
+                res.number, plan.slug, res.url
+            );
+            OutcomeKind::RevertPrOpened {
+                pr_number: Some(res.number),
+            }
+        }
+        Err(e) => OutcomeKind::Failed(format!(
+            "revert branch {revert_branch} pushed but failed to open revert PR: {e}"
+        )),
+    }
+}
+
 /// Fold the per-repo outcomes into the change state and set the aggregate:
-/// `Abandoned` once every repo is resolved with no merged rows, `PartiallyMerged`
-/// when merged rows remain (they need a Phase 6 revert). On partial failure the
-/// aggregate is left as reconciled so a re-run converges.
+/// `Abandoned` once every repo is resolved -- cleaned up (branch/PR removed) or,
+/// for a merged row, reverted via an open revert PR (Phase 6 [F4]). On partial
+/// failure the aggregate is left as reconciled so a re-run converges.
 fn finalize_state(state: &mut ChangeState, outcomes: &[UndoOutcome]) {
     for o in outcomes {
-        if o.kind == OutcomeKind::Undone {
-            // Recovery-only repos are not in state (slug is a path leaf); this
-            // is a no-op for them, which is correct.
-            state.mark_cleaned_up(&o.slug);
+        // Recovery-only repos are not in state (slug is a path leaf); the marks
+        // are no-ops for them, which is correct.
+        match &o.kind {
+            OutcomeKind::Undone => state.mark_cleaned_up(&o.slug),
+            OutcomeKind::RevertPrOpened { .. } => state.mark_revert_pr_open(&o.slug),
+            _ => {}
         }
     }
 
@@ -415,23 +593,18 @@ fn finalize_state(state: &mut ChangeState, outcomes: &[UndoOutcome]) {
         return;
     }
 
-    let any_merged = state
-        .repositories
-        .values()
-        .any(|r| r.status == RepoChangeStatus::PrMerged);
+    // Every row resolved: cleaned up, or a merged row now reverted (revert PR
+    // open). A merged row whose revert FAILED stays `PrMerged` -> not resolved
+    // -> the aggregate is left as reconciled so a re-run retries the revert.
     let all_resolved = state.repositories.values().all(|r| {
         matches!(
             r.status,
-            RepoChangeStatus::CleanedUp | RepoChangeStatus::PrMerged
+            RepoChangeStatus::CleanedUp | RepoChangeStatus::RevertPrOpen
         )
     });
 
     if all_resolved {
-        state.status = if any_merged {
-            ChangeStatus::PartiallyMerged
-        } else {
-            ChangeStatus::Abandoned
-        };
+        state.status = ChangeStatus::Abandoned;
     }
     debug!(
         "finalize_state: change_id={} status={:?}",
@@ -445,13 +618,9 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
         .iter()
         .map(|o| {
             let error = match &o.kind {
-                OutcomeKind::Undone | OutcomeKind::Skipped => None,
-                OutcomeKind::MergedPendingRevert => Some(format!(
-                    "{} merged; requires revert (Phase 6) - not reversed",
-                    o.pr_number
-                        .map(|n| format!("PR #{n}"))
-                        .unwrap_or_else(|| "PR".to_string())
-                )),
+                OutcomeKind::Undone | OutcomeKind::Skipped | OutcomeKind::RevertPrOpened { .. } => {
+                    None
+                }
                 OutcomeKind::Failed(msg) => Some(msg.clone()),
             };
             ReviewResult {
@@ -479,9 +648,9 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
         .iter()
         .filter(|o| o.kind == OutcomeKind::Undone)
         .count();
-    let merged = outcomes
+    let reverted = outcomes
         .iter()
-        .filter(|o| o.kind == OutcomeKind::MergedPendingRevert)
+        .filter(|o| matches!(o.kind, OutcomeKind::RevertPrOpened { .. }))
         .count();
     let failed = outcomes
         .iter()
@@ -493,7 +662,7 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
         .count();
 
     println!(
-        "\n📊 {} repositories: {undone} undone, {merged} merged (need revert), {failed} failed, {skipped} skipped",
+        "\n📊 {} repositories: {undone} undone, {reverted} reverted (revert PR opened), {failed} failed, {skipped} skipped",
         outcomes.len()
     );
 }
@@ -515,8 +684,9 @@ pub fn process_undo_command(
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("No change state recorded for {change_id}; nothing to undo"))?;
 
-    // Reconcile against GitHub reality first (Phase 4 sync), then reload.
-    reconcile(change_id, org, &state, config);
+    // Reconcile against GitHub reality first (Phase 4 sync), then reload. The
+    // merged PRs carry the merge commit oid + base branch the revert path needs.
+    let merged_prs = reconcile(change_id, org, &state, config);
     let mut state = manager
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("Change state for {change_id} disappeared during reconcile"))?;
@@ -529,7 +699,7 @@ pub fn process_undo_command(
         .filter(|r| r.change_id == change_id)
         .collect();
 
-    let plan = build_plan(&state, &recoveries);
+    let plan = build_plan(&state, &recoveries, &merged_prs);
     print_plan(&plan, change_id);
 
     let actionable: Vec<UndoPlan> = plan.into_iter().filter(needs_action).collect();
@@ -552,8 +722,12 @@ pub fn process_undo_command(
         .build()
         .context("Failed to create thread pool")?;
 
-    let outcomes: Vec<UndoOutcome> =
-        pool.install(|| actionable.par_iter().map(|p| undo_one(p, config)).collect());
+    let outcomes: Vec<UndoOutcome> = pool.install(|| {
+        actionable
+            .par_iter()
+            .map(|p| undo_one(p, change_id, config))
+            .collect()
+    });
 
     finalize_state(&mut state, &outcomes);
     manager

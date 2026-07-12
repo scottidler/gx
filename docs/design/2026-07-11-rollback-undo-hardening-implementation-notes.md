@@ -466,3 +466,76 @@ buckets each ("None." where empty).
   to harden with an explicit existence check; flagged so it is not assumed
   already handled. No action needed from the user.
 - Cross-repo/system-mutating bullets: none in Phase 5.
+
+## Phase 6: Merged-PR revert path
+
+### Design decisions
+- Revert mechanics implemented as `revert_merged` in `src/undo.rs`, called from
+  `undo_one`'s `UndoAction::RequiresRevert` arm (Phase 5 only reported it). Flow:
+  collision check (local + remote) -> `git fetch origin` -> `git checkout -b
+  revert/<change-id> origin/<base>` -> parent-count dispatch -> `git revert`
+  (or `-m 1`) -> `push_branch` -> `github::create_revert_pr`. Under the same
+  per-repo lock Phase 5 already takes in `undo_one`.
+- Parent-count dispatch is authoritative from git, not the PR merge method:
+  `git::commit_parent_count` runs `git rev-list --parents -n 1 <oid>` and counts
+  tokens-1 — `src/git.rs:commit_parent_count`. `>= 2` -> `-m 1` (true merge),
+  else plain revert (squash/rebase). Per the doc's "get it via `git rev-list
+  --parents`, NOT by guessing from PR type."
+- The merge commit oid + base branch are threaded from the GitHub reconcile, not
+  persisted to state: `reconcile` now returns the merged `PrInfo`s, and
+  `build_plan` copies `merge_commit_oid`/`base_ref_name` onto the merged repo's
+  `UndoPlan` — `src/undo.rs:reconcile`, `build_plan`, `UndoPlan`. This keeps the
+  state file schema unchanged for Phase 6 and sources the oid from GitHub reality
+  at undo time.
+- New git seams, each with function-level debug logging and fail-loud errors:
+  `git::commit_parent_count`, `git::fetch_origin`, `git::create_branch_at`,
+  `git::revert_commit` (`--no-edit`, optional `-m` mainline) — `src/git.rs`.
+- `github::create_revert_pr` opens the revert PR against the original base with a
+  body linking the original PR (`Reverts #<n>`), reusing `retry_gh` and
+  `extract_pr_number_from_url` — `src/github.rs:create_revert_pr`.
+- New terminal per-repo status `RepoChangeStatus::RevertPrOpen` +
+  `ChangeState::mark_revert_pr_open` — `src/state.rs`. `finalize_state` marks a
+  reverted merged row `RevertPrOpen` and flips the aggregate to `Abandoned` once
+  every row is resolved (`CleanedUp | RevertPrOpen`); a failed revert leaves the
+  row `PrMerged` so a re-run retries — `src/undo.rs:finalize_state`.
+- Collision fails closed and touches nothing: an existing `revert/<change-id>`
+  branch locally OR on the remote returns `Failed` naming the branch, checked
+  BEFORE any fetch/branch/commit. The remote probe (`remote_branch_exists_probe`)
+  failing (offline) is ALSO a fail-closed `Failed`, never a silent proceed.
+- Conflict handling: `git::revert_commit` returning `Err` (conflict or otherwise)
+  is reported per repo and the revert branch is left mid-revert for manual
+  resolution — no `git revert --abort`, no force. Push/PR are skipped on conflict.
+
+### Deviations
+- Doc row wording said merged rows hold at `PartiallyMerged` until reverted
+  (Phase 5 text); Phase 6 supersedes that: a reverted merged row is `RevertPrOpen`
+  and the aggregate reaches `Abandoned` once all rows resolve. Same effect the doc
+  intends ("aggregate `Abandoned` once every merged row has a revert PR open");
+  the Phase 5 `OutcomeKind::MergedPendingRevert` was replaced by
+  `RevertPrOpened { pr_number }` and its `finalize_state` test inverted
+  (`finalize_state_abandons_when_merged_row_reverted`) rather than left green.
+- The merge commit oid/base are carried on `UndoPlan` (populated from the
+  reconcile) rather than added to `RepoChangeState`. Same effect (the revert has
+  the oid it needs), correct seam — the design's Data Model section did not add
+  these to `ChangeState`, and sourcing from live GitHub reconcile is more
+  truthful than a persisted copy that could go stale.
+
+### Tradeoffs
+- Revert branch cut from `origin/<base>` (after `git fetch origin`) rather than a
+  local base ref — chosen so the revert lands on the base head the merge actually
+  landed on, at the cost of one fetch per merged repo. Matches the doc's "off the
+  BASE branch head."
+- If the revert branch pushes but `create_revert_pr` fails, the branch is left on
+  the remote and a re-run hits the remote-collision guard (reported, not
+  auto-recovered). Chosen over auto-deleting a just-pushed branch (undo never
+  force/deletes speculatively); the failure message tells the user. An observed
+  re-run pain would justify a "reuse my own pushed revert branch" refinement
+  later, not now.
+- Phase 6 revert tests run in-process against `undo_one` with a `gh` PATH shim for
+  `pr create` and real bare remotes, rather than spawning the full `gx undo`
+  binary with a GraphQL shim that would have to bake in the dynamic merge oid.
+  This tests the load-bearing mechanics (parent-count dispatch, inverse diff,
+  collision) directly and deterministically.
+
+### Open questions
+- None. No cross-repo/system-mutating bullets in Phase 6.

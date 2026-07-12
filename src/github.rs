@@ -219,6 +219,62 @@ pub fn create_pr(
     }
 }
 
+/// Open a revert PR for a merged change (`gx undo` Phase 6 [F4]). The `revert/
+/// <change-id>` branch (already pushed by the caller) is opened against the
+/// original base branch, with a body linking the original PR so the reversal is
+/// traceable. Never merges anything and never touches the base branch directly.
+pub fn create_revert_pr(
+    repo_slug: &str,
+    branch_name: &str,
+    base_branch: &str,
+    change_id: &str,
+    original_pr: Option<u64>,
+    config: &Config,
+) -> Result<CreatePrResult> {
+    debug!(
+        "create_revert_pr: repo={repo_slug} branch={branch_name} base={base_branch} change_id={change_id} original_pr={original_pr:?}"
+    );
+
+    let title = format!("Revert {change_id}");
+    let body = match original_pr {
+        Some(n) => format!(
+            "Reverts #{n}\n\nAutomated revert of merged change `{change_id}`, opened by `gx undo`."
+        ),
+        None => {
+            format!("Automated revert of merged change `{change_id}`, opened by `gx undo`.")
+        }
+    };
+
+    let args = vec![
+        "pr",
+        "create",
+        "--repo",
+        repo_slug,
+        "--head",
+        branch_name,
+        "--title",
+        &title,
+        "--body",
+        &body,
+        "--base",
+        base_branch,
+    ];
+
+    let org = org_of(repo_slug).to_string();
+    let output = retry_gh(&org, config, &args, MAX_RETRIES)?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        debug!("Revert PR created: {url}");
+        let number = extract_pr_number_from_url(&url)
+            .ok_or_else(|| eyre::eyre!("Could not parse PR number from revert PR URL: {url}"))?;
+        Ok(CreatePrResult { number, url })
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr);
+        Err(eyre::eyre!("Failed to create revert PR: {}", error))
+    }
+}
+
 /// Extract PR number from a GitHub PR URL
 fn extract_pr_number_from_url(url: &str) -> Option<u64> {
     // URL format: https://github.com/owner/repo/pull/123
