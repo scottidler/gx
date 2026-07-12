@@ -41,3 +41,26 @@ output:
 logging:
   level: "info"
   file: "~/.local/share/gx/logs/gx.log"
+
+# `gx-mcp` MCP server: per-tool gating (design doc
+# 2026-07-12-llm-propose-apply-and-mcp-server.md). This block is optional; with
+# it absent, every tool takes its category default below. Read-only tools
+# default ENABLED, mutating tools default DISABLED -- writes are impossible by
+# default. Enabling a mutating tool is your explicit grant: it gives that MCP
+# client the same authority as a shell running `gx ... --yes`. The confirm
+# token (create-propose -> create-apply, undo-plan -> undo-execute) prevents
+# executing a STALE plan, NOT an unreviewed one.
+mcp:
+  tools:
+    # read-only (default true)
+    status: true
+    repo-discover: true
+    change-list: true
+    change-get: true
+    review-status: true
+    doctor: true
+    # mutating (default false) -- flip to true only for a client you trust
+    create-propose: false
+    create-apply: false
+    undo-plan: false
+    undo-execute: false

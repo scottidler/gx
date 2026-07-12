@@ -49,6 +49,24 @@ output:
 logging:
   level: "info"        # debug, info, warn, error
   file: "~/.local/share/gx/logs/gx.log"
+
+# `gx-mcp` MCP server tool gating (optional). Read-only tools default ENABLED,
+# mutating tools default DISABLED, so writes are impossible by default even with
+# this block absent. Enabling a mutating tool grants that MCP client the same
+# authority as a shell running `gx ... --yes`; the confirm token only prevents
+# executing a STALE plan, not an unreviewed one.
+mcp:
+  tools:
+    status: true          # read-only, default true
+    repo-discover: true
+    change-list: true
+    change-get: true
+    review-status: true
+    doctor: true
+    create-propose: false # mutating, default false
+    create-apply: false
+    undo-plan: false
+    undo-execute: false
 ```
 
 ## User vs Organization Support

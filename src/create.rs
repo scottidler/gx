@@ -4,7 +4,11 @@
 //! (`println!`/`print!`) lives here; the core never prints or prompts (design
 //! doc `2026-07-12-llm-propose-apply-and-mcp-server.md`, Phase 3).
 
-mod core;
+// `pub` since Phase 9: `gx-mcp` (a separate workspace member) calls the propose
+// / apply cores directly (`gx::create::core::propose::execute_propose`,
+// `gx::create::core::apply::execute_apply`). This is the first cross-crate
+// consumer; before Phase 8 there was none, so it was private.
+pub mod core;
 
 pub use core::{generate_change_id, Change, CreateAction, CreateResult};
 // Re-exported so the proposal-artifact retention callers outside `create`

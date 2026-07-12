@@ -40,6 +40,46 @@ fn test_stuck_proposals_is_empty_with_no_bare_proposals() {
     assert!(stuck_proposals(vec![merged]).is_empty());
 }
 
+/// The structured read core `collect_report` (Phase 9, behind the MCP `doctor`
+/// tool) must surface a bare proposal as stuck and always report the git/gh
+/// tool checks. Isolated under a throwaway `XDG_DATA_HOME` so it reads its own
+/// state, never the operator's.
+#[test]
+fn test_collect_report_surfaces_stuck_proposal_and_tools() {
+    let guard = crate::test_utils::env_lock();
+    let prior = std::env::var("XDG_DATA_HOME").ok();
+    let dir = tempfile::TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };
+
+    let mut st = ChangeState::new("GX-stuck-report".to_string(), None);
+    st.mark_proposed(
+        "org/repo",
+        "deadbeef".to_string(),
+        vec!["README.md".to_string()],
+        Some("/tmp/org/repo".to_string()),
+    );
+    StateManager::new().unwrap().save(&st).unwrap();
+
+    let report = collect_report().unwrap();
+    assert!(
+        report
+            .stuck_proposals
+            .iter()
+            .any(|s| s.change_id == "GX-stuck-report"),
+        "collect_report must surface the bare proposal as stuck"
+    );
+    assert!(
+        report.tools.iter().any(|t| t.name == "git"),
+        "collect_report always reports the git tool check"
+    );
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}
+
 #[test]
 fn test_version_compare_pads_shorter() {
     // The [A25] fix: "2.20" and "2.20.0" must compare equal (>= true).

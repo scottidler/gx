@@ -7,6 +7,9 @@
 //! would corrupt every client's protocol stream, so this binary never writes
 //! to stdout/stderr outside the transport itself.
 
+mod gate;
+mod logic;
+mod schema;
 mod server;
 
 use eyre::{Context, Result};
@@ -15,6 +18,7 @@ use rmcp::ServiceExt;
 use std::fs;
 use std::path::PathBuf;
 
+use gx::config::Config;
 use server::GxMcpServer;
 
 /// Set up file-only logging under gx's own XDG data dir (`gx::config::xdg_data_dir`),
@@ -54,7 +58,11 @@ async fn main() -> Result<()> {
     setup_logging()?;
     info!("gx-mcp starting");
 
-    let server = GxMcpServer::new();
+    // Load gx's config the same way gx itself does (XDG path), so `mcp.tools`
+    // gating is read from the shared `gx.yml`. A parse failure is fatal and
+    // never reaches stdout (logged to the file, returned as a process error).
+    let config = Config::load(None).context("Failed to load gx config")?;
+    let server = GxMcpServer::new(config);
     let transport = (tokio::io::stdin(), tokio::io::stdout());
 
     info!("gx-mcp: starting stdio MCP transport");

@@ -67,13 +67,17 @@ fn kill_and_reap(mut child: Child) {
 }
 
 #[test]
-fn test_initialize_handshake_and_empty_tool_list() {
+fn test_initialize_handshake_and_default_readonly_tool_list() {
     // Isolate logging (file-only, per design) under a throwaway data dir so
-    // this test never touches the operator's real ~/.local/share/gx/logs.
+    // this test never touches the operator's real ~/.local/share/gx/logs, and
+    // an empty config dir so gating is the DEFAULT (read-only on, mutating off)
+    // regardless of the operator's real ~/.config/gx/gx.yml.
     let data_dir = tempfile::tempdir().expect("tempdir for XDG_DATA_HOME");
+    let config_dir = tempfile::tempdir().expect("tempdir for XDG_CONFIG_HOME");
 
     let mut child = Command::new(gx_mcp_binary())
         .env("XDG_DATA_HOME", data_dir.path())
+        .env("XDG_CONFIG_HOME", config_dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -121,20 +125,46 @@ fn test_initialize_handshake_and_empty_tool_list() {
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     );
 
-    // 3. tools/list -- the empty-tool-list half of the success criterion
+    // 3. tools/list -- Phase 9: the DEFAULT surface is the six read-only tools;
+    //    the four mutating tools are gated off (absent) by default. (Phase 8
+    //    served zero tools; this assertion was inverted when Phase 9 landed the
+    //    curated surface + config gating.)
     send_line(
         &mut stdin,
         &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
     );
     let tools_response = recv_json_rpc_line(&mut reader);
     assert_eq!(tools_response["id"], json!(2));
-    let tools = tools_response["result"]["tools"]
+    let names: Vec<String> = tools_response["result"]["tools"]
         .as_array()
-        .unwrap_or_else(|| panic!("tools/list result missing tools array: {tools_response}"));
-    assert!(
-        tools.is_empty(),
-        "Phase 8 scaffold must serve ZERO tools, got: {tools:?}"
-    );
+        .unwrap_or_else(|| panic!("tools/list result missing tools array: {tools_response}"))
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    for ro in [
+        "status",
+        "repo-discover",
+        "change-list",
+        "change-get",
+        "review-status",
+        "doctor",
+    ] {
+        assert!(
+            names.contains(&ro.to_string()),
+            "default surface must include read-only tool {ro}: {names:?}"
+        );
+    }
+    for mutating in [
+        "create-propose",
+        "create-apply",
+        "undo-plan",
+        "undo-execute",
+    ] {
+        assert!(
+            !names.contains(&mutating.to_string()),
+            "mutating tool {mutating} must be gated off by default: {names:?}"
+        );
+    }
 
     kill_and_reap(child);
 }

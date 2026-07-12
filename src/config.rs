@@ -1,6 +1,7 @@
 use eyre::{Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,54 @@ pub struct Config {
     pub remote_status: Option<RemoteStatusConfig>,
     pub create: Option<CreateConfig>,
     pub github: Option<GithubConfig>,
+    /// Per-tool gating for the `gx-mcp` MCP server (design doc
+    /// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Chunk B / ringer
+    /// addendum #5). Absent = every tool takes its category default (read-only
+    /// enabled, mutating disabled). This field must EXIST for `gx` itself:
+    /// under `deny_unknown_fields` (Phase 1), a `mcp:` key in a shared `gx.yml`
+    /// would otherwise fail to parse.
+    pub mcp: Option<McpConfig>,
+}
+
+/// The curated `gx-mcp` tool surface (design doc API Design > MCP tools). The
+/// kebab-case string form (`create-propose`, ...) is both the wire tool name
+/// registered with the MCP router AND the config key under `mcp.tools`, so the
+/// two can never drift. Modeled as an enum (not free strings) so a typo'd tool
+/// key in `gx.yml` fails to deserialize loudly rather than silently gating
+/// nothing (rust.md "model a fixed vocabulary as an enum").
+///
+/// This is the DATA type only (serde + the `Ord` a `BTreeMap` key needs). The
+/// gating POLICY (which tools default on/off, name<->tool mapping) lives in the
+/// `gx-mcp` crate, the sole consumer: keeping the policy there is what stops it
+/// being dead code in the `gx` binary, which parses `mcp:` (ringer #5) but never
+/// gates anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpTool {
+    // Read-only tools (gx-mcp defaults these ENABLED).
+    Status,
+    RepoDiscover,
+    ChangeList,
+    ChangeGet,
+    ReviewStatus,
+    Doctor,
+    // Mutating tools (gx-mcp defaults these DISABLED; writes impossible by default).
+    CreatePropose,
+    CreateApply,
+    UndoPlan,
+    UndoExecute,
+}
+
+/// Per-tool gating for the MCP server (oracle pattern, sanctioned by
+/// general.md's carve-out for a server with no per-invocation CLI surface).
+/// This struct only STORES the operator's explicit choices; `gx-mcp` applies
+/// the category defaults (read-only on, mutating off) for any tool absent here.
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    /// Explicit per-tool enable/disable. A tool absent from the map takes its
+    /// category default in `gx-mcp` (mutating => disabled, else enabled).
+    pub tools: BTreeMap<McpTool, bool>,
 }
 
 /// GitHub-related configuration.
@@ -195,6 +244,7 @@ impl Default for Config {
             remote_status: Some(RemoteStatusConfig::default()),
             create: Some(CreateConfig::default()),
             github: Some(GithubConfig::default()),
+            mcp: None,
         }
     }
 }

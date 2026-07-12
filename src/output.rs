@@ -1580,17 +1580,24 @@ mod tests {
         let result = create_result_fixture();
         assert!(UnifiedDisplay::layout_view(&result).is_none());
 
-        for use_colors in [true, false] {
-            let opts = StatusOptions {
-                verbosity: OutputVerbosity::Summary,
-                use_emoji: true,
-                use_colors,
-            };
-            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
-            let rendered = render_unified_line(&result, &opts, &widths);
-            let expected = pre_change_formula(&result, &opts, &widths);
-            assert_eq!(rendered, expected);
-        }
+        // `use_colors: true` reads `colored`'s process-global state, so both
+        // `rendered` and `expected` must observe a STABLE global across the
+        // comparison. Hold COLOR_ENV_LOCK (via with_truecolor_forced) so a
+        // concurrent color-forcing test can't flip the override between the two
+        // renders - the exact race that flaked this under parallel CI load.
+        with_truecolor_forced(|| {
+            for use_colors in [true, false] {
+                let opts = StatusOptions {
+                    verbosity: OutputVerbosity::Summary,
+                    use_emoji: true,
+                    use_colors,
+                };
+                let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+                let rendered = render_unified_line(&result, &opts, &widths);
+                let expected = pre_change_formula(&result, &opts, &widths);
+                assert_eq!(rendered, expected);
+            }
+        });
     }
 
     #[test]
@@ -1603,17 +1610,21 @@ mod tests {
         let result = review_result_fixture();
         assert!(UnifiedDisplay::layout_view(&result).is_none());
 
-        for use_colors in [true, false] {
-            let opts = StatusOptions {
-                verbosity: OutputVerbosity::Summary,
-                use_emoji: true,
-                use_colors,
-            };
-            let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
-            let rendered = render_review_line(&result, &opts, &widths);
-            let expected = pre_change_review_formula(&result, &opts, &widths);
-            assert_eq!(rendered, expected);
-        }
+        // See the sibling test: hold COLOR_ENV_LOCK so `colored`'s global can't
+        // flip mid-comparison under concurrent test load.
+        with_truecolor_forced(|| {
+            for use_colors in [true, false] {
+                let opts = StatusOptions {
+                    verbosity: OutputVerbosity::Summary,
+                    use_emoji: true,
+                    use_colors,
+                };
+                let widths = AlignmentWidths::calculate(std::slice::from_ref(&result));
+                let rendered = render_review_line(&result, &opts, &widths);
+                let expected = pre_change_review_formula(&result, &opts, &widths);
+                assert_eq!(rendered, expected);
+            }
+        });
     }
 
     /// Recomputes review's `<change_id> <PR#> <emoji> <repo>` layout by hand

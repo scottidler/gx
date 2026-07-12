@@ -1054,3 +1054,121 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
   Phase 3's Open Questions) is untouched and unaffected by this phase; gx-mcp
   depends on the `gx` LIB crate cleanly (`gx = { path = ".." }`), so it does
   not inherit or worsen that debt.
+
+## Phase 9: MCP server tools
+
+### Design decisions
+- **Ten curated tools** on `GxMcpServer` (`gx-mcp/src/server.rs`), each a
+  `#[tool(name = "<kebab>")]` async fn whose body runs the blocking gx core
+  under `tokio::task::spawn_blocking` (rust.md: never block the async runtime).
+  Read-only: `status`, `repo-discover`, `change-list`, `change-get`,
+  `review-status`, `doctor`. Mutating: `create-propose`, `create-apply`,
+  `undo-plan`, `undo-execute`. Rollback-execute / review-purge / cleanup are
+  deliberately absent (design). Tool bodies map gx core results into
+  wire-decoupled schema types (`gx-mcp/src/schema.rs`) so the protocol contract
+  never drifts with an internal refactor.
+- **Tool logic in `gx-mcp/src/logic.rs`** (one blocking fn per tool), so
+  `server.rs` is a thin async shim: `run_blocking` (a free fn) spawns the
+  closure, maps `Ok(v)` -> `CallToolResult::success(json)`, a core `Err` ->
+  `CallToolResult::error(text)` (caller-visible: the driver sees WHY a mutation
+  was refused), and a JoinError panic -> `ErrorData::internal_error`.
+- **Config gating via `disable_route` at construction** (`GxMcpServer::new`):
+  for every tool `gate::tool_enabled(config, tool)` reports disabled, the route
+  is removed from the router. rmcp's `disable_route` makes a disabled tool
+  ABSENT from `tools/list` AND rejects its `call` ("tool not found") -- writes
+  impossible by default, both absent AND refused, from ONE mechanism. The
+  `#[tool_handler(router = self.tool_router)]` attribute makes rmcp's generated
+  `call_tool`/`list_tools`/`get_tool` route through the STORED (gated) router,
+  not a freshly-rebuilt one.
+- **Gating policy lives in `gx-mcp` (`gate.rs`), not gx's `config.rs`**
+  (`McpTool::ALL`, `is_mutating`, `name`, `tool_enabled`). See Deviations: gx's
+  bin parses `mcp:` but never gates, so policy methods on gx-lib types would be
+  dead code in the gx bin target. gx's `config.rs` keeps only the serde DATA
+  types (`McpTool` enum, `McpConfig { tools }`).
+- **Token gate maps to `Confirmation` (design Core signatures):** `create-apply`
+  passes `Confirmation::Token(token)` into Phase 5's `execute_apply`, which
+  refuses on mismatch (Phase 5's real `recompute_token` machinery, reused -- no
+  second token scheme). The four CLI TTY gates are untouched; the CLI still
+  passes `AlreadyConfirmed`. Since the undo plan is NOT persisted,
+  `logic::undo_plan_token` computes a token over the reconciled plan's
+  actionable entries (`slug|status|action|pr`, sorted, sha256 truncated to
+  `manifest::TOKEN_HEX_LEN`); `undo-plan` mints it, `undo-execute` recomputes
+  and refuses on mismatch (state changed between plan and execute), else calls
+  Phase 5's `execute_undo` with `AlreadyConfirmed`.
+- **`doctor` read core added to gx (`doctor::collect_report -> DoctorReport`)**:
+  Phase 3 deferred the read-surface split to "when gx-mcp exists to call them"
+  (this phase). `run_doctor` now renders `collect_report()` (output preserved)
+  and owns the purge; the MCP `doctor` tool serializes the report. `status`,
+  `change-list`, `change-get`, `review-status`, `repo-discover` needed NO gx
+  change -- their data comes from already-public building blocks
+  (`git::get_repo_status_with_options`, `StateManager::{list,load}`,
+  `repo::{discover_repos,filter_repos}`, `manifest::{load_manifest,patch_path}`).
+- **`pub mod core`** flipped in `create.rs` and `undo.rs` (first cross-crate
+  consumers). `pub mod undo` ALSO added to `lib.rs`: `undo` was only in the bin's
+  module tree, never the lib, so gx-mcp could not reach `undo::core` at all.
+- **Trust model (#6) stated in code + docs, not just prose:** mutating tools
+  default-disabled (writes impossible by default); `get_info`'s `instructions`
+  and `gx-mcp/README.md` state plainly that enabling a mutating tool grants the
+  client `--yes`-equivalent authority and the token prevents STALE-plan, not
+  UNREVIEWED, execution.
+
+### Deviations
+- **`McpTool`/`McpConfig` gating METHODS moved to `gx-mcp::gate`, not gx's
+  `config.rs`** (same effect, correct seam). Putting `is_mutating`/`enabled`/
+  `mcp_tool_enabled` on gx-lib types tripped the gx BIN target's `-D warnings`
+  dead-code check: the bin mirror-compiles `config.rs` (to parse `mcp:`, #5)
+  but never gates, so those methods have no bin caller. gx-lib keeps the serde
+  data types (used by deserialize, not dead); the sole consumer (`gx-mcp`) owns
+  the policy. A `gate::name` <-> serde `rename_all` drift guard test pins the
+  two together.
+- **`rollback` core NOT flipped to `pub mod core`** despite the phase brief
+  naming create/undo/rollback. MCP deliberately does NOT expose rollback execute
+  (design: "recovery repair stays a human surface"), so there is no gx-mcp
+  consumer to justify the visibility change; leaving it private keeps the seam
+  honest (no unused public surface).
+- **MCP `create-apply` does NOT open PRs** (`pr = None`). The design's MCP
+  signature is `{change-id, token}` with no PR param (unlike the CLI `gx apply
+  --pr`); followed the doc literally. A driver opens PRs out-of-band. Recorded
+  so the asymmetry with the CLI is a decision, not an oversight.
+- **Phase 8's `test_initialize_handshake_and_empty_tool_list` INVERTED** to
+  `..._default_readonly_tool_list`: it pinned "zero tools" (the scaffold); Phase
+  9's default surface is the six read-only tools with the four mutating absent.
+  Also set `XDG_CONFIG_HOME` to a temp dir in that test so gating is the DEFAULT
+  regardless of the operator's real `gx.yml`.
+- **Hardened a PRE-EXISTING flaky test** (`output::tests::{create,review}_
+  result_render_byte_identical_to_pre_change_formula`): both read `colored`'s
+  process-global state via `use_colors: true` WITHOUT holding `COLOR_ENV_LOCK`,
+  so a concurrent `with_truecolor_forced` test could flip the global between the
+  `rendered` and `expected` renders -> intermittent mismatch. Wrapped both in
+  `with_truecolor_forced` (the existing lock-holding helper, same pattern as the
+  two sibling tests). Not caused by Phase 9 -- adding tests perturbed scheduling
+  and surfaced it -- but it blocked otto-ci-green, so hardened (not retried) per
+  the flaky-test rule.
+
+### Tradeoffs
+- **`disable_route` gating (absent + rejected) vs. a hand-written `call_tool`
+  that checks config per call** -- chose `disable_route`: one mechanism gives
+  BOTH "absent from list" and "rejected on call" for free, and it is rmcp's own
+  supported path, so there is no bespoke gating code to drift. Cost: gating is
+  fixed at server construction (a config change needs a server restart), which
+  is correct for a stdio server the client respawns per session.
+- **Undo token over the reconciled plan (`{:?}` of action/status) vs. a
+  structured canonical encoding** -- chose the Debug form: it is deterministic
+  within a build and only needs to DETECT a state change between plan and
+  execute (not to be a stable cross-version artifact, unlike the persisted
+  proposal manifest token). Cheap, sufficient, and never leaves the process.
+- **`create-propose` summaries computed in gx-mcp from `RepoProposal.files`**
+  (files list + add/modify/delete counts) rather than parsing the `.patch` --
+  the design's "files + diff-stat, NOT full diffs". `change-get` is the full-diff
+  fetch (reads the `.patch` per repo). Keeps fleet-sized diffs off the propose
+  response (protocol-limit concern).
+- **Read tools built on public gx building blocks vs. splitting every read
+  surface into a core** -- only `doctor` needed a new core (its logic was
+  print-and-purge tangled); the rest already had public data producers, so
+  splitting them would have been unrequested churn.
+
+### Open questions
+- None new. (The `main.rs` lib/bin duplicate-module-tree debt from Phase 3
+  persists; this phase worked WITH it by keeping MCP gating policy in the
+  gx-mcp crate rather than gx-lib. `bump`'s workspace handling remains verified
+  by source-read, per Phase 8 -- unchanged here.)

@@ -4,7 +4,10 @@
 //! core never prints or prompts (design doc
 //! `2026-07-12-llm-propose-apply-and-mcp-server.md`, Phase 3).
 
-mod core;
+// `pub` since Phase 9: `gx-mcp` calls the undo cores directly
+// (`gx::undo::core::{plan_undo, execute_undo}`) for the `undo-plan` /
+// `undo-execute` MCP tools. First cross-crate consumer; private before Phase 8.
+pub mod core;
 
 pub use core::{OutcomeKind, UndoAction, UndoOutcome, UndoPlan};
 

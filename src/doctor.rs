@@ -7,7 +7,8 @@ use crate::state::{ChangeStatus, StateManager};
 use crate::transaction::Transaction;
 use chrono::{DateTime, Utc};
 use eyre::Result;
-use log::warn;
+use log::{debug, warn};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -16,22 +17,112 @@ const GH_MIN_VERSION: &str = "2.0.0";
 /// Recovery state older than this (and not matching a live repo) is orphaned.
 const ARTIFACT_TTL_DAYS: i64 = 7;
 
-/// Run the doctor command.
+/// One required-tool version check.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCheck {
+    pub name: String,
+    pub version: String,
+    /// Whether the found version meets the minimum (false if missing).
+    pub ok: bool,
+}
+
+/// A recovery file whose repo is gone or that has aged past the TTL: a purge
+/// candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryOrphan {
+    pub tx_id: String,
+    pub reason: String,
+}
+
+/// A live, recent recovery file that a rollback left with failed steps:
+/// retained evidence, NOT a purge candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedRecovery {
+    pub tx_id: String,
+    pub failed_steps: usize,
+}
+
+/// A change stuck at the bare-proposal aggregate status (never applied/undone).
+#[derive(Debug, Clone, Serialize)]
+pub struct StuckProposal {
+    pub change_id: String,
+    pub repos: usize,
+    pub updated_at: String,
+}
+
+/// The structured `gx doctor` report (design doc: read surfaces become cores
+/// returning structured results). Both the CLI (`run_doctor`, which renders it)
+/// and the `gx-mcp` `doctor` tool (which serializes it) consume this - the
+/// gather logic lives here once, never duplicated across a print path and a
+/// data path.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorReport {
+    pub tools: Vec<ToolCheck>,
+    pub log_path: String,
+    pub failed_recovery: Vec<FailedRecovery>,
+    pub orphaned_artifacts: Vec<RecoveryOrphan>,
+    pub orphaned_proposals: Vec<String>,
+    pub stuck_proposals: Vec<StuckProposal>,
+}
+
+/// Gather the full structured doctor report WITHOUT printing or purging: the
+/// read core behind both `run_doctor` and the MCP `doctor` tool.
+pub fn collect_report() -> Result<DoctorReport> {
+    debug!("collect_report: gathering doctor report");
+    let tools = [("git", GIT_MIN_VERSION), ("gh", GH_MIN_VERSION)]
+        .into_iter()
+        .map(|(tool, min)| {
+            let status = check_tool_version(tool, min);
+            ToolCheck {
+                name: tool.to_string(),
+                version: status.version,
+                ok: status.ok,
+            }
+        })
+        .collect();
+
+    let (failed_recovery, orphaned_artifacts) = gather_recovery()?;
+    let orphaned_proposals = gather_proposal_orphans();
+    let stuck_proposals = stuck_proposals(StateManager::new()?.list()?)
+        .into_iter()
+        .map(|s| StuckProposal {
+            change_id: s.change_id,
+            repos: s.repositories.len(),
+            updated_at: s.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(DoctorReport {
+        tools,
+        log_path: log_path().display().to_string(),
+        failed_recovery,
+        orphaned_artifacts,
+        orphaned_proposals,
+        stuck_proposals,
+    })
+}
+
+/// Run the doctor command: render the structured report and (optionally) purge.
 pub fn run_doctor(purge: bool) -> Result<()> {
+    let report = collect_report()?;
+
     println!("REQUIRED TOOLS:");
-    for (tool, min) in [("git", GIT_MIN_VERSION), ("gh", GH_MIN_VERSION)] {
-        let status = check_tool_version(tool, min);
-        println!(
-            "  {} {:<3} {:>12}",
-            status.status_icon, tool, status.version
-        );
+    for tool in &report.tools {
+        let icon = if tool.version == "not found" {
+            "❌"
+        } else if tool.ok {
+            "✅"
+        } else {
+            "🚨"
+        };
+        println!("  {} {:<3} {:>12}", icon, tool.name, tool.version);
     }
 
-    println!("\nLOG PATH:\n  {}", log_path().display());
+    println!("\nLOG PATH:\n  {}", report.log_path);
 
-    report_orphans(purge)?;
-    report_proposal_orphans(purge)?;
-    report_stuck_proposals()?;
+    render_orphans(&report, purge);
+    render_proposal_orphans(&report, purge);
+    render_stuck_proposals(&report);
     Ok(())
 }
 
@@ -42,24 +133,19 @@ pub fn run_doctor(purge: bool) -> Result<()> {
 /// at all) - this finds a change state that IS recorded but stuck at the
 /// bare-proposal bucket, so an operator can see it and act (`gx apply` or
 /// `gx undo`) instead of it sitting invisible in `status`/`review`.
-fn report_stuck_proposals() -> Result<()> {
-    let stuck = stuck_proposals(StateManager::new()?.list()?);
-
+fn render_stuck_proposals(report: &DoctorReport) {
     println!("\nSTUCK PROPOSALS (proposed, never applied or undone):");
-    if stuck.is_empty() {
+    if report.stuck_proposals.is_empty() {
         println!("  none");
-        return Ok(());
+        return;
     }
-    for state in &stuck {
+    for state in &report.stuck_proposals {
         println!(
             "  {} ({} repo(s), updated {})",
-            state.change_id,
-            state.repositories.len(),
-            state.updated_at.to_rfc3339()
+            state.change_id, state.repos, state.updated_at
         );
     }
     println!("  (run `gx apply <change-id>` to apply, or `gx undo <change-id>` to discard)");
-    Ok(())
 }
 
 /// Pure filter: every change state sitting at the bare-proposal aggregate
@@ -81,9 +167,9 @@ fn stuck_proposals(states: Vec<crate::state::ChangeState>) -> Vec<crate::state::
 /// terminal (via `gx undo` / `gx cleanup`); this is the safety net for the ones
 /// a crash left behind (design Data Model: `gx doctor` reports orphaned
 /// proposal dirs).
-fn report_proposal_orphans(purge: bool) -> Result<()> {
+fn gather_proposal_orphans() -> Vec<String> {
     let Some(base) = xdg_data_dir().map(|d| d.join("gx")) else {
-        return Ok(());
+        return Vec::new();
     };
     let proposals = base.join("proposals");
     let changes = base.join("changes");
@@ -104,22 +190,28 @@ fn report_proposal_orphans(purge: bool) -> Result<()> {
         }
     }
     orphans.sort();
+    orphans
+}
+
+fn render_proposal_orphans(report: &DoctorReport, purge: bool) {
+    let proposals = xdg_data_dir().map(|d| d.join("gx").join("proposals"));
 
     println!("\nORPHANED PROPOSALS:");
-    if orphans.is_empty() {
+    if report.orphaned_proposals.is_empty() {
         println!("  none");
-        return Ok(());
+        return;
     }
-    for change_id in &orphans {
+    for change_id in &report.orphaned_proposals {
         println!("  {change_id} (no change state)");
         if purge {
-            purge_proposal(&proposals.join(change_id));
+            if let Some(proposals) = &proposals {
+                purge_proposal(&proposals.join(change_id));
+            }
         }
     }
     if !purge {
         println!("  (run `gx doctor --purge` to remove these via rkvr)");
     }
-    Ok(())
 }
 
 /// Remove an orphaned proposal directory via `rkvr` (never `rm`), matching the
@@ -150,7 +242,10 @@ pub fn log_path() -> PathBuf {
 
 struct ToolStatus {
     version: String,
-    status_icon: String,
+    /// Whether the found version meets the minimum. `false` when the tool is
+    /// missing (`version == "not found"`), so the renderer distinguishes the
+    /// missing (❌) from the too-old (🚨) case by the version string.
+    ok: bool,
 }
 
 /// Check a tool's `--version` and whether it meets the minimum.
@@ -166,12 +261,12 @@ fn check_tool_version(tool: &str, min_version: &str) -> ToolStatus {
                 } else {
                     version
                 },
-                status_icon: if meets { "✅" } else { "🚨" }.to_string(),
+                ok: meets,
             }
         }
         _ => ToolStatus {
             version: "not found".to_string(),
-            status_icon: "❌".to_string(),
+            ok: false,
         },
     }
 }
@@ -205,8 +300,9 @@ fn version_compare(version: &str, min_version: &str) -> bool {
     true
 }
 
-/// Report (and optionally purge) orphaned recovery/backup artifacts.
-fn report_orphans(purge: bool) -> Result<()> {
+/// Gather orphaned recovery/backup artifacts and failed-step recovery files
+/// (the data behind both the CLI render and the MCP `doctor` tool).
+fn gather_recovery() -> Result<(Vec<FailedRecovery>, Vec<RecoveryOrphan>)> {
     let states = Transaction::list_recovery_states()?;
     let now = Utc::now();
 
@@ -223,40 +319,51 @@ fn report_orphans(purge: bool) -> Result<()> {
             // A stale / repo-gone file ages out as an orphan even if it carries
             // failed steps — nothing left to converge against.
             let reason = if repo_gone { "repo missing" } else { "stale" };
-            orphans.push((state.transaction_id.clone(), reason));
+            orphans.push(RecoveryOrphan {
+                tx_id: state.transaction_id.clone(),
+                reason: reason.to_string(),
+            });
         } else if state.has_failed_steps() {
             // Live and recent, but a rollback left failed steps: this is
             // retained evidence, NOT a purge candidate.
-            failed.push((state.transaction_id.clone(), state.failed_step_count()));
+            failed.push(FailedRecovery {
+                tx_id: state.transaction_id.clone(),
+                failed_steps: state.failed_step_count(),
+            });
         }
     }
+    Ok((failed, orphans))
+}
 
+/// Render (and optionally purge) the recovery/artifact sections of the report.
+fn render_orphans(report: &DoctorReport, purge: bool) {
     println!("\nRECOVERY (FAILED STEPS):");
-    if failed.is_empty() {
+    if report.failed_recovery.is_empty() {
         println!("  none");
     } else {
-        for (tx_id, count) in &failed {
-            println!("  {tx_id} ({count} failed step(s); re-run: gx rollback execute {tx_id})");
+        for fr in &report.failed_recovery {
+            println!(
+                "  {} ({} failed step(s); re-run: gx rollback execute {})",
+                fr.tx_id, fr.failed_steps, fr.tx_id
+            );
         }
     }
 
     println!("\nORPHANED ARTIFACTS:");
-    if orphans.is_empty() {
+    if report.orphaned_artifacts.is_empty() {
         println!("  none");
-        return Ok(());
+        return;
     }
 
-    for (tx_id, reason) in &orphans {
-        println!("  {tx_id} ({reason})");
+    for orphan in &report.orphaned_artifacts {
+        println!("  {} ({})", orphan.tx_id, orphan.reason);
         if purge {
-            purge_artifact(tx_id);
+            purge_artifact(&orphan.tx_id);
         }
     }
     if !purge {
         println!("  (run `gx doctor --purge` to remove these via rkvr)");
     }
-
-    Ok(())
 }
 
 /// Remove a transaction's recovery file and backup dir via `rkvr` (never `rm`).

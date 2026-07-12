@@ -128,3 +128,46 @@ fn test_load_at_default_location_fails_loudly_on_typo() {
     }
     drop(guard);
 }
+
+/// Ringer #5: with `deny_unknown_fields` live, an `mcp:` block must PARSE
+/// (before this field existed the design's own config example failed to load).
+/// The kebab-case tool keys deserialize into the `McpTool`-keyed map.
+#[test]
+fn test_mcp_block_parses_with_kebab_case_tool_keys() {
+    let yaml =
+        "mcp:\n  tools:\n    status: true\n    create-propose: false\n    undo-execute: true\n";
+    let config = serde_yaml::from_str::<Config>(yaml).unwrap();
+    let mcp = config.mcp.expect("mcp block should parse");
+    assert_eq!(mcp.tools.get(&McpTool::Status), Some(&true));
+    assert_eq!(mcp.tools.get(&McpTool::CreatePropose), Some(&false));
+    assert_eq!(mcp.tools.get(&McpTool::UndoExecute), Some(&true));
+    // A tool not listed is simply absent from the map (gx-mcp applies the
+    // category default for it).
+    assert_eq!(mcp.tools.get(&McpTool::Doctor), None);
+}
+
+/// A typo'd tool key under `mcp.tools` fails loudly (the vocabulary is an enum,
+/// not free strings), naming the bad key - not silently gating nothing.
+#[test]
+fn test_mcp_unknown_tool_key_fails_loudly() {
+    let yaml = "mcp:\n  tools:\n    create-propse: true\n"; // typo: create-propose
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("create-propse") || message.contains("unknown variant"),
+        "error should reject the bad tool key, got: {message}"
+    );
+}
+
+/// A typo'd key INSIDE the `mcp:` struct (not under `tools`) is rejected by the
+/// struct's own `deny_unknown_fields`.
+#[test]
+fn test_mcp_unknown_field_fails_loudly() {
+    let yaml = "mcp:\n  toolz:\n    status: true\n"; // typo: tools
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("toolz"),
+        "error should name the unknown mcp field, got: {message}"
+    );
+}
