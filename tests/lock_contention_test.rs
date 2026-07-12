@@ -60,12 +60,12 @@ fn wait_with_output(child: std::process::Child) -> Output {
     child.wait_with_output().expect("child process failed")
 }
 
-#[test]
-fn two_processes_contend_for_one_repo_lock_exactly_one_wins() {
-    // A repo with a trivial one-step `mutating` recovery: `SwitchBranch` back
-    // to `main` (already checked out, so executing it is a harmless no-op).
-    // The recovery's CONTENT doesn't matter for this test -- only that
-    // `rollback execute` reaches (and holds) the `RepoLock` for its run.
+/// Build a git repo plus a one-step `mutating` recovery whose `rollback
+/// execute` reaches (and holds) the per-repo `RepoLock`. The step is a
+/// `SwitchBranch` back to the already-checked-out `main` -- a harmless no-op;
+/// the CONTENT doesn't matter, only that executing it takes the lock. Returns
+/// the repo dir, the `$XDG_DATA_HOME` dir, and the transaction id.
+fn setup_repo_and_recovery(tx_id: &str) -> (TempDir, TempDir, String) {
     let repo_dir = TempDir::new().unwrap();
     let repo = repo_dir.path();
     git(&["init", "--quiet", "-b", "main"], repo);
@@ -77,7 +77,6 @@ fn two_processes_contend_for_one_repo_lock_exactly_one_wins() {
     git(&["commit", "--quiet", "-m", "init"], repo);
 
     let data_home = TempDir::new().unwrap();
-    let tx_id = "gx-tx-lock-contention-1";
     let recovery = RecoveryState {
         version: 1,
         transaction_id: tx_id.to_string(),
@@ -98,6 +97,14 @@ fn two_processes_contend_for_one_repo_lock_exactly_one_wins() {
         serde_json::to_string_pretty(&recovery).unwrap(),
     )
     .unwrap();
+
+    (repo_dir, data_home, tx_id.to_string())
+}
+
+#[test]
+fn two_processes_contend_for_one_repo_lock_exactly_one_wins() {
+    let (_repo_dir, data_home, tx_id) = setup_repo_and_recovery("gx-tx-lock-contention-1");
+    let tx_id = tx_id.as_str();
 
     // Process A: acquires the RepoLock, holds it ~1s, then executes.
     let a = spawn_rollback_execute(tx_id, data_home.path(), Some(1000));
@@ -135,5 +142,44 @@ fn two_processes_contend_for_one_repo_lock_exactly_one_wins() {
     assert!(
         b_elapsed < Duration::from_millis(800),
         "B's failure should be immediate, not blocked waiting for A: {b_elapsed:?}"
+    );
+}
+
+#[test]
+fn kill_9_holder_releases_lock_immediately_for_next_process() {
+    // Success criterion: kill -9 the holder -> immediate reacquire by a new
+    // process. The old scheme relied on pid-liveness reclaim to recover from a
+    // dead holder; the OS flock releases automatically when the holding process
+    // dies (even SIGKILL, which runs no Drop / cleanup), so a fresh process
+    // acquires cleanly with no reclaim machinery.
+    let (_repo_dir, data_home, tx_id) = setup_repo_and_recovery("gx-tx-lock-kill9-1");
+    let tx_id = tx_id.as_str();
+
+    // Process A holds the lock for a long time (5s), so if the lock were NOT
+    // released on death, B would have to fail or block. We SIGKILL A mid-hold.
+    let mut a = spawn_rollback_execute(tx_id, data_home.path(), Some(5000));
+
+    // Let A get well past acquiring the lock (the hold delay runs right after
+    // acquisition), then SIGKILL it -- no Drop, no explicit unlock runs.
+    std::thread::sleep(Duration::from_millis(400));
+    a.kill().expect("failed to SIGKILL process A"); // std Child::kill = SIGKILL on Unix
+    a.wait().expect("failed to reap process A");
+
+    // B, spawned after A is dead, must acquire the (kernel-released) lock and
+    // run to success -- immediately, not after any 5s hold or reclaim wait.
+    let b_start = Instant::now();
+    let b = spawn_rollback_execute(tx_id, data_home.path(), None);
+    let b_out = wait_with_output(b);
+    let b_elapsed = b_start.elapsed();
+
+    assert!(
+        b_out.status.success(),
+        "B must reacquire the dead holder's lock and succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&b_out.stdout),
+        String::from_utf8_lossy(&b_out.stderr)
+    );
+    assert!(
+        b_elapsed < Duration::from_millis(4000),
+        "B should reacquire immediately after the SIGKILL, not wait out A's hold: {b_elapsed:?}"
     );
 }

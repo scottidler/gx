@@ -124,3 +124,69 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 
 ### Open questions
 - None.
+
+## Phase 2: Lock primitive: File::try_lock
+
+### Design decisions
+- Both lock kinds now hold an OS advisory lock via `std::fs::File::try_lock()`
+  (stable since Rust 1.89) on a non-truncating `OpenOptions` open —
+  `src/lock.rs::acquire_lock_file`. `create(true).truncate(false)` (never
+  `File::create`, which truncates) so a contender never clobbers a live
+  holder's metadata; holder JSON is (re)written only AFTER the lock is held
+  (`write_holder`, which `set_len(0)` + rewrites, safe because we hold the
+  exclusive lock).
+- `try_lock` error-matching ergonomics (flagged unproven by research):
+  the API is `File::try_lock(&self) -> Result<(), std::fs::TryLockError>`
+  where `TryLockError` has exactly two variants — `WouldBlock` and
+  `Error(std::io::Error)`. `WouldBlock` -> the fail-fast "Locked by another
+  gx process (…)" error (preserves today's no-queueing semantics);
+  `Error(e)` -> propagate with context. Verified empirically with a throwaway
+  `rustc` probe before writing the match, not from memory.
+- Confirmed empirically (probe) that std uses **flock (per open file
+  description)**, not POSIX `fcntl` (per process): two separate `open()`s in
+  the SAME process contend, which is exactly what makes the same-process
+  double-open `WouldBlock` success criterion hold. Had std used fcntl locks,
+  same-process re-acquire would have silently succeeded.
+- `Drop` for both guards only logs + drops the owned `File` (releasing the OS
+  lock). No custom unlock call is needed — dropping the `File` handle unlocks.
+- The `File` is stored as a `_file` field on each guard (RAII drop-guard
+  exception in `rules/rust.md`); the guard owns it for the lock's whole life.
+- MSRV: added `rust-version = "1.89"` to `Cargo.toml` (design Technical
+  Considerations) since `File::try_lock` requires it.
+
+### Deviations
+- **Two lock tests were hardened against a fork/exec fd-inheritance race, not
+  merely ported.** `File::try_lock` uses flock on the open file description;
+  when ANY concurrent suite test `fork()`s a subprocess (git, spawned gx), the
+  child transiently dup's every open fd — including in-flight lock fds — until
+  its `exec()` closes the O_CLOEXEC ones microseconds later. That transient
+  made `test_contention_stress_*` and `test_spawned_child_*` flaky under full
+  concurrent CI load (green in isolation, ~1-in-2 fail under load). Hardening
+  (flaky tests get hardened, not retried): (a) contention stress uses a FRESH
+  repo/lock path per run so a prior run's transiently-leaked fd can't bleed
+  into the next; (b) the O_CLOEXEC test polls the reacquire for a bounded 3s
+  window — a real inheritance bug holds the lock for the child's full 30s life
+  (poll never succeeds -> bites), while the ms-scale external transient clears
+  well inside the window. Same effect as the spec's tests, correct seam.
+- `src/lock/tests.rs` staleness tests rewritten as liveness tests per the
+  phase spec: `test_stale_lock_is_reclaimed` -> `test_lock_reacquirable_after_
+  holder_drops`; the three `test_is_stale_lock_content_*` and
+  `test_concurrent_reclaim_never_loses_the_winning_live_lock` tests (which
+  referenced the deleted reclaim fns) removed; `kill_9_holder_releases_lock_
+  immediately_for_next_process` added to `tests/lock_contention_test.rs` as the
+  cross-process dead-holder analog.
+
+### Tradeoffs
+- Bounded-poll O_CLOEXEC assertion vs a single one-shot reacquire — chose the
+  bounded poll: a one-shot is what made the test flaky (it can land inside an
+  unrelated fork/exec transient). The poll still bites the real bug because a
+  genuinely-inherited fd holds the lock far longer than the poll window
+  (proven: with the parent's `drop` removed, the poll fails deterministically).
+- Left the lock FILE on disk after drop (never unlink) rather than cleaning it
+  up — the panel must-fix. Persisted unlocked lock files are harmless
+  (acquirable) and unlinking reintroduces the 2-winner interleave; the
+  regression test `test_drop_never_unlinks_and_reopens_same_inode` pins it via
+  the inode staying constant across drop+reacquire.
+
+### Open questions
+- None.

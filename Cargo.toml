@@ -2,6 +2,8 @@
 name = "gx"
 version = "0.4.1"
 edition = "2021"
+# `std::fs::File::try_lock` (used by src/lock.rs) is stable since Rust 1.89.
+rust-version = "1.89"
 build = "build.rs"
 
 [[bin]]

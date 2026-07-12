@@ -6,24 +6,41 @@
 //! `changes/<id>.json` read-modify-writes (Phase 7 [F6]): the atomic write
 //! that `StateManager::save` already uses prevents a TORN file, not a LOST
 //! update between two processes' load-mutate-save cycles, and the change lock
-//! closes that race. Both lock kinds are a file created with `O_EXCL`
-//! semantics (`create_new`) under `$XDG_DATA_HOME/gx/locks/<hash>.lock`,
-//! carrying the holder's pid / cwd / command / start time. A stale lock
-//! (holder pid gone) is reclaimed with a warning.
+//! closes that race.
 //!
-//! Reclaim is TOCTOU-safe (Phase 7 [F7]): the stale file is renamed to a
-//! private name FIRST, re-verified there, and only then removed. A racing
-//! reclaimer that loses the rename sees the failure and simply retries
-//! `acquire` rather than blindly deleting whatever now sits at the shared
-//! path -- so a lock another process has since recreated as its own live
-//! lock is never destroyed.
+//! Both lock kinds are backed by an OS advisory lock ([`std::fs::File::try_lock`],
+//! stable since Rust 1.89) on a file under `$XDG_DATA_HOME/gx/locks/<hash>.lock`.
+//! The kernel releases the lock automatically when the holding process exits --
+//! including on `kill -9` -- so there is NO staleness concept and NO reclaim
+//! machinery: a lock whose holder is gone is simply acquirable by the next
+//! contender. `try_lock` returning `WouldBlock` preserves gx's fail-fast,
+//! no-queueing semantics: a second live invocation errors immediately naming
+//! the holder rather than blocking.
+//!
+//! Two invariants the tests pin (both are prior-bug regressions):
+//!
+//! - **Never truncate on open, never unlink on drop.** The lock file is opened
+//!   read/write *without* truncation so a contender can never clobber a live
+//!   holder's metadata; holder JSON is (re)written only AFTER the lock is held.
+//!   `Drop` only unlocks/closes (the owned `File` drops) and NEVER unlinks the
+//!   file. Unlinking under flock reintroduces a 2-winner interleave: A holds
+//!   (inode1), B has a pending lock on inode1, A drops+unlinks, C creates a
+//!   FRESH file (inode2) at the path and locks it while B still holds inode1.
+//!   Not unlinking keeps the path bound to one inode, so every reopen contends
+//!   on the same lock. Lock files persist harmlessly (unlocked = acquirable).
+//! - **The `File` handle IS the lock.** The RAII guard owns it for the lock's
+//!   full lifetime. Child processes (the spawned agent) must not inherit the
+//!   fd; `O_CLOEXEC` is the Rust default and is asserted by a test, not assumed.
+//!
+//! Advisory locks are unreliable on network filesystems; `$XDG_DATA_HOME` is
+//! local, so this is a non-issue here.
 
 use crate::config::xdg_data_dir;
 use eyre::{Context, Result};
-use log::{debug, warn};
+use log::debug;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Metadata recorded in a lock file about its holder.
@@ -50,14 +67,20 @@ impl LockInfo {
     }
 }
 
-/// An acquired per-repo lock. Releases (removes the lock file) on drop.
+/// An acquired per-repo lock. The owned `File` holds the OS advisory lock for
+/// the guard's lifetime; dropping the guard releases (unlocks) it. The lock
+/// file itself is intentionally left in place -- see the module docs.
 pub struct RepoLock {
     path: PathBuf,
+    // The OS lock lives on this open file description. Held for the guard's
+    // full lifetime; dropped (unlocked) when the guard drops. NEVER unlinked.
+    _file: File,
 }
 
 impl RepoLock {
-    /// Acquire the lock for `repo_path`. Fails fast if another live process
-    /// holds it; reclaims the lock if the holder's pid is gone.
+    /// Acquire the lock for `repo_path`. Fails fast (naming the holder) if
+    /// another live process holds it; a lock whose holder has exited is
+    /// acquired directly (the kernel already released it).
     pub fn acquire(repo_path: &Path) -> Result<Self> {
         let path = lock_path_for(repo_path)?;
         debug!(
@@ -65,109 +88,129 @@ impl RepoLock {
             repo_path.display(),
             path.display()
         );
-        acquire_lock_file(&path)?;
-        Ok(Self { path })
+        let file = acquire_lock_file(&path)?;
+        Ok(Self { path, _file: file })
     }
 }
 
 impl Drop for RepoLock {
     fn drop(&mut self) {
-        if let Err(e) = fs::remove_file(&self.path) {
-            warn!("Failed to release lock {}: {}", self.path.display(), e);
-        }
+        // `_file` drops here, releasing the OS advisory lock. The lock file is
+        // NEVER unlinked (panel must-fix 2026-07-12): unlinking under flock
+        // reopens the 2-winner interleave documented in the module header.
+        debug!("RepoLock::drop: releasing lock {}", self.path.display());
     }
 }
 
-/// An acquired change-level lock. Releases (removes the lock file) on drop.
-/// Held around every read-modify-write of `changes/<id>.json` -- `review
-/// sync`, `review approve`/`delete`, `cleanup`, `undo`, and the create-path
-/// incremental saves -- so two processes' load-mutate-save cycles on the same
-/// change can never interleave and lose an update (Phase 7 [F6]).
+/// An acquired change-level lock. Held around every read-modify-write of
+/// `changes/<id>.json` -- `review sync`, `review approve`/`delete`, `cleanup`,
+/// `undo`, and the create-path incremental saves -- so two processes'
+/// load-mutate-save cycles on the same change can never interleave and lose an
+/// update (Phase 7 [F6]). Same OS-lock backing and lifetime as [`RepoLock`].
 pub struct ChangeLock {
     path: PathBuf,
+    _file: File,
 }
 
 impl ChangeLock {
-    /// Acquire the lock for `change_id`. Same acquire/fail-fast/reclaim
-    /// semantics as [`RepoLock::acquire`].
+    /// Acquire the lock for `change_id`. Same acquire/fail-fast semantics as
+    /// [`RepoLock::acquire`].
     pub fn acquire(change_id: &str) -> Result<Self> {
         let path = change_lock_path_for(change_id)?;
         debug!(
             "ChangeLock::acquire: change_id={change_id} lock={}",
             path.display()
         );
-        acquire_lock_file(&path)?;
-        Ok(Self { path })
+        let file = acquire_lock_file(&path)?;
+        Ok(Self { path, _file: file })
     }
 }
 
 impl Drop for ChangeLock {
     fn drop(&mut self) {
-        if let Err(e) = fs::remove_file(&self.path) {
-            warn!("Failed to release lock {}: {}", self.path.display(), e);
-        }
+        debug!("ChangeLock::drop: releasing lock {}", self.path.display());
     }
 }
 
-/// Shared acquire logic for both lock kinds: create `path` with `O_EXCL`
-/// semantics, reclaiming a stale holder (and retrying) as needed. Returns once
-/// the caller holds the lock, or a fail-fast error naming the live holder.
-fn acquire_lock_file(path: &Path) -> Result<()> {
+/// Shared acquire logic for both lock kinds: open `path` read/write WITHOUT
+/// truncation, take an exclusive OS advisory lock non-blockingly, and -- once
+/// held -- (re)write the holder JSON for error messages. Returns the locked
+/// `File` (the caller's guard owns it), or a fail-fast error naming the live
+/// holder when the lock is already held.
+fn acquire_lock_file(path: &Path) -> Result<File> {
+    debug!("acquire_lock_file: path={}", path.display());
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create lock dir: {}", parent.display()))?;
     }
 
-    loop {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(mut file) => {
-                let info = LockInfo::current();
-                let line = serde_json::to_string(&info).unwrap_or_default();
-                // Best-effort: the lock's existence is what matters.
-                let _ = writeln!(file, "{line}");
-                drop(file);
+    // NO truncate: a contender must never clobber a live holder's metadata.
+    // Never `File::create` (which truncates). `create(true)` makes the file on
+    // first use; an existing file is opened as-is.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // Explicitly NO truncation: a contender must never clobber a live
+        // holder's metadata by merely opening the file.
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("Failed to open lock file: {}", path.display()))?;
 
-                // Re-verify OUR content is still at `path` before declaring
-                // victory. A concurrent racer's reclaim of a DIFFERENT stale
-                // entry can (rarely) sweep this brand-new file away in the gap
-                // between `create_new` succeeding and this check (it renames
-                // away whatever it finds to verify staleness, then restores it
-                // -- see `reclaim_if_stale`). Retrying here, instead of
-                // reporting success unconditionally, closes that window: we
-                // never hand back a "successful" lock we don't actually hold.
-                match fs::read_to_string(path) {
-                    Ok(confirm) if confirm.trim() == line.trim() => {
-                        test_hold_delay();
-                        return Ok(());
-                    }
-                    _ => continue,
-                }
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                if reclaim_if_stale(path)? {
-                    continue;
-                }
-                let holder = read_holder(path);
-                return Err(eyre::eyre!(
-                    "Locked by another gx process ({holder}); lock: {}",
-                    path.display()
-                ));
-            }
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("Failed to create lock file: {}", path.display()));
-            }
+    match file.try_lock() {
+        Ok(()) => {
+            // We hold the lock exclusively now; it is safe to overwrite the
+            // holder metadata. Written AFTER the lock is held so a contender
+            // can never truncate a live holder's file.
+            write_holder(&mut file, path);
+            test_hold_delay();
+            debug!("acquire_lock_file: acquired {}", path.display());
+            Ok(file)
         }
+        Err(TryLockError::WouldBlock) => {
+            let holder = read_holder(path);
+            debug!(
+                "acquire_lock_file: contended {} held by {holder}",
+                path.display()
+            );
+            Err(eyre::eyre!(
+                "Locked by another gx process ({holder}); lock: {}",
+                path.display()
+            ))
+        }
+        Err(TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("Failed to lock file: {}", path.display()))
+        }
+    }
+}
+
+/// Write the current holder's JSON into the (already-locked) lock file for use
+/// in a contender's error message. Best-effort: the OS lock -- not this
+/// content -- is what enforces mutual exclusion, so a write failure is logged
+/// and swallowed rather than failing the acquire. Truncates first (safe: we
+/// hold the exclusive lock) so a shorter record can't leave a stale tail.
+fn write_holder(file: &mut File, path: &Path) {
+    let info = LockInfo::current();
+    let line = serde_json::to_string(&info).unwrap_or_default();
+    let mut write = || -> std::io::Result<()> {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        writeln!(file, "{line}")?;
+        file.flush()
+    };
+    if let Err(e) = write() {
+        debug!(
+            "write_holder: failed to record holder metadata in {}: {e}",
+            path.display()
+        );
     }
 }
 
 /// Test-only hold delay: if `GX_TEST_LOCK_DELAY_MS` is set, sleep for that many
 /// milliseconds right after acquiring, before returning to the caller. Inert
-/// unless the env var is set (same "compiled in, inert by default" shape as
-/// the crash-injection hook this design introduces later); exists solely so
-/// an integration test can create a deterministic two-process contention
-/// window between two real spawned `gx` binaries, rather than racing on
-/// uncontrolled process-startup timing.
+/// unless the env var is set; exists solely so an integration test can create a
+/// deterministic two-process contention window between two real spawned `gx`
+/// binaries, rather than racing on uncontrolled process-startup timing.
 fn test_hold_delay() {
     if let Ok(ms) = std::env::var("GX_TEST_LOCK_DELAY_MS") {
         if let Ok(ms) = ms.parse::<u64>() {
@@ -210,94 +253,6 @@ fn read_holder(path: &Path) -> String {
             Err(_) => "unknown holder".to_string(),
         },
         Err(_) => "unknown holder".to_string(),
-    }
-}
-
-/// Whether lock-file `content`, if parseable, names a pid that is no longer
-/// alive. Unparseable content (e.g. a file mid-write, between `create_new`
-/// and the holder's `writeln!` landing) is treated as NOT stale: a lock we
-/// cannot positively confirm dead must never be reclaimed. This is the single
-/// guard reclaim relies on both up front and, critically, when re-verifying
-/// the renamed file below -- flipping this default is exactly the class of
-/// bug F7 closes (it briefly let concurrent racers all "win" by reclaiming
-/// each other's just-created, not-yet-written lock files).
-fn is_stale_lock_content(content: &str) -> bool {
-    match serde_json::from_str::<LockInfo>(content.trim()) {
-        Ok(info) => !process_alive(info.pid),
-        Err(_) => false,
-    }
-}
-
-/// Monotonic counter giving each reclaim attempt (even concurrent ones in the
-/// same process) a distinct staging filename.
-static RECLAIM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// If the lock's holder process is gone, reclaim it and return `true` (the
-/// caller should retry `acquire`). Returns `false` only when `path` is
-/// confirmed to still be held by a live process.
-///
-/// Fixed TOCTOU (F7): the old code re-read nothing before its `remove_file`,
-/// so a racing reclaimer that had already removed-and-recreated the lock as
-/// its own live one could have that fresh lock deleted out from under it.
-/// Now the file is renamed to a private staging name FIRST -- an atomic
-/// operation, so at most one racer can win it; a losing racer's rename fails
-/// (ENOENT, someone else already moved it) and just retries `acquire`. The
-/// winner then re-verifies staleness on the file it now exclusively owns: if
-/// a fresh live lock got swept up in the rename (another process finished its
-/// own reclaim-and-acquire in the interim), it is renamed straight back,
-/// untouched -- never removed.
-fn reclaim_if_stale(path: &Path) -> Result<bool> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(false),
-    };
-    if !is_stale_lock_content(&content) {
-        return Ok(false);
-    }
-
-    let staged = path.with_extension(format!(
-        "reclaim-{}-{}",
-        std::process::id(),
-        RECLAIM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    if let Err(e) = fs::rename(path, &staged) {
-        // Another process is already mid-reclaim (or has already removed or
-        // recreated this exact lock); never remove_file blindly here -- just
-        // signal the caller to retry acquire from scratch.
-        debug!("Lock reclaim rename raced away for {}: {e}", path.display());
-        return Ok(true);
-    }
-
-    let staged_content = fs::read_to_string(&staged).unwrap_or_default();
-    if is_stale_lock_content(&staged_content) {
-        warn!("Reclaiming stale lock at {} (holder gone)", path.display());
-        let _ = fs::remove_file(&staged);
-        Ok(true)
-    } else {
-        // A racing reclaimer already recreated a live lock here. Restore it
-        // via hard_link, NEVER a blind rename: a plain `rename(staged, path)`
-        // would silently CLOBBER a fourth racer that legitimately created its
-        // own fresh lock at `path` while it sat vacated during this check
-        // (the exact class of bug F7 exists to close, one step later). A
-        // failing hard_link just means someone else already correctly holds
-        // `path` again -- nothing to restore.
-        let _ = fs::hard_link(&staged, path);
-        let _ = fs::remove_file(&staged);
-        Ok(false)
-    }
-}
-
-/// Whether a process with the given pid is currently alive.
-fn process_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Conservative on non-Linux: assume alive so we never wrongly reclaim.
-        let _ = pid;
-        true
     }
 }
 

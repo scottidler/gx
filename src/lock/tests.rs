@@ -1,5 +1,8 @@
 use super::*;
 use crate::test_utils::env_lock;
+use std::os::unix::fs::MetadataExt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
@@ -15,15 +18,26 @@ fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
 }
 
 #[test]
-fn test_lock_acquire_and_release() {
+fn test_lock_acquire_and_holder_metadata() {
     let data = TempDir::new().unwrap();
     let repo = TempDir::new().unwrap();
     with_data_home(data.path(), || {
         let lock = RepoLock::acquire(repo.path()).unwrap();
         let path = lock.path.clone();
         assert!(path.exists(), "lock file should exist while held");
+        // Holder JSON is written AFTER the lock is held, for error messages.
+        let holder = read_holder(&path);
+        assert!(
+            holder.contains(&format!("pid {}", std::process::id())),
+            "holder metadata should name this process: {holder}"
+        );
         drop(lock);
-        assert!(!path.exists(), "lock file should be removed on drop");
+        // Under flock the file is NEVER unlinked on drop; it persists,
+        // unlocked and reacquirable.
+        assert!(
+            path.exists(),
+            "lock file must persist after drop (never unlinked)"
+        );
     });
 }
 
@@ -33,30 +47,186 @@ fn test_second_acquire_fails_fast() {
     let repo = TempDir::new().unwrap();
     with_data_home(data.path(), || {
         let _held = RepoLock::acquire(repo.path()).unwrap();
+        // Same-process double-open: a separate open file description contends
+        // on the same flock and returns WouldBlock -> fail-fast error.
         let second = RepoLock::acquire(repo.path());
-        assert!(second.is_err(), "second lock on same repo must fail");
+        let err = match second {
+            Ok(_) => panic!("second lock on same repo must fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.to_lowercase().contains("locked") && msg.contains("pid"),
+            "error must name the live holder: {msg}"
+        );
     });
 }
 
 #[test]
-fn test_stale_lock_is_reclaimed() {
+fn test_lock_reacquirable_after_holder_drops() {
+    // Liveness (replaces the old staleness-reclaim test): a lock whose holder
+    // is gone -- here the guard dropped, so the kernel released the flock -- is
+    // immediately reacquirable, with no reclaim machinery. The cross-process
+    // kill -9 analog lives in tests/lock_contention_test.rs.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    with_data_home(data.path(), || {
+        let first = RepoLock::acquire(repo.path()).unwrap();
+        drop(first);
+        let second = RepoLock::acquire(repo.path());
+        assert!(
+            second.is_ok(),
+            "a lock whose holder is gone must be reacquirable: {:?}",
+            second.err()
+        );
+    });
+}
+
+#[test]
+fn test_drop_never_unlinks_and_reopens_same_inode() {
+    // Regression (panel must-fix 2026-07-12): Drop must NEVER unlink the lock
+    // file. If it did, the classic 2-winner interleave reopens -- A holds
+    // (inode1), B has a pending lock on inode1, A drops+unlinks, C creates a
+    // FRESH file (inode2) at the same path and locks it while B still holds
+    // inode1 -> two holders. Not unlinking keeps the path bound to ONE inode,
+    // so every reopen of the path contends on the same lock (single-holder).
     let data = TempDir::new().unwrap();
     let repo = TempDir::new().unwrap();
     with_data_home(data.path(), || {
         let path = lock_path_for(repo.path()).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Write a lock owned by a pid that does not exist.
-        let stale = LockInfo {
-            pid: 4_000_000_000,
-            cwd: "/tmp".to_string(),
-            command: "gx create".to_string(),
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-        fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
 
-        // Acquire should reclaim the stale lock and succeed.
-        let lock = RepoLock::acquire(repo.path());
-        assert!(lock.is_ok(), "stale lock should be reclaimed");
+        let a = RepoLock::acquire(repo.path()).unwrap();
+        let inode_a = fs::metadata(&path).unwrap().ino();
+        drop(a);
+
+        assert!(path.exists(), "Drop must not unlink the lock file");
+        let inode_after_drop = fs::metadata(&path).unwrap().ino();
+        assert_eq!(
+            inode_a, inode_after_drop,
+            "the inode must not change on drop (file left in place)"
+        );
+
+        // A fresh acquire reopens the SAME inode -- no fresh-inode divergence.
+        let b = RepoLock::acquire(repo.path()).unwrap();
+        let inode_b = fs::metadata(&path).unwrap().ino();
+        assert_eq!(
+            inode_a, inode_b,
+            "reacquire must resolve to the same inode, not a fresh one"
+        );
+        drop(b);
+    });
+}
+
+#[test]
+fn test_contention_stress_exactly_one_winner_across_many_runs() {
+    // Success criterion: contention stress shows exactly one winner per run.
+    // Many threads each do a fresh open + non-blocking flock at a barrier;
+    // winners HOLD their guard until the round ends, so at most one lock is
+    // ever held at an instant and every other contender fails fast (WouldBlock).
+    // Repeated to shake out ordering-dependent races.
+    const RUNS: usize = 100;
+    const RACERS: usize = 8;
+    let data = TempDir::new().unwrap();
+    with_data_home(data.path(), || {
+        for run in 0..RUNS {
+            // Fresh repo (=> fresh lock path) per run so a leaked fd from a
+            // PRIOR run -- e.g. a concurrent suite test that fork()ed a
+            // subprocess mid-run and transiently dup'd this run's lock fd
+            // before its exec() closed it (O_CLOEXEC) -- can never bleed into
+            // the next run's contention. Within a single run, flock still
+            // guarantees exactly one winner regardless of any such transient.
+            let repo = TempDir::new().unwrap();
+            let barrier = Arc::new(Barrier::new(RACERS));
+            let successes = Arc::new(AtomicUsize::new(0));
+            let repo_path = Arc::new(repo.path().to_path_buf());
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            let handles: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let successes = Arc::clone(&successes);
+                    let repo_path = Arc::clone(&repo_path);
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        if let Ok(lock) = RepoLock::acquire(&repo_path) {
+                            successes.fetch_add(1, Ordering::SeqCst);
+                            // Hold the guard until the round ends so no other
+                            // racer can win by the holder having already released.
+                            tx.send(lock).ok();
+                        }
+                    })
+                })
+                .collect();
+            drop(tx);
+            for h in handles {
+                h.join().unwrap();
+            }
+            let winners: Vec<RepoLock> = rx.iter().collect();
+
+            assert_eq!(
+                successes.load(Ordering::SeqCst),
+                1,
+                "run {run}: exactly one racer must win the lock"
+            );
+            assert_eq!(winners.len(), 1, "run {run}: exactly one live guard");
+            // Guards drop here, releasing the lock before the next run.
+        }
+    });
+}
+
+#[test]
+fn test_spawned_child_does_not_inherit_lock_fd() {
+    // Success criterion: a spawned child must NOT inherit the lock fd
+    // (O_CLOEXEC is the Rust default, ASSERTED here not assumed). Proof: hold
+    // the lock, spawn a long-lived child, then drop the guard. If the child had
+    // inherited the fd, the flock would stay held (the open file description
+    // outlives the parent's close) and a reacquire would fail. With O_CLOEXEC
+    // the child never got the fd, so the drop fully releases the lock and a
+    // fresh acquire succeeds while the child is still alive.
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    with_data_home(data.path(), || {
+        let lock = RepoLock::acquire(repo.path()).unwrap();
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to spawn sleep child");
+
+        // Release the parent's lock while the child is still running.
+        drop(lock);
+
+        // Poll the reacquire for a bounded window. If our `sleep 30` child had
+        // inherited the lock fd (O_CLOEXEC missing / broken), it would hold the
+        // flock for its full 30s life and this would NEVER succeed inside the
+        // window -> the test bites. A brief failure from an UNRELATED concurrent
+        // suite test fork()ing a subprocess (which transiently dup's every open
+        // fd until its exec() closes the O_CLOEXEC ones, milliseconds later) is
+        // tolerated: the window is orders of magnitude longer than that transient
+        // yet far shorter than the child's 30s hold.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut ok = false;
+        while std::time::Instant::now() < deadline {
+            if RepoLock::acquire(repo.path()).is_ok() {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        // Clean up the child regardless of the assertion outcome.
+        child.kill().ok();
+        child.wait().ok();
+
+        assert!(
+            ok,
+            "child inherited the lock fd (missing O_CLOEXEC): reacquire never \
+             succeeded within the window while the child still held the flock"
+        );
     });
 }
 
@@ -68,14 +238,17 @@ fn test_fnv1a_stable() {
 }
 
 #[test]
-fn test_change_lock_acquire_and_release() {
+fn test_change_lock_acquire_and_persists() {
     let data = TempDir::new().unwrap();
     with_data_home(data.path(), || {
         let lock = ChangeLock::acquire("GX-2026-07-11T00-00-00").unwrap();
         let path = lock.path.clone();
         assert!(path.exists(), "change lock file should exist while held");
         drop(lock);
-        assert!(!path.exists(), "change lock file should be removed on drop");
+        assert!(
+            path.exists(),
+            "change lock file must persist after drop (never unlinked)"
+        );
     });
 }
 
@@ -96,110 +269,5 @@ fn test_change_lock_distinct_change_ids_do_not_contend() {
         let _a = ChangeLock::acquire("GX-a").unwrap();
         let b = ChangeLock::acquire("GX-b");
         assert!(b.is_ok(), "locks on different change-ids must not contend");
-    });
-}
-
-// --- F7 reclaim TOCTOU -------------------------------------------------
-
-#[test]
-fn test_is_stale_lock_content_never_treats_live_pid_as_stale() {
-    // This is the guard reclaim re-checks on the RENAMED file before ever
-    // removing it (F7). Weakening it is exactly the regression it exists to
-    // catch: a live lock (our own pid, guaranteed alive) must never classify
-    // as stale.
-    let live = LockInfo {
-        pid: std::process::id(),
-        cwd: "/tmp".to_string(),
-        command: "gx create".to_string(),
-        started_at: "2026-01-01T00:00:00Z".to_string(),
-    };
-    let content = serde_json::to_string(&live).unwrap();
-    assert!(
-        !is_stale_lock_content(&content),
-        "a lock held by a live pid must never be classified stale"
-    );
-}
-
-#[test]
-fn test_is_stale_lock_content_treats_dead_pid_as_stale() {
-    let dead = LockInfo {
-        pid: 4_000_000_000,
-        cwd: "/tmp".to_string(),
-        command: "gx create".to_string(),
-        started_at: "2026-01-01T00:00:00Z".to_string(),
-    };
-    let content = serde_json::to_string(&dead).unwrap();
-    assert!(is_stale_lock_content(&content));
-}
-
-#[test]
-fn test_is_stale_lock_content_treats_unparseable_as_not_stale() {
-    // A lock file mid-write (between `create_new` and its holder's
-    // `writeln!` landing) reads as empty or truncated JSON to a concurrent
-    // racer. Treating that as "stale" is the exact regression a Phase 7
-    // rewrite briefly introduced here: every racer reclaimed (and deleted)
-    // every OTHER racer's just-created, not-yet-written lock file, so most
-    // or all of them ended up "winning" `create_new` at some point instead
-    // of exactly one. A lock we cannot positively confirm dead must never be
-    // reclaimed.
-    assert!(!is_stale_lock_content(""));
-    assert!(!is_stale_lock_content("not json"));
-}
-
-#[test]
-fn test_concurrent_reclaim_never_loses_the_winning_live_lock() {
-    // Real concurrency proof for F7: many threads race to reclaim the SAME
-    // stale lock and re-acquire it. Exactly one must win; its live lock file
-    // must survive every other thread's reclaim attempt (never deleted out
-    // from under it).
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    with_data_home(data.path(), || {
-        let path = lock_path_for(repo.path()).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let stale = LockInfo {
-            pid: 4_000_000_000,
-            cwd: "/tmp".to_string(),
-            command: "gx create".to_string(),
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-        fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
-
-        let repo_path = Arc::new(repo.path().to_path_buf());
-        let successes = Arc::new(AtomicUsize::new(0));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handles: Vec<_> = (0..8)
-            .map(|_| {
-                let repo_path = Arc::clone(&repo_path);
-                let successes = Arc::clone(&successes);
-                let tx = tx.clone();
-                std::thread::spawn(move || {
-                    if let Ok(lock) = RepoLock::acquire(&repo_path) {
-                        successes.fetch_add(1, Ordering::SeqCst);
-                        tx.send(lock).ok();
-                    }
-                })
-            })
-            .collect();
-        drop(tx);
-        for h in handles {
-            h.join().unwrap();
-        }
-        let winners: Vec<RepoLock> = rx.try_iter().collect();
-
-        assert_eq!(
-            successes.load(Ordering::SeqCst),
-            1,
-            "exactly one racer should win the reclaim + acquire"
-        );
-        assert_eq!(winners.len(), 1);
-        assert!(
-            path.exists(),
-            "the winner's live lock must survive every other racer's reclaim attempt"
-        );
-        drop(winners);
     });
 }
