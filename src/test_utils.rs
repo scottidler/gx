@@ -12,6 +12,13 @@ use tempfile::TempDir;
 #[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquire the env lock, recovering from a poisoned mutex so one panicking
+/// test cannot cascade PoisonError failures across the suite.
+#[cfg(test)]
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Get the path to the compiled gx binary for testing
 pub fn get_gx_binary_path() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();

@@ -1257,7 +1257,7 @@ mod tests {
     static COLOR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_truecolor_forced<T>(f: impl FnOnce() -> T) -> T {
-        let guard = COLOR_ENV_LOCK.lock().unwrap();
+        let guard = COLOR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("COLORTERM").ok();
         unsafe { std::env::set_var("COLORTERM", "truecolor") };
         colored::control::set_override(true);

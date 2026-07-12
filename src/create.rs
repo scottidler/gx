@@ -1640,7 +1640,7 @@ mod tests {
     /// Point `XDG_DATA_HOME` at `dir` for the duration of `f`, serialized
     /// behind the shared `ENV_LOCK` (env vars are process-global).
     fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
-        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let guard = crate::test_utils::env_lock();
         let prior = std::env::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", dir) };
         f();

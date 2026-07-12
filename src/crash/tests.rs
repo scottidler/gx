@@ -1,12 +1,12 @@
 use super::*;
-use crate::test_utils::ENV_LOCK;
+use crate::test_utils::env_lock;
 
 /// The hook is inert when the env var is unset, and inert when it names a
 /// DIFFERENT point. (The abort path is exercised out-of-process by the
 /// crash-injection e2e; calling it here would kill the test process.)
 #[test]
 fn test_maybe_crash_inert_without_matching_env() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock();
     let prior = std::env::var(CRASH_ENV).ok();
 
     // Unset: every point is a no-op.

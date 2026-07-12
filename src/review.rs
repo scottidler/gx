@@ -1178,7 +1178,7 @@ exit 0
         // Merged after `review sync`. Exercises the REAL
         // github::list_prs_by_change_id (hitting a PATH-shimmed `gh`) piped
         // into `sync_change_state` - the exact path `gx review sync` runs.
-        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let guard = crate::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
 
@@ -1254,7 +1254,7 @@ exit 0
         // fails fast -- it never reads-mutates-saves while someone else holds
         // the lock, so there is no window where one save can race and clobber
         // the other's update.
-        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let guard = crate::test_utils::env_lock();
         let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
 
         let data_home = TempDir::new().unwrap();

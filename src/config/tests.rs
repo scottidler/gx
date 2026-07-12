@@ -1,10 +1,10 @@
 use super::*;
-use crate::test_utils::ENV_LOCK;
+use crate::test_utils::env_lock;
 use tempfile::TempDir;
 
 #[test]
 fn test_xdg_config_dir_honors_env_and_falls_back() {
-    let guard = ENV_LOCK.lock().unwrap();
+    let guard = env_lock();
     let prior = std::env::var("XDG_CONFIG_HOME").ok();
 
     let dir = TempDir::new().unwrap();
@@ -23,7 +23,7 @@ fn test_xdg_config_dir_honors_env_and_falls_back() {
 
 #[test]
 fn test_xdg_data_dir_honors_env_and_falls_back() {
-    let guard = ENV_LOCK.lock().unwrap();
+    let guard = env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
 
     let dir = TempDir::new().unwrap();

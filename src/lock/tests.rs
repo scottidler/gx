@@ -1,9 +1,9 @@
 use super::*;
-use crate::test_utils::ENV_LOCK;
+use crate::test_utils::env_lock;
 use tempfile::TempDir;
 
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
-    let guard = ENV_LOCK.lock().unwrap();
+    let guard = env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", dir) };
     f();

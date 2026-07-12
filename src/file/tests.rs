@@ -244,7 +244,7 @@ fn test_atomic_write_new_file_mode_under_restrictive_umask() {
 
     // umask is process-global state; serialize with every other test that
     // mutates shared environment/process state.
-    let _guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_utils::env_lock();
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("new.txt");

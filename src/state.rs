@@ -962,7 +962,7 @@ mod tests {
     /// `ChangeLock`, which resolves its lock dir from `xdg_data_dir()`; without
     /// this it would write lock files into the real `$HOME/.local/share`.
     fn with_xdg_data_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let guard = crate::test_utils::ENV_LOCK.lock().unwrap();
+        let guard = crate::test_utils::env_lock();
         let prior = std::env::var("XDG_DATA_HOME").ok();
         let tmp = TempDir::new().unwrap();
         unsafe { std::env::set_var("XDG_DATA_HOME", tmp.path()) };
