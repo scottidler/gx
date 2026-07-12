@@ -1,6 +1,16 @@
+[workspace]
+members = ["gx-mcp"]
+# The gx package below is the workspace root package; `cargo run`/`cargo build`/
+# `cargo install --path .` at the repo root must keep building the gx bin, not
+# the whole workspace, so the default working set is just the root package.
+default-members = ["."]
+
+[workspace.package]
+version = "0.4.1"
+
 [package]
 name = "gx"
-version = "0.4.1"
+version.workspace = true
 edition = "2021"
 # `std::fs::File::try_lock` (used by src/lock.rs) is stable since Rust 1.89.
 rust-version = "1.89"

@@ -16,10 +16,10 @@ tasks:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
       echo "=== Checking compilation ==="
-      cargo check --all-targets --all-features
+      cargo check --workspace --all-targets --all-features
       echo ""
       echo "=== Running Clippy ==="
-      cargo clippy --all-targets --all-features -- -D warnings
+      cargo clippy --workspace --all-targets --all-features -- -D warnings
       echo ""
       echo "=== Checking format ==="
       cargo fmt --all --check
@@ -30,7 +30,7 @@ tasks:
   test:
     help: "Run all tests"
     bash: |
-      cargo test --all-features
+      cargo test --workspace --all-features
 
   # Run coverage tests and output data
   cov:

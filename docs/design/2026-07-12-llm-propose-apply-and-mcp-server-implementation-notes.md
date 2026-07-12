@@ -892,3 +892,165 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
   change with zero behavior implication for the phase this doc is
   scoped to) - flagged for a follow-up phase or a dedicated fix, per Scott's
   call.
+
+## Phase 8: Workspace conversion + gx-mcp scaffold
+
+### Design decisions
+- **Hybrid root-package-plus-workspace layout, NOT a virtual root with `gx` moved
+  into its own subdirectory.** Root `Cargo.toml` keeps `[package] name = "gx"` at
+  the repo root (path, name, `[[bin]]`/`[lib]` sections all unchanged) and gains
+  a `[workspace]` table (`members = ["gx-mcp"]`, `default-members = ["."]`) plus
+  `[workspace.package] version = "0.4.1"`; gx's own `version` field becomes
+  `version.workspace = true`. `gx-mcp/` is the one real subdirectory member.
+  Verified this is the correct seam (not just a convenient one): `cargo install
+  --path .` at the repo root is a NAMED success criterion, and a fully virtual
+  workspace root (no `[package]`) has nothing installable at that path at all --
+  the only layout that satisfies both "members: gx, gx-mcp" and "`cargo install
+  --path .` at the root still builds gx" is for gx itself to BE the root
+  package.
+- **`default-members = ["."]`** pins `cargo build`/`run`/`test` at the workspace
+  root to the gx package only. Proven, not assumed: `cargo build --release`
+  (no `-p`, no `--workspace`) at the repo root produced exactly
+  `target/release/gx`, no `gx-mcp` binary; `cargo metadata`'s
+  `workspace_default_members` is `["path+file://.../gx#0.4.1"]` while
+  `workspace_members` lists both `gx` and `gx-mcp`; `cargo run -- --help` at the
+  root built and ran the `gx` bin (confirmed by its `--help` output, not the
+  gx-mcp scaffold).
+- **`bump` compatibility verified by reading `~/repos/scottidler/bump/src/lang/cargo.rs`
+  directly** (per instruction: do not run `bump` in this phase). `read_version`/
+  `write_version` resolve `[package].version = { workspace = true }` (or the
+  dotted `version.workspace = true` form) through to `[workspace.package].version`
+  for BOTH read and write; `check_workspace_independent_versions` only flags a
+  workspace member whose OWN `[package].version` is a literal string, not
+  workspace-inherited. Since `gx-mcp/Cargo.toml` also uses
+  `version.workspace = true`, `bump` needs no `--skip-member`: one bump call
+  updates `[workspace.package].version` and both packages track it, still under
+  one flat `v*` tag.
+- **`gx-mcp` dependencies added ONLY via `cargo add`, resolved live, never
+  pinned from memory:** `rmcp = "2.2.0"` (features `server`, `macros`),
+  `tokio = "1.52.3"` (feature `full`), `schemars = "1.2.1"`, plus `log =
+  "0.4.33"`, `env_logger = "0.11.11"`, `eyre = "0.6.12"` (dev-deps:
+  `serde_json`, `tempfile`), `gx = { path = ".." }`. rmcp resolved to 2.2.0 --
+  neither precedent repo's pinned version (`multi-account-github-mcp` pins
+  `0.12`; second-brain's oracle wasn't checked for its own pin since Phase 8
+  only needed the empty-server shape) -- confirming the design's own Risk-table
+  prediction ("rmcp API churn between design and build... scaffold phase
+  absorbs it").
+- **Server shape harvested from `multi-account-github-mcp`'s
+  `src/mcp/server.rs`** almost exactly: `#[derive(Clone)] struct GxMcpServer {
+  tool_router: ToolRouter<Self> }`, an (empty, per this phase's scope)
+  `#[tool_router] impl GxMcpServer {}` block, and `#[tool_handler] impl
+  ServerHandler for GxMcpServer` overriding only `get_info`
+  (`gx-mcp/src/server.rs`). Zero `#[tool]` methods is the literal Phase 8 ask
+  ("an EMPTY server that serves ZERO tools"); Phase 9 adds `#[tool]` methods
+  inside the same block.
+- **Honest dead-code pattern for the empty tool router** (same principle Phase
+  3 established): with zero `#[tool]` methods, nothing reads `self.tool_router`
+  by default, and `-D warnings` catches it (`field 'tool_router' is never
+  read`). Rather than `#[allow(dead_code)]` (banned) or a fake caller,
+  `get_info` (a real, always-compiled method every MCP client calls at
+  handshake) logs `self.tool_router.list_all().len()` and folds the count into
+  its `instructions` string -- a genuine, useful diagnostic (the count will
+  read 0 today and the real number from Phase 9 onward), not a manufactured
+  read.
+- **`ServerInfo` (= `InitializeResult` in rmcp 2.2.0) is `#[non_exhaustive]`**,
+  so the precedent's `ServerInfo { ..., ..Default::default() }` struct-literal
+  doesn't compile against the resolved version (E0639, struct update syntax
+  banned cross-crate on non_exhaustive types). Built via `ServerInfo::new(capabilities)`
+  (all fields on `InitializeResult` are `pub`) then set `.instructions` directly.
+- **Logging: file-only, gx's own `xdg_data_dir()` helper, distinct file.**
+  `gx-mcp/src/main.rs::setup_logging` duplicates gx's `env_logger` + file-`Target::Pipe`
+  shape (gx's own `setup_logging` in `src/main.rs` is a private fn, not part of
+  the public `gx` lib API, so it can't be imported directly) but calls the ONE
+  piece of gx that IS public: `gx::config::xdg_data_dir()`. Writes to
+  `<xdg_data_dir>/gx/logs/gx-mcp.log` -- the literal `gx` path segment is
+  hardcoded rather than `env!("CARGO_PKG_NAME")` (which, evaluated inside the
+  `gx-mcp` crate, would resolve to `"gx-mcp"` and put logs in a sibling
+  `gx-mcp/logs/` directory) because gx-mcp is a component of the gx product,
+  not a separate one; one directory keeps both binaries' logs
+  operator-discoverable in the same place. `env_logger::Target::Pipe` writes to
+  the opened file handle only -- stdout/stderr are never touched by the
+  logger, since rmcp's stdio transport IS stdin/stdout for this process.
+- **`.otto.yml`'s `check`/`test` tasks gained `--workspace`** on `cargo
+  check`/`cargo clippy`/`cargo test` (fmt already covers the whole tree via
+  `--all`). Without it, `default-members` scoping (deliberately kept
+  gx-only for `build`/`run`/`install`) would ALSO silently scope `otto ci` to
+  gx only, meaning `gx-mcp` would never be compiled or tested by "the existing
+  suite" -- directly failing the phase's own success criterion ("both crates
+  build and the existing suite is green"). `.otto.yml`'s `build`/`install`/`clean`
+  tasks are left untouched (gx-only) on purpose: they build/ship the gx
+  product specifically, and this phase's success criteria don't ask for a
+  gx-mcp release artifact.
+
+### Deviations
+- **Did not move gx's source into a `gx/` subdirectory member**, despite the
+  phase bullet's literal wording ("members `gx` ... and `gx-mcp`"). Same
+  effect, correct seam: see Design decisions above -- the named success
+  criterion `cargo install --path .` at the root only holds if gx IS the root
+  package, so a literal reading of "members gx and gx-mcp" (both as
+  subdirectories) would have broken the very success criterion the bullet sits
+  next to in the same sentence.
+- **`.github/workflows/ci.yml`'s `test` job edited beyond the literal ask**
+  ("check ci.yml ... paths ... resolve"): `cargo test`/`cargo clippy` gained
+  `--workspace`, `cargo fmt --check` gained `--all`. Disclosed reasoning: this
+  is the REAL GitHub Actions CI gate (distinct from `otto ci`), and without the
+  same `--workspace` fix applied to `.otto.yml`, it would silently never
+  compile or test `gx-mcp` at all on every PR -- the exact failure this
+  phase's success criteria exist to prevent. `binary-release.yml` was checked
+  (its `target/${{ matrix.target }}/release/gx` paths still resolve unchanged,
+  proven by the same `default-members` mechanism) but not edited -- it only
+  ships the gx product on a tag push, unaffected by gx-mcp's existence.
+- **rmcp resolved to `2.2.0`**, a major-version jump from both harvested
+  precedents' pins (`multi-account-github-mcp` at `0.12`), requiring the
+  `ServerInfo::new()` construction above instead of the precedent's plain
+  struct literal. Documented rather than silently worked around, since it is
+  exactly the "rmcp API churn between design and build" risk the design
+  doc's own Risks table named.
+
+### Tradeoffs
+- **Hybrid root-package-workspace vs. moving gx into a `gx/` subdirectory** --
+  chose hybrid (Design decisions above). Cost: `bump`'s
+  `check_workspace_independent_versions` and cargo's own workspace-member
+  resolution treat the root specially (an implicit member, not listed in
+  `members`); this was verified by reading `bump`'s source rather than an
+  actual dry run, per this phase's explicit "do not run bump" instruction --
+  flagged as an open question below if Scott wants the empirical proof before
+  shipping.
+- **Explicit `default-members = ["."]` vs. relying on cargo's implicit
+  "current-directory package" default** -- chose explicit: the phase bullet
+  names `default-members` directly, and an explicit key is documented,
+  greppable behavior that survives future invocations from a symlinked or
+  relocated CWD, rather than depending on an implicit convention that isn't
+  written down anywhere in this repo.
+- **gx-mcp's log file lives under the shared `gx` XDG segment
+  (`<xdg_data_dir>/gx/logs/gx-mcp.log`) vs. its own `gx-mcp/logs/` directory**
+  (what a literal `env!("CARGO_PKG_NAME")` from the gx-mcp crate would
+  produce) -- chose the shared segment since gx-mcp is part of the gx product,
+  not a separate one; flagged as an open question below since the design
+  doesn't spell this out explicitly.
+- **The MCP handshake test speaks raw newline-delimited JSON-RPC directly
+  over the compiled binary's stdio** (`gx-mcp/tests/mcp_handshake_test.rs`,
+  no rmcp client-side helpers) rather than using rmcp's own client transport
+  to talk to the server in-process -- chosen because it proves the actual
+  bytes on the actual wire (the design's stdout-is-JSON-RPC-only concern,
+  which Phase 9's success criteria assert with a "transcript-capture test"),
+  rather than trusting rmcp's client and server halves to agree via shared
+  Rust types alone. Confirmed via `rmcp-2.2.0/src/transport/io.rs` +
+  `async_rw.rs` that stdio framing is newline-delimited JSON, matching the
+  MCP stdio transport spec.
+
+### Open questions
+- **gx-mcp's log path** (`<xdg_data_dir>/gx/logs/gx-mcp.log`, sharing gx's own
+  XDG segment rather than a `gx-mcp/`-named one) is a judgment call (see
+  Tradeoffs), not something the design spells out. Flagging for confirmation
+  before Phase 9's real tool surface starts writing meaningfully more log
+  volume to it.
+- **`bump`'s workspace-version handling was verified by reading its source,
+  not by an actual `bump -n`/`bump --gates` dry run against this repo** (per
+  this phase's explicit instruction not to run `bump`). If Scott wants the
+  empirical proof before the next release, a dry-run `bump -n` (or `bump
+  --gates`) against this branch is a cheap, non-mutating follow-up.
+- The pre-existing `main.rs` lib/bin duplicate-module-tree debt (flagged in
+  Phase 3's Open Questions) is untouched and unaffected by this phase; gx-mcp
+  depends on the `gx` LIB crate cleanly (`gx = { path = ".." }`), so it does
+  not inherit or worsen that debt.
