@@ -1858,6 +1858,138 @@ pub fn list_index_files(repo_path: &std::path::Path) -> Result<Vec<(String, std:
     Ok(entries)
 }
 
+/// Add a DETACHED worktree of `base_sha` at `worktree_path`, checked out from
+/// the repo at `repo_path`. Used by the `llm` propose pass to give the agent a
+/// throwaway checkout that shares the object store but is OUTSIDE the real
+/// worktree, so nothing the agent does can touch tracked files (design
+/// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Chunk A propose step 2).
+pub fn worktree_add_detached(
+    repo_path: &std::path::Path,
+    worktree_path: &std::path::Path,
+    base_sha: &str,
+) -> Result<()> {
+    debug!(
+        "worktree_add_detached: repo_path={} worktree_path={} base_sha={base_sha}",
+        repo_path.display(),
+        worktree_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["worktree", "add", "--detach"])
+        .arg(worktree_path)
+        .arg(base_sha)
+        .output()
+        .context("Failed to execute git worktree add")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to add temp worktree at {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Remove a worktree previously added by [`worktree_add_detached`]. Best-effort
+/// and forceful (the agent may have left the tree dirty): the propose pass
+/// calls this on EVERY path, including errors, so a leaked worktree registration
+/// never accumulates. Errors are returned for the caller to log, not to abort.
+pub fn worktree_remove(repo_path: &std::path::Path, worktree_path: &std::path::Path) -> Result<()> {
+    debug!(
+        "worktree_remove: repo_path={} worktree_path={}",
+        repo_path.display(),
+        worktree_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["worktree", "remove", "--force"])
+        .arg(worktree_path)
+        .output()
+        .context("Failed to execute git worktree remove")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to remove temp worktree at {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// `git add -A` in `worktree_path`: stage adds, modifications, and deletions so
+/// a subsequent `git diff --cached` sees the full set of changes the agent made
+/// (design Chunk A propose step 4). This runs ONLY in a throwaway worktree,
+/// never the real one, so the "never `git add .` in the real tree" rule does
+/// not apply here.
+pub fn stage_all(worktree_path: &std::path::Path) -> Result<()> {
+    debug!("stage_all: worktree_path={}", worktree_path.display());
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["add", "-A"])
+        .output()
+        .context("Failed to execute git add -A")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to stage worktree changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Unified `git diff --cached <base_sha>` in `worktree_path`, as a display
+/// string. This is the DISPLAY patch for the proposal (design "diff for
+/// display, blobs for apply"); apply never consumes it. Decoded lossily since
+/// it is only ever shown to a human.
+pub fn diff_cached_patch(worktree_path: &std::path::Path, base_sha: &str) -> Result<String> {
+    debug!(
+        "diff_cached_patch: worktree_path={} base_sha={base_sha}",
+        worktree_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["diff", "--cached", base_sha])
+        .output()
+        .context("Failed to execute git diff --cached")?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to compute display diff: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Raw, NUL-terminated `git diff --cached --raw -z <base_sha>` in
+/// `worktree_path`, returned as bytes so a non-UTF-8 path is preserved for the
+/// payload-fidelity check (design payload matrix: non-UTF-8 paths are rejected).
+/// The `--raw` format carries the src/dst file modes, which is how the propose
+/// pass detects symlinks (`120000`), gitlinks/submodules (`160000`), and
+/// executable-bit changes without a special case.
+pub fn diff_cached_raw_z(worktree_path: &std::path::Path, base_sha: &str) -> Result<Vec<u8>> {
+    debug!(
+        "diff_cached_raw_z: worktree_path={} base_sha={base_sha}",
+        worktree_path.display()
+    );
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["diff", "--cached", "--raw", "-z", base_sha])
+        .output()
+        .context("Failed to execute git diff --cached --raw -z")?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(eyre::eyre!(
+            "Failed to compute raw diff: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,6 +18,7 @@ mod doctor;
 mod file;
 mod git;
 mod github;
+mod hash;
 mod lock;
 mod output;
 mod repo;

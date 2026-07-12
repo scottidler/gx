@@ -30,6 +30,17 @@ repo-discovery:
     - "target"
     - "build"
 
+# `gx create` settings (optional)
+create:
+  confirm-threshold: 5   # Prompt before committing to more than this many repos
+  llm:                   # `gx create ... llm "<prompt>"` (agent-per-repo propose/apply)
+    # The prompt is appended as the final argument; CWD is a throwaway worktree.
+    # `--permission-mode acceptEdits` is REQUIRED: in print (-p) mode Claude Code
+    # will not edit files without an edit-granting permission mode, so a bare
+    # `claude -p --output-format text` proposes nothing.
+    agent-command: "claude -p --output-format text --permission-mode acceptEdits"
+    timeout-seconds: 300  # Wall-clock per repo; on expiry the agent's process group is killed
+
 # Output preferences (optional)
 output:
   verbosity: summary   # Output verbosity: compact, summary, detailed, or full (default: summary)

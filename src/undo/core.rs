@@ -119,6 +119,13 @@ fn org_of(repo_slug: &str) -> &str {
 /// Pure and directly unit-testable.
 fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAction {
     match status {
+        // A bare (unapplied) proposal has NOTHING remote to reverse - no branch
+        // pushed, no PR. Mapped to `AlreadyGone` here so undo never touches a
+        // remote for it (fail-safe). Phase 5 replaces this with the design's
+        // local-only undo arm (delete proposal artifacts, mark CleanedUp); it is
+        // deliberately NOT the full behavior yet, only the non-mutating stub that
+        // keeps this exhaustive match compiling once `Proposed` exists.
+        RepoChangeStatus::Proposed => UndoAction::AlreadyGone,
         // Already reverted (revert PR open) or cleaned up: nothing more to do.
         RepoChangeStatus::CleanedUp | RepoChangeStatus::RevertPrOpen => UndoAction::AlreadyGone,
         RepoChangeStatus::PrMerged => UndoAction::RequiresRevert { pr_number },

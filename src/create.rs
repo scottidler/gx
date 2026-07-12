@@ -117,6 +117,24 @@ pub fn process_create_command(
 ) -> Result<()> {
     log::info!("Starting create command with change: {change:?}");
 
+    // Forward hook (design doc `2026-07-12-llm-propose-apply-and-mcp-server.md`):
+    // the `gx create ... llm "<prompt>"` subcommand lands in Phase 6. Until then
+    // this inert-unless-set env var is the ONLY non-test site that selects
+    // `Change::Llm`, giving the propose pass a real (non-test) caller so the bin
+    // target's dead-code `-D warnings` passes honestly - the same established
+    // pattern as `confirm::already_confirmed` (GX_TEST_CONFIRM_TOKEN) and
+    // GX_CRASH_POINT / GX_TEST_LOCK_DELAY_MS.
+    let change = match llm_override_prompt() {
+        Some(prompt) => Change::Llm(prompt),
+        None => change,
+    };
+
+    // The `llm` change is a fleet-level propose pass, not the per-repo commit
+    // pipeline; present + confirm + apply are Phases 5-6. Here we propose only.
+    if let Change::Llm(prompt) = &change {
+        return run_llm_propose(cli, config, patterns, change_id, prompt);
+    }
+
     let change_id = change_id.unwrap_or_else(generate_change_id);
     let current_dir = std::env::current_dir()?;
     let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
@@ -193,6 +211,78 @@ pub fn process_create_command(
     display_unified_results(&results, &opts);
     display_create_summary(&results, &opts);
 
+    Ok(())
+}
+
+/// The inert forward hook that selects `Change::Llm` before the CLI `llm`
+/// subcommand exists (Phase 6). Returns the prompt only when
+/// `GX_LLM_PROPOSE_PROMPT` is set non-empty; unset (the normal case) leaves the
+/// deterministic change untouched.
+fn llm_override_prompt() -> Option<String> {
+    match std::env::var("GX_LLM_PROPOSE_PROMPT") {
+        Ok(p) if !p.is_empty() => Some(p),
+        _ => None,
+    }
+}
+
+/// Run the `llm` PROPOSE pass over the discovered/filtered repos and print a
+/// minimal per-fleet summary. The full present gate + confirm + apply are
+/// Phases 5-6; this phase persists proposals and reports what landed.
+fn run_llm_propose(
+    cli: &Cli,
+    config: &Config,
+    patterns: &[String],
+    change_id: Option<String>,
+    prompt: &str,
+) -> Result<()> {
+    let change_id = change_id.unwrap_or_else(generate_change_id);
+    debug!("run_llm_propose: change_id={change_id} patterns={patterns:?}");
+
+    let current_dir = std::env::current_dir()?;
+    let start_dir = cli.cwd.as_deref().unwrap_or(&current_dir);
+    let max_depth = cli
+        .max_depth
+        .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
+        .unwrap_or(3);
+
+    let repos = discover_repos(start_dir, max_depth, &config.ignore_patterns())
+        .context("Failed to discover repositories")?;
+    let filtered_repos = filter_repos(repos, patterns);
+    if filtered_repos.is_empty() {
+        println!("No repositories found matching the specified patterns.");
+        return Ok(());
+    }
+
+    let parallel_jobs = cli
+        .parallel
+        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .unwrap_or_else(num_cpus::get);
+
+    let summary =
+        core::propose::execute_propose(&filtered_repos, &change_id, prompt, config, parallel_jobs)?;
+
+    // Minimal report (present gate is Phase 6). Every ProposeSummary field is
+    // consumed here so the bin target's dead-code check stays honest.
+    debug!(
+        "run_llm_propose: change_id={} token={}",
+        summary.change_id, summary.token
+    );
+    println!(
+        "Proposed change {}: {} proposed | {} empty | {} failed",
+        summary.change_id, summary.proposed, summary.empty, summary.failed
+    );
+    for rp in &summary.repos {
+        if rp.outcome == core::manifest::ProposalOutcome::Failed {
+            println!(
+                "  FAILED {}: {}",
+                rp.slug,
+                rp.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+    if let Some(dir) = summary.manifest_path.parent() {
+        println!("Proposal artifacts: {}", dir.display());
+    }
     Ok(())
 }
 

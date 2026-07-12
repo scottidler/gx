@@ -12,7 +12,14 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Schema version stamped on every change state file written by this gx.
-const CHANGE_STATE_VERSION: u32 = 1;
+///
+/// Bumped 1 -> 2 for Phase 4 (design doc
+/// `2026-07-12-llm-propose-apply-and-mcp-server.md`): the new
+/// `RepoChangeStatus::Proposed` variant. Combined with `deny_unknown_fields`,
+/// an OLDER gx reading a state file that carries `"status": "Proposed"` fails
+/// loudly on the unknown enum variant (fail closed, correct) rather than
+/// silently mis-loading it.
+const CHANGE_STATE_VERSION: u32 = 2;
 
 /// Default `version` for a change state file that predates the field (serde
 /// fills this in for version-less files written by an older gx), matching
@@ -111,6 +118,10 @@ pub enum ChangeStatus {
 /// Status of a single repository's change
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RepoChangeStatus {
+    /// A proposal has been persisted (Phase 4) but not yet applied: artifacts
+    /// live under `proposals/<change-id>/`, no branch/commit/PR exists. Ordered
+    /// before `BranchCreated`, which is the next state once `gx apply` runs.
+    Proposed,
     /// Branch created, no PR yet
     BranchCreated,
     /// PR created and open
@@ -162,6 +173,28 @@ impl ChangeState {
             error: None,
         };
         self.repositories.insert(repo_slug, state);
+        self.updated_at = Utc::now();
+    }
+
+    /// Record a repository as having a persisted proposal (Phase 4). No branch,
+    /// commit, or PR exists yet - the apply pass (Phase 5) advances it to
+    /// `BranchCreated` and onward. `base_sha` is the pristine head the proposal
+    /// was generated against; apply refuses if the repo has drifted past it.
+    pub fn mark_proposed(
+        &mut self,
+        repo_slug: &str,
+        base_sha: String,
+        files_modified: Vec<String>,
+        local_path: Option<String>,
+    ) {
+        let change_id = self.change_id.clone();
+        self.add_repository(repo_slug.to_string(), change_id);
+        if let Some(repo) = self.repositories.get_mut(repo_slug) {
+            repo.status = RepoChangeStatus::Proposed;
+            repo.base_sha = Some(base_sha);
+            repo.files_modified = files_modified;
+            repo.local_path = local_path;
+        }
         self.updated_at = Utc::now();
     }
 

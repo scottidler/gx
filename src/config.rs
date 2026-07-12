@@ -76,18 +76,59 @@ pub struct CreateConfig {
     /// Prompt before committing when more repositories than this are targeted.
     #[serde(rename = "confirm-threshold")]
     pub confirm_threshold: Option<usize>,
+    /// Settings for the `llm` change type (agent-per-repo propose/apply).
+    pub llm: Option<LlmConfig>,
 }
 
 impl Default for CreateConfig {
     fn default() -> Self {
         Self {
             confirm_threshold: Some(DEFAULT_CONFIRM_THRESHOLD),
+            llm: Some(LlmConfig::default()),
         }
     }
 }
 
 /// Default confirm-threshold: prompt when committing to more repos than this.
 pub const DEFAULT_CONFIRM_THRESHOLD: usize = 5;
+
+/// Configuration for the `gx create ... llm` change type (design doc
+/// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Config additions): the
+/// agent command run per repo in a throwaway worktree, and the wall-clock
+/// timeout after which its whole process group is killed.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmConfig {
+    /// Command line for the agent; the prompt is appended as the final argument
+    /// and the CWD is the temp worktree.
+    #[serde(rename = "agent-command")]
+    pub agent_command: Option<String>,
+    /// Wall-clock timeout per repo, in seconds. On expiry the agent's entire
+    /// process group is killed.
+    #[serde(rename = "timeout-seconds")]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            agent_command: Some(DEFAULT_LLM_AGENT_COMMAND.to_string()),
+            timeout_seconds: Some(DEFAULT_LLM_TIMEOUT_SECONDS),
+        }
+    }
+}
+
+/// Default agent command. The design doc's bare `claude -p --output-format
+/// text` is INSUFFICIENT: Phase 0's live spike proved that in print (`-p`) mode
+/// Claude Code will not edit files without an edit-granting permission mode, so
+/// every propose would be a false "empty" outcome. `--permission-mode
+/// acceptEdits` is the least-privilege fix (grants file edits without
+/// auto-approving arbitrary Bash/network); recorded as the Phase 0 deviation.
+pub const DEFAULT_LLM_AGENT_COMMAND: &str =
+    "claude -p --output-format text --permission-mode acceptEdits";
+
+/// Default per-repo agent timeout (design Performance: 300s per repo).
+pub const DEFAULT_LLM_TIMEOUT_SECONDS: u64 = 300;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -215,6 +256,24 @@ impl Config {
             .as_ref()
             .and_then(|c| c.confirm_threshold)
             .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
+    }
+
+    /// Effective agent command for the `llm` change type.
+    pub fn llm_agent_command(&self) -> String {
+        self.create
+            .as_ref()
+            .and_then(|c| c.llm.as_ref())
+            .and_then(|l| l.agent_command.clone())
+            .unwrap_or_else(|| DEFAULT_LLM_AGENT_COMMAND.to_string())
+    }
+
+    /// Effective per-repo agent timeout (seconds) for the `llm` change type.
+    pub fn llm_timeout_seconds(&self) -> u64 {
+        self.create
+            .as_ref()
+            .and_then(|c| c.llm.as_ref())
+            .and_then(|l| l.timeout_seconds)
+            .unwrap_or(DEFAULT_LLM_TIMEOUT_SECONDS)
     }
 
     /// Effective PR body template (`{commit_message}` is substituted).

@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod file;
 pub mod git;
 pub mod github;
+pub mod hash;
 pub mod lock;
 pub mod output;
 pub mod repo;

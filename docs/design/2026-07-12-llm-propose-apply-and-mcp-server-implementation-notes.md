@@ -345,3 +345,134 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
   `use gx::*`, matching the documented Shell/Core Split convention) at some
   point — not proposing it as part of this doc's remaining phases without
   Scott's say-so.
+
+## Phase 4: Change::Llm propose
+
+### Design decisions
+- **`Change::Llm(String)`** added to the `Change` enum (`src/create/core.rs`);
+  handled at the ORCHESTRATION level (`create::core::propose::execute_propose`),
+  NOT in the per-repo `process_single_repo` match — propose/present/confirm is a
+  fleet barrier (design Chunk A). The per-repo match gained a defensive
+  `Change::Llm(_)` arm that returns a loud `Err` ("must go through the propose
+  pass") so reaching it (a routing bug) fails loudly instead of silently.
+- **Propose orchestration entry point:** `create::core::propose::execute_propose(
+  repos, change_id, prompt, config, parallel_jobs) -> Result<ProposeSummary>`.
+  It takes the `ChangeLock` (propose writes `changes/<id>.json` + proposal
+  artifacts, exactly like a committing create), resolves agent-command + timeout
+  from config, runs `propose_single_repo` fleet-parallel via a rayon pool,
+  writes the canonical manifest, records `Proposed` state, and returns a summary.
+  Wired to the CLI via `create.rs::run_llm_propose`, reached from
+  `process_create_command` when `change` is `Change::Llm`.
+- **Per-repo propose flow** (`propose_single_repo`, print-free core): `RepoLock`
+  -> `git worktree add --detach <tmp/wt> <base_sha>` OUTSIDE the real worktree
+  (base_sha = current HEAD) -> run the agent (CWD = temp worktree, prompt
+  appended as final arg, wall-clock timeout, process-group kill) -> `git add -A`
+  + `git diff --cached --raw -z <base_sha>` to capture -> persist blobs + patch +
+  manifest entry -> **remove the temp worktree on EVERY path (incl. all errors),
+  then the `TempDir` drops.** The real worktree is never touched.
+- **Process-group kill** (`run_agent`): child spawned with
+  `CommandExt::process_group(0)` so pgid == child pid; stdio redirected to a log
+  FILE (sibling to the worktree, never inside it, so `git add -A` can't capture
+  it — and it sidesteps the pipe-buffer drain deadlock); a poll loop enforces the
+  deadline and on expiry runs `/bin/kill -KILL -<pgid>` to fell the whole group
+  (grandchildren included). Phase 0 proved `setsid`+signal-to-group; std's
+  `process_group(0)` is the crate-free equivalent, and `kill` the group-signal
+  primitive std doesn't expose (libc would be a new dep chunk A forbids).
+- **Proposal artifact layout** (`src/create/core/manifest.rs`), EXACTLY per Data
+  Model, under `$XDG_DATA_HOME/gx/proposals/<change-id>/`:
+  `manifest.json` (canonical `ProposalManifest`: version, change_id, prompt,
+  agent_command, created_at, `repos: [{slug, base_sha, outcome, error, files:
+  [{path, action add|modify|delete, mode, sha256, size}]}]`),
+  `<slug>.patch` (display only), `<slug>/files/<rel-path>` (full post-change
+  bytes = apply payload). Manifest field naming matches the sibling
+  `changes/<id>.json` (serde default snake_case, `version` + `deny_unknown_fields`).
+- **Token binds the applied bytes:** `manifest::compute_token(bytes)` = first
+  `TOKEN_HEX_LEN` (16) hex chars of `hash::sha256_hex(bytes)`; `write_manifest`
+  serializes the manifest (repos sorted by slug, files by path -> canonical),
+  writes it atomically, and returns the token over the EXACT bytes written. Since
+  the manifest carries every blob's `sha256`, the token transitively binds every
+  blob. Tests prove flipping one blob hash changes the token.
+- **`RepoChangeStatus::Proposed`** added BEFORE `BranchCreated`;
+  `ChangeState::mark_proposed(slug, base_sha, files, local_path)` records it.
+  Only `Proposed` repos are written to change state; empty/failed outcomes live
+  only in the manifest (recording a failed PROPOSE as `Failed` would conflate it
+  with a failed CREATE that may have pushed a branch).
+- **`CHANGE_STATE_VERSION` 1 -> 2** for the new `Proposed` variant. Verified the
+  fail-closed guarantee: an older gx's serde has no `Proposed` variant, so it
+  fails loudly on `"status": "Proposed"` (unknown variant), and
+  `deny_unknown_fields` (already on the state structs from Phase 1) catches any
+  new field — no silent mis-load.
+- **SHA-256 hand-rolled** in `src/hash.rs` (FIPS 180-4, validated against the
+  empty/`abc`/two-block/0..=255 known-answer vectors). The design pins chunk A to
+  ZERO new crates AND names `sha256`; `lock.rs::fnv1a_hex` sets the house
+  precedent of hand-rolling a pinned deterministic hash rather than adding a dep.
+  This is content-integrity binding, not adversarial secrecy.
+- **Config `create.llm`** (`src/config.rs`): `agent-command` (default
+  `"claude -p --output-format text --permission-mode acceptEdits"`, the Phase 0
+  correction) and `timeout-seconds` (default 300). `LlmConfig` added under
+  `CreateConfig` (which already had `deny_unknown_fields`); accessors
+  `Config::llm_agent_command()` / `llm_timeout_seconds()`. Shipped example
+  `gx.yml` and `docs/configuration.md` updated to show `create.llm` with the
+  CORRECT agent-command and the "acceptEdits is required" rationale.
+- **New git helpers** (`src/git.rs`): `worktree_add_detached`, `worktree_remove`
+  (force, best-effort), `stage_all`, `diff_cached_patch` (display), and
+  `diff_cached_raw_z` (raw NUL-terminated bytes so the mode metadata + non-UTF-8
+  path bytes survive for the payload-matrix check).
+- **Payload fidelity matrix** enforced in `capture_changes` at propose, from the
+  `--raw -z` modes: symlink (`120000`) and gitlink/submodule (`160000`) are
+  rejected as a loud per-repo `failed` outcome NAMING THE PATH; a non-UTF-8 path
+  is rejected NAMING the lossy path. Regular files (any content incl. binary) are
+  read raw (no lossy UTF-8 round-trip) and captured; a mode-only change records
+  the destination mode + the (unchanged) blob so apply needs no special case.
+  Validation happens BEFORE any artifact is written, so a rejected repo persists
+  nothing.
+- **Honest dead-code pattern** (bin target, per Phase 3): `Change::Llm` is
+  constructed and `execute_propose` is called from `create.rs` via the
+  inert-unless-set `GX_LLM_PROPOSE_PROMPT` hook (the CLI `llm` subcommand is
+  Phase 6). Every `ProposeSummary` field is read in `run_llm_propose`. Phase-5-
+  only reader fns (`load_manifest`, `recompute_token`) were deliberately NOT
+  added (they'd have no non-test caller and trip `-D warnings`); tests exercise
+  the round-trip via `serde_json::from_slice` + `compute_token` directly.
+
+### Deviations
+- **Config default agent-command carries `--permission-mode acceptEdits`** (the
+  Phase 0 deviation, folded in here as instructed): the design's bare
+  `claude -p --output-format text` (line 322 / Phase 4) cannot edit files
+  headlessly, so every propose would be a false "empty".
+- **SHA-256 is hand-rolled rather than a `sha2` dependency** — same effect
+  (`sha256` per Data Model), correct seam given the "zero new crates" constraint
+  and the `fnv1a_hex` precedent. Flagged rather than silently adding a crate.
+- **`undo::classify_action` / `undo.rs::state_label` gained `Proposed` arms as
+  fail-safe STUBS**, not the real behavior: `classify_action` maps `Proposed` ->
+  `AlreadyGone` (never touches a remote — correct, a bare proposal has nothing
+  remote), `state_label` -> `"proposed"`. The design's local-only `Proposed`
+  undo arm (delete artifacts, mark `CleanedUp`) is Phase 5; adding the variant
+  now forced these exhaustive matches to compile. No test pins the stub as
+  correct behavior.
+- **Re-propose overwrites the proposal dir in place** (no pre-delete): stale
+  blobs from a larger prior propose could linger but are harmless (apply reads
+  the manifest, not a dir listing). `gx doctor` orphan reporting is Phase 5.
+
+### Tradeoffs
+- **std `process_group(0)` + `/bin/kill -KILL -<pgid>`** vs. a `libc`/`nix`
+  `setsid`+`kill` — chose the crate-free path: it honors "zero new crates," and
+  the group kill is proven by a test whose fake agent spawns a grandchild that
+  outlives the parent (the test asserts the grandchild pid is dead after
+  timeout). Cost: Unix-only (`std::os::unix`), acceptable since the agent flow is
+  inherently a Unix shell-out and CI is Linux (design: non-Linux "not
+  regressing").
+- **agent-command is whitespace-split** (not shell-parsed): matches gx's
+  space-separated CLI convention and the default has no quoted args; the prompt
+  is a SEPARATE argv entry so prompts with spaces/quotes are safe regardless.
+- **Redirect agent stdio to a log file** vs. piping + concurrent drain — chose
+  the file: no pipe-buffer deadlock (rust.md), and a preview of the log gives
+  error context; the log lives OUTSIDE the worktree so it never pollutes the diff.
+- **Empty/failed repos not written to change state** (manifest only) vs.
+  recording all: keeps `undo`/`status` from treating a failed propose like a
+  pushed branch; the present step (Phase 6) reads the manifest for the full
+  fleet summary.
+
+### Open questions
+- None new. (The pre-existing `main.rs` lib/bin duplicate-module-tree debt noted
+  in Phase 3 still applies; this phase used the honest inert-hook pattern to work
+  within it rather than undertaking that refactor.)

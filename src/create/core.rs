@@ -8,6 +8,9 @@
 //! seam a future MCP `create-apply` tool calls into instead of the wrapper.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod manifest;
+pub mod propose;
+
 use crate::config::Config;
 use crate::confirm::Confirmation;
 use crate::diff;
@@ -41,6 +44,12 @@ pub enum Change {
     Delete,                // delete matched files
     Sub(String, String),   // pattern, replacement
     Regex(String, String), // regex pattern, replacement
+    /// An agent-generated change (the prompt). Handled by the fleet-level
+    /// PROPOSE pass ([`propose::execute_propose`]), NOT by the per-repo
+    /// `process_single_repo` pipeline: propose/present/confirm is a fleet
+    /// barrier (design doc `2026-07-12-llm-propose-apply-and-mcp-server.md`,
+    /// Chunk A). The per-repo match below rejects it defensively.
+    Llm(String),
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +507,12 @@ fn process_single_repo(
             &mut diff_parts,
         )
         .map(|stats| substitution_stats = Some(stats)),
+        // A fleet-level barrier, never applied per-repo here (design Chunk A):
+        // the propose pass handles `Change::Llm` at orchestration level. Reaching
+        // this arm is an internal routing bug; fail loudly rather than silently.
+        Change::Llm(_) => Err(eyre::eyre!(
+            "internal error: Change::Llm must go through the propose pass, not process_single_repo"
+        )),
     };
 
     if let Err(e) = change_result {

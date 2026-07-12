@@ -29,6 +29,8 @@ fn state_label(plan: &UndoPlan) -> &'static str {
         Some(RepoChangeStatus::RevertPrOpen) => "revert PR open",
         Some(RepoChangeStatus::BranchCreated) => "pushed, no PR",
         Some(RepoChangeStatus::Failed) => "failed",
+        // A bare (unapplied) proposal; the local-only undo arm lands in Phase 5.
+        Some(RepoChangeStatus::Proposed) => "proposed",
     }
 }
 
