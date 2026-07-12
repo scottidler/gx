@@ -569,8 +569,9 @@ pub fn process_review_sync_command(
 /// recorded change state and save once. Split from the command shell above so
 /// tests can exercise the reconciliation logic directly with a `gh`-shimmed
 /// [`github::list_prs_by_change_id`] result, without needing repo discovery or
-/// org auto-detection.
-fn sync_change_state(
+/// org auto-detection. `pub(crate)` so `gx undo` reuses the exact same
+/// reconciliation before building its plan (Phase 5 [F4]).
+pub(crate) fn sync_change_state(
     prs: &[PrInfo],
     change_id: &str,
 ) -> Result<(usize, usize, crate::state::ChangeStatus)> {

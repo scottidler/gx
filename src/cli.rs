@@ -389,6 +389,45 @@ EXAMPLES:
         action: RollbackAction,
     },
 
+    /// Undo a completed change campaign: close PRs, delete branches, drain
+    /// any live recovery files. Never touches a base branch or force-pushes.
+    #[command(after_help = "UNDO LEGEND:
+  ❌  PR closed and branch deleted   🧹  Change abandoned
+  🚨  Merged PR (requires revert)    ❌  Undo failed (per repo)
+
+WHAT UNDO DOES (per repo, reconciled against GitHub first):
+  live recovery file  -> drain via the rollback interpreter first, then continue
+  PR open             -> close PR -> delete remote branch -> delete local branch
+  pushed, no PR       -> delete remote branch -> delete local branch
+  committed local only-> delete local branch
+  PR merged           -> REPORTED as requiring a revert (never silently skipped)
+  already gone        -> record, skip
+
+EXAMPLES:
+  gx undo GX-2024-01-15         # Undo the campaign (prompts before mutating)
+  gx undo GX-2024-01-15 --yes   # Undo without the confirmation prompt")]
+    Undo {
+        /// Change ID to undo
+        #[arg(value_name = "CHANGE_ID", value_parser = validate_change_id)]
+        change_id: String,
+
+        /// GitHub organization (auto-detected from recorded repo slugs if not specified)
+        #[arg(
+            short = 'o',
+            long = "org",
+            help = "GitHub organization (auto-detected from recorded repo slugs if not specified)"
+        )]
+        org: Option<String>,
+
+        /// Skip the confirmation prompt before undoing (for automation)
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before undoing"
+        )]
+        yes: bool,
+    },
+
     /// Clean up branches after PR merge
     #[command(after_help = "CLEANUP LEGEND:
   🧹  Local branch deleted     🌐  Remote branch deleted

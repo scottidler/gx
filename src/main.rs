@@ -25,6 +25,7 @@ mod ssh;
 mod state;
 mod status;
 mod transaction;
+mod undo;
 mod user_org;
 mod utils;
 
@@ -199,6 +200,11 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             }
         },
         Commands::Rollback { action } => rollback::handle_rollback(action.clone()),
+        Commands::Undo {
+            change_id,
+            org,
+            yes,
+        } => undo::process_undo_command(cli, config, change_id, org.as_deref(), *yes),
         Commands::Cleanup {
             change_id,
             all,

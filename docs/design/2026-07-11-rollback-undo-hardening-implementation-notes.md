@@ -365,3 +365,104 @@ buckets each ("None." where empty).
 
 ### Open questions
 - None.
+
+## Phase 5: gx undo core
+
+### Design decisions
+- New `src/undo.rs` module + `gx undo <change-id>` subcommand
+  (`src/cli.rs:Commands::Undo`, dispatched in `src/main.rs`), with `--yes` and
+  `--org`. The command shell (`undo::process_undo_command`) reconciles against
+  GitHub, prints the plan, prompts (fail-closed on non-TTY, `--yes`), then
+  executes per repo in parallel; the core is split into pure, directly-testable
+  functions (`classify_action`, `build_plan`, `needs_action`, `finalize_state`)
+  and side-effecting ones (`undo_one`, `delete_branches`, `reconcile`), per the
+  repo's shell/core split.
+- Reconciliation reuses Phase 4's `review::sync_change_state` (widened to
+  `pub(crate)`) — `src/undo.rs:reconcile`. Orgs are derived from the recorded
+  repo slugs (no repo discovery needed: undo already knows exactly which repos
+  and orgs are in the campaign), or an explicit `--org`. A per-org fetch failure
+  is a `warn!`, not a hard error, so an offline undo of local branches still
+  proceeds on the recorded state (matching `review sync`'s warn-and-continue).
+- Recovery-file drain FIRST (load-bearing panel finding) — `src/undo.rs:undo_one`.
+  Every plan entry carries the transaction ids of live recovery files whose
+  `change_id` matches AND whose `repo_path` matches the repo (`build_plan` +
+  `same_repo`, canonical-path comparison). `undo_one` invokes the SAME rollback
+  interpreter via `Transaction::execute_recovery` (in-process, phase-aware)
+  BEFORE the campaign action, under the per-repo lock — restoring a
+  `mutating`-phase crash's stash before the branch is deleted, so WIP is never
+  stranded.
+- Sources = change state PLUS recovery files matching the change-id (F12): a
+  recovery file whose repo is NOT in the state file becomes its own
+  committed-local-only plan entry (`build_plan`), so a crash between push and
+  state save is never stranded.
+- Actions per reconciled state (`classify_action`, matching the Architecture
+  table): `PrOpen`/`PrDraft` (+ number) -> close PR -> delete remote -> delete
+  local; `BranchCreated`/`PrClosed`/`Failed` -> delete remote -> delete local;
+  recovery-only -> delete local; `PrMerged` -> `RequiresRevert` (REPORTED, never
+  reversed here); `CleanedUp` -> `AlreadyGone` (skip).
+- Remote-branch deletion uses `github::delete_remote_branch` (built on the
+  token-consistent `gh_command`) and PR close uses `github::close_pr`, per the
+  orchestrator's "all gh calls through gh_command" instruction. Local-branch
+  deletion resolves the recorded `local_path` first (`crate::bare::is_git_path`
+  gate); a recorded-but-missing path is REPORTED as a per-repo failure, not
+  silently skipped. The local delete is guarded by `git::branch_exists_locally`
+  so an already-gone branch (e.g. deleted by the recovery drain's full reverse)
+  is a no-op rather than an error — an existence check, not error-string
+  sniffing.
+- Partial failure converges (`finalize_state`): only `Undone` repos are marked
+  `CleanedUp`; `Failed` repos are left as reconciled so a re-run retries them
+  and `AlreadyGone` rows skip. The aggregate flips to `Abandoned` only when
+  every repo is resolved with no merged rows, `PartiallyMerged` when merged rows
+  remain (they need the Phase 6 revert), and is left untouched on partial
+  failure (never falsely `Abandoned`).
+- Output reuses `review`'s unified-results rendering
+  (`output::display_review_results`) + a review-style summary line —
+  `src/undo.rs:render_results`.
+
+### Deviations
+- Per-repo undo results are rendered as `ReviewResult { action:
+  ReviewAction::Deleted }` to reuse `review`'s unified renderer verbatim (the
+  orchestrator asked undo to "look like review") rather than introducing a new
+  `ReviewAction` variant that would touch `output.rs`'s two `UnifiedDisplay`
+  impls and the byte-identical review-renderer regression test. Merged rows are
+  surfaced as an explicit error line ("PR #N merged; requires revert (Phase 6) -
+  not reversed") so they are visibly REPORTED, never silently skipped. Same
+  effect (review-style unified results, merged rows visible), minimal blast
+  radius.
+- Remote-branch deletion is via `github::delete_remote_branch` (gh api DELETE,
+  per the orchestrator's gh_command instruction), NOT `git push --delete`. The
+  e2e's `gh` PATH shim therefore performs the real ref deletion on the bare
+  remote (locating it via `$GX_TEST_REMOTES` + the repo name parsed from the api
+  path), consistent with the 2026-06-11 gh-shim precedent (assert argv shape,
+  perform the real effect).
+- Reconcile is best-effort (warn-and-continue) rather than fail-closed on an
+  offline gh: undoing local branches must still work offline, and the recorded
+  state is the authority for the plan. This mirrors `review sync`'s existing
+  per-org warn behavior. Same seam, no new failure mode.
+
+### Tradeoffs
+- `github::delete_remote_branch` (gh api) returns an error on an already-absent
+  remote branch (404); undo does not yet pre-probe remote existence, so a
+  within-run remote delete of a never-pushed branch would report a per-repo
+  failure. Convergence still holds: a successful undo marks the repo
+  `CleanedUp`, so a re-run skips it, and a genuinely-absent-but-recorded branch
+  is a rare partial-failure that retries. Pre-delete existence checks are
+  explicitly Phase 7's scope (F13, replacing string-sniffed git errors with
+  `show-ref`/`ls-remote --exit-code`); deferred here to avoid an extra network
+  round-trip per repo and to keep Phase 5 to its mandate.
+- The per-repo lock is acquired inside `undo_one` (mirroring `create`'s
+  `process_single_repo`) rather than around the whole command, so the parallel
+  rayon workers each hold only their own repo's lock. Phase 7 EXTENDS lock
+  coverage and adds a change-level lock; this phase deliberately adds only the
+  per-repo lock the orchestrator scoped.
+- `build_plan` associates a recovery file to a state repo by canonical-path
+  equality (`same_repo`), falling back to a raw comparison when a path does not
+  resolve. A recovery file whose `repo_path` matches no state repo becomes a
+  standalone committed-local-only entry rather than being dropped — chosen so
+  F12's crash-between-push-and-save window can never strand a repo.
+
+### Open questions
+- The 404-on-already-deleted-remote-branch tolerance (above) is left for Phase 7
+  to harden with an explicit existence check; flagged so it is not assumed
+  already handled. No action needed from the user.
+- Cross-repo/system-mutating bullets: none in Phase 5.
