@@ -701,3 +701,80 @@ answered by Scott, 2026-07-12: yes, it rides Phase 1.)
 - Seams: `src/create.rs`, `src/transaction.rs`, `src/undo.rs`,
   `src/state.rs`, `src/lock.rs`, `src/github.rs`, `src/config.rs`,
   `build.rs`
+
+## Addendum: Ringer Adversarial-Review Experiment (2026-07-12)
+
+Provenance: this doc was the test artifact for the first Ringer
+adversarial-review swarm on desk.lan (three models via the ringer
+`adversarial-review` kit in the new docker worker lane: GLM-5.2, Kimi
+K2.7-code, DeepSeek V4-pro; ~$0.35 total). The swarm ran AFTER phases 0-4
+shipped (commits `4b5f9e2`, `0118e14`, `8ee029c`, `b62e981`), so it read the
+doc against post-implementation code. Orchestrator (Claude/Fable) verified
+every finding against source before recording it here: 12 raw findings ->
+7 confirmed, 1 refuted, the rest collapsed to doc-predates-implementation
+staleness. Run artifacts: `~/.ringer/runs/gx-llm-mcp-design-review-*` and
+the Ringside library entry `gx-llm-mcp-design-review`.
+
+Process note: GLM-5.2 fabricated one finding (claimed `state_label` in
+`src/undo.rs` lacks a `Proposed` arm and the tree does not compile; the arm
+exists at `src/undo.rs:33` and the tree builds). Swarm review findings get
+orchestrator verification before they touch a doc or a plan, always.
+
+Confirmed findings and dispositions:
+
+1. **Propose pass skips the blast-radius confirm** (GLM, verified).
+   `run_llm_propose` (`src/create.rs:231`) goes discover -> filter ->
+   `execute_propose` with no `confirm_blast_radius` call; the deterministic
+   path has one. This doc says the confirm "still runs up front as today":
+   shipped code deviates. Mitigated today by the `GX_LLM_PROPOSE_PROMPT` env
+   gate. Disposition: add the confirm to `run_llm_propose` (honoring `--yes`
+   and non-TTY fail-closed) as part of Phase 6, or earlier if the env gate
+   lifts first.
+2. **Proposal artifact dir is not lock-guarded** (Kimi, design-level).
+   `ChangeLock` guards `changes/<id>.json`; nothing guards
+   `proposals/<change-id>/`, so concurrent `gx apply` | `gx undo` over one
+   proposal is an unhandled race. Apply is not built yet, so this lands
+   on time. Disposition: Phase 5+ requirement: `ChangeLock` acquisition
+   covers every read-modify-write of the proposal dir (state and artifacts
+   serialize under the same lock; no second lock kind).
+3. **Bare proposals get stuck at `InProgress`** (DeepSeek + GLM, verified
+   line by line). `mark_proposed` (`src/state.rs:183`) never calls
+   `update_overall_status`; that function has no `Proposed`/`BranchCreated`
+   bucket anyway; cleanup requires a terminal status; and the current
+   `Proposed` undo arm is the deliberate `AlreadyGone` no-op stub. Until
+   Phase 5 lands, "a bad generation costs nothing" actually costs a stuck
+   state file plus orphaned proposal artifacts. Disposition: Phase 5 (the
+   local-only undo arm) closes this; note the interim gap in Phase 4's
+   success criteria and have `gx doctor` report stuck `Proposed` campaigns
+   until then.
+4. **`gx apply` idempotency is undefined** (Kimi). The doc never states
+   which repo states apply processes on a re-run. Disposition: rule adopted
+   into Apply-pass semantics: apply processes only repos at `Proposed`;
+   any later state -> skipped with an "already applied" summary line.
+5. **`Config` needs an `mcp` field and no phase says so** (DeepSeek). With
+   `deny_unknown_fields` live (`src/config.rs:35`), the `mcp:` config
+   example in this doc fails to parse until the field exists. Disposition:
+   Phase 9 gains an explicit step: add `mcp: Option<McpConfig>` (its own
+   `deny_unknown_fields` struct) to `Config`.
+6. **MCP confirm-token proves receipt, not consent** (GLM + Kimi, deduped).
+   An agent client can call plan -> execute back to back; the token gates
+   plan-byte consistency, and stdio-local is the only caller auth. This is
+   an accepted property of a local single-user tool, not a bug, but the
+   Security section implies the token is a review gate. Disposition:
+   Security section states the trust model plainly: enabling a mutating MCP
+   tool grants that client the same authority as a shell with `--yes`; the
+   token prevents stale-plan execution, not unreviewed execution.
+7. **Doc-sync nits** (Kimi). The `agent-command` config example omits
+   `--permission-mode acceptEdits` (shipped default has it:
+   `src/config.rs:127`, recorded as the Phase 0 deviation); the
+   worktree-crash risk row should graduate to a startup requirement
+   (propose prunes gx-tagged leftover worktrees before running).
+   Disposition: fix the example; add the prune step to Phase 4's
+   worktree lifecycle.
+
+Also from the run: phases 0-4 of this doc are SHIPPED as of 2026-07-12
+(the four commits above). The staleness findings all trace to reviewers
+reading pre-implementation prose against post-implementation code; the
+phase statuses below reflect reality now, and the "flagged unproven"
+qualifier on the lock ergonomics (line ~252) is resolved by the shipped
+`TryLockError` match (`src/lock.rs:160-184`).
