@@ -334,10 +334,27 @@ fn test_split_propose_then_apply_equals_one_shot() {
         serde_json::from_str(&std::fs::read_to_string(one_shot_state).unwrap()).unwrap();
     let split_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(split_state).unwrap()).unwrap();
-    let repo_action = |v: &serde_json::Value| v["repositories"]["app"]["status"].clone();
+    // The repo slug in these local-remote fixtures is `<tmpdir>/app`, not a
+    // bare `app`, so index the sole repository entry by value rather than by a
+    // hardcoded key (a hardcoded `["app"]` reads `null` on both sides and the
+    // comparison passes vacuously). Assert it is a real status so it bites.
+    let repo_status = |v: &serde_json::Value| {
+        v["repositories"]
+            .as_object()
+            .expect("change state has a repositories object")
+            .values()
+            .next()
+            .expect("exactly one repository recorded")["status"]
+            .clone()
+    };
+    let one_shot_status = repo_status(&one_shot_json);
+    assert!(
+        one_shot_status.is_string(),
+        "recorded per-repo status must be a concrete status, got {one_shot_status:?}"
+    );
     assert_eq!(
-        repo_action(&one_shot_json),
-        repo_action(&split_json),
+        one_shot_status,
+        repo_status(&split_json),
         "recorded per-repo status must match between one-shot and split flows"
     );
 
