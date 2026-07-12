@@ -120,10 +120,14 @@ fn test_config_file_option() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     create_test_repo(temp_dir.path(), "test-repo", true);
 
-    // Create a config file
+    // Create a config file. Real keys only: `parallelism`/`max_depth` are not
+    // config fields (the real keys are `jobs` and `repo-discovery.max-depth`)
+    // and would now be rejected loudly by `deny_unknown_fields` instead of
+    // silently ignored.
     let config_content = r#"
-parallelism: 2
-max_depth: 5
+jobs: "2"
+repo-discovery:
+  max-depth: 5
 "#;
     let config_path = temp_dir.path().join("gx.yml");
     std::fs::write(&config_path, config_content).unwrap();

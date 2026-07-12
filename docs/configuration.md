@@ -92,5 +92,6 @@ gx --config ./custom-gx.yml clone tatari-tv
 - Validate tool versions on startup
 - Check file paths exist and are executable
 - Validate numeric ranges (jobs > 0, max_depth > 0)
-- Warn about unknown configuration keys
+- Reject unknown configuration keys with a loud, named error
+  (`#[serde(deny_unknown_fields)]`) rather than silently ignoring a typo
 - Provide helpful error messages for invalid values

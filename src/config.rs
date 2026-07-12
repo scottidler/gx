@@ -1,4 +1,5 @@
 use eyre::{Context, Result};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ pub fn xdg_data_dir() -> Option<PathBuf> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     #[serde(rename = "default-user-org")]
     pub default_user_org: Option<String>,
@@ -50,7 +51,7 @@ pub struct Config {
 
 /// GitHub-related configuration.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
     /// Template for PR bodies. `{commit_message}` is substituted.
     #[serde(rename = "pr-body-template")]
@@ -70,7 +71,7 @@ pub const DEFAULT_PR_BODY_TEMPLATE: &str = "{commit_message}";
 
 /// Configuration for the `create` command.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CreateConfig {
     /// Prompt before committing when more repositories than this are targeted.
     #[serde(rename = "confirm-threshold")]
@@ -100,13 +101,13 @@ pub enum OutputVerbosity {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OutputConfig {
     pub verbosity: Option<OutputVerbosity>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RepoDiscoveryConfig {
     #[serde(rename = "max-depth")]
     pub max_depth: Option<usize>,
@@ -115,14 +116,14 @@ pub struct RepoDiscoveryConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: Option<String>,
     pub file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RemoteStatusConfig {
     pub enabled: Option<bool>,
     #[serde(rename = "fetch-first")]
@@ -226,6 +227,7 @@ impl Config {
 
     /// Load configuration with fallback chain
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
+        debug!("Config::load: config_path={config_path:?}");
         // If explicit config path provided, try to load it
         if let Some(path) = config_path {
             return Self::load_from_file(path)
@@ -241,16 +243,14 @@ impl Config {
                 .join(project_name)
                 .join(format!("{project_name}.yml"));
             if primary_config.exists() {
-                match Self::load_from_file(&primary_config) {
-                    Ok(config) => return Ok(config),
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load config from {}: {}",
-                            primary_config.display(),
-                            e
-                        );
-                    }
-                }
+                // A file that exists but fails to parse (a typo'd key under
+                // `deny_unknown_fields`, bad YAML, ...) must fail loudly, not
+                // be swallowed into a silent default - that was the exact bug
+                // this house rule exists to close.
+                return Self::load_from_file(&primary_config).context(format!(
+                    "Failed to load config from {}",
+                    primary_config.display()
+                ));
             }
         }
 

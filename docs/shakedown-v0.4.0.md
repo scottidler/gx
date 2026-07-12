@@ -78,7 +78,7 @@ help/wiring is correct and it is covered by the gh-shim unit/e2e tests.
 | `rollback cleanup` (nothing old) | "No recovery states to clean up" |
 
 ## Failures & Bugs
-None (product). 
+None (product).
 
 ## Cosmetic
 - `rollback validate`/`execute` on a nonexistent tx prints a raw eyre trailer

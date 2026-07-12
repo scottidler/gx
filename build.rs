@@ -20,4 +20,8 @@ fn main() {
     println!("cargo:rustc-env=GIT_DESCRIBE={git_describe}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/");
+    // `bump --tag-only` (and any tag-only push) writes the new tag straight to
+    // packed-refs rather than a loose ref under .git/refs/tags/, so without
+    // this trigger a tag-only release rebuilds with a stale GIT_DESCRIBE.
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
