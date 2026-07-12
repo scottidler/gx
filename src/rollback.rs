@@ -1,3 +1,5 @@
+mod core;
+
 use crate::cli::RollbackAction;
 use crate::lock::RepoLock;
 use crate::state::StateManager;
@@ -6,31 +8,6 @@ use chrono::{DateTime, Duration, Utc};
 use colored::*;
 use eyre::{Context, Result};
 use log::{debug, error, info, warn};
-
-/// Basic validation of a recovery state: the repo must still exist and be a git
-/// repository. Returns `(errors, warnings)`.
-fn validate_recovery_state(state: &RecoveryState) -> (Vec<String>, Vec<String>) {
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-
-    let repo = &state.repo_path;
-    if !repo.exists() {
-        errors.push(format!(
-            "Repository path no longer exists: {}",
-            repo.display()
-        ));
-    } else if !crate::bare::is_git_path(repo) {
-        // Layout-aware: a flat repo (`.git` dir), a linked worktree (`.git`
-        // pointer file), or a bare container all count as a git repository.
-        errors.push(format!("Not a git repository: {}", repo.display()));
-    }
-
-    if state.steps.is_empty() {
-        warnings.push("Recovery state has no steps".to_string());
-    }
-
-    (errors, warnings)
-}
 
 /// Summarize step kinds for display.
 fn step_kind(step: &crate::transaction::RollbackStep) -> &'static str {
@@ -169,7 +146,7 @@ fn execute_recovery(transaction_id: &str, force: bool, yes: bool) -> Result<()> 
     // Validate before executing unless forced (`--force` == skip validation only).
     if !force {
         println!("{}", "🔍 Validating recovery operations...".yellow());
-        let (errors, warnings) = validate_recovery_state(&state);
+        let (errors, warnings) = core::validate_recovery_state(&state);
 
         if !errors.is_empty() {
             println!("{}", "❌ Validation failed:".red().bold());
@@ -202,9 +179,11 @@ fn execute_recovery(transaction_id: &str, force: bool, yes: bool) -> Result<()> 
         return Ok(());
     }
 
-    // Execute the recovery, dispatching on phase inside the engine.
+    // Execute the recovery, dispatching on phase inside the engine. The
+    // wrapper already confirmed (TTY prompt above, or --yes); the core never
+    // prompts, so it always receives an already-satisfied confirmation.
     println!("{}", "🔄 Executing rollback operations...".blue());
-    let outcome = Transaction::execute_recovery(transaction_id)?;
+    let outcome = core::execute_recovery(transaction_id, crate::confirm::already_confirmed())?;
 
     println!();
     match outcome {
@@ -315,7 +294,7 @@ fn validate_recovery(transaction_id: &str) -> Result<()> {
     }
     println!();
 
-    let (errors, warnings) = validate_recovery_state(&state);
+    let (errors, warnings) = core::validate_recovery_state(&state);
 
     if errors.is_empty() {
         println!(

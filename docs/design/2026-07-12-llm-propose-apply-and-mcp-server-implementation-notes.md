@@ -190,3 +190,158 @@ session scratchpad (never `~/repos`), against detached temp worktrees.
 
 ### Open questions
 - None.
+
+## Phase 3: Core/display split
+
+### Design decisions
+- New `src/confirm.rs` (`pub mod confirm` in `lib.rs`/`main.rs`) defines the
+  `Confirmation` enum exactly to the doc's API-Design shape (`Token(String)` |
+  `AlreadyConfirmed`), shared by all three split cores rather than duplicated
+  per module — a plan/propose core and an execute core will both need it from
+  Phase 4 onward, and a single definition keeps the seam consistent.
+- Three split targets, matching the phase bullet's named functions:
+  `process_create_command` → `src/create/core.rs::execute_create` (+CLI
+  wrapper `create.rs::process_create_command`); `process_undo_command` →
+  `src/undo/core.rs::{plan_undo, execute_undo}` (+wrapper
+  `undo.rs::process_undo_command`); the CLI-level `execute_recovery` in
+  `rollback.rs` (which mixed validate+print+confirm+dispatch) →
+  `src/rollback/core.rs::{validate_recovery_state, execute_recovery}` (+
+  wrapper `rollback.rs`'s private `execute_recovery`). `Transaction::execute_recovery`
+  in `src/transaction.rs` was ALREADY print-free (verified: zero `println!`/
+  `print!` in the whole file) and needed no split — it is the engine
+  `rollback::core::execute_recovery` calls into.
+  Read paths (status/review/doctor) were NOT split: nothing in this phase's
+  success criteria or the MCP tool list required it yet (Phase 9 wires those
+  tools when gx-mcp exists to call them), so splitting them now would be
+  unrequested scope.
+- `mod core;` is PRIVATE in all three wrappers (not `pub mod core;`): nothing
+  outside the crate calls into these cores yet (gx-mcp doesn't exist until
+  Phase 8). Each wrapper does `pub use core::{the types the wrapper/output.rs/
+  main.rs already reference by name};` so `create::CreateResult`,
+  `undo::UndoPlan`, etc. keep resolving unchanged. Phase 8/9 flips the
+  relevant `mod core;` to `pub mod core;` when gx-mcp needs
+  `gx::create::core::execute_create` etc. from a different workspace member.
+- `CreateResult` gains `pub diff: Option<String>` (`src/create/core.rs`),
+  populated by a new `join_diff(&diff_parts)` helper at every construction
+  site inside `process_single_repo` (including `dry_run_error`, which now
+  takes `diff_parts: &[String]` so an error result surfaces whatever partial
+  diff had already been computed, `None` before any mutation started).
+  Nothing renders it yet — Phase 4's present step and a future MCP
+  `change-get` tool are the first consumers; the CLI wrapper only logs a
+  `debug!` count of how many results carry a diff (never `println!`s it), so
+  stdout is unaffected.
+- `rollback::core::execute_recovery` deliberately does NOT re-acquire the
+  per-repo lock or re-run validation: the CLI wrapper (`rollback.rs`) still
+  loads the recovery state, acquires the `RepoLock`, prints the plan, runs
+  `core::validate_recovery_state` and aborts BEFORE calling core if `!force`
+  and validation errored, then prompts. Core is only ever invoked once the
+  wrapper has already confirmed, exactly mirroring the create/undo pattern
+  (core never re-decides an abort the wrapper already made) — see Deviations
+  for why the lock is NOT held via an explicit parameter into core.
+- `undo::core::plan_undo` returns `Option<UndoPlanSet>`: `None` reproduces the
+  exact "no change state AND no recovery files" short-circuit the original
+  `process_undo_command` had before ever calling `build_plan`/printing a plan
+  header — preserving that the "nothing to undo" message is the ONLY output
+  in that case (no plan header, no reconcile network calls).
+- Every split core logs its own `debug!` entry naming its key params
+  (function-level logging rule), including the `Confirmation` it received
+  (`{confirmation:?}`) so a diagnosis never needs to guess which gate a
+  caller went through.
+
+### Deviations
+- **`Confirmation::Token` is unused by any wrapper's real call path in this
+  phase** (none of create/undo/rollback persists a hashable manifest yet), so
+  every wrapper always passes `crate::confirm::already_confirmed()` rather
+  than a literal `Confirmation::AlreadyConfirmed`. `already_confirmed()`
+  honors `GX_TEST_CONFIRM_TOKEN` (inert unless set, matching the existing
+  `GX_CRASH_POINT`/`GX_TEST_LOCK_DELAY_MS` hooks) so it can return
+  `Confirmation::Token(hash)` too. Why this exists: `gx` compiles its ENTIRE
+  module tree twice from identical source — once as the `gx` lib target
+  (`lib.rs`), once as the `gx` bin target (`main.rs`, which declares its own
+  parallel `mod` tree rather than depending on the lib crate, pre-existing
+  architecture, not touched here). A `bin` crate has no external consumer, so
+  `pub` items unused outside `#[cfg(test)]` are genuinely dead code in that
+  target's non-test build and `-D warnings` (the `check`/`clippy` otto tasks)
+  fails on it; a `Token(hash)` that nothing but a test ever constructs trips
+  this. `already_confirmed()` is real, always-compiled (non-test) code that
+  constructs `Confirmation::Token`, satisfying the dead-code check honestly
+  (matching an established house pattern) instead of an `#[allow(dead_code)]`
+  (banned) or a fabricated non-test caller. Every core still receives and
+  logs whatever `Confirmation` it's given identically for both variants;
+  Phase 4/5/9 gives `Token` its first REAL caller and its first real check.
+- **The `gx` lib-vs-bin duplicate module tree is pre-existing** (confirmed:
+  `Cargo.toml` declares `[lib] path = "src/lib.rs"` and `[[bin]] path =
+  "src/main.rs"`, and `main.rs` declares its own full `mod` tree instead of
+  `use gx::...`), not introduced by this phase. It is the reason any
+  forward-looking pub type added without an immediate non-test production
+  caller trips `-D warnings` in the bin target specifically (the lib target
+  never warns: pub items there are correctly treated as the external API).
+  Not fixed here — a `main.rs`-depends-on-`gx`-lib conversion is a
+  substantial, unrelated refactor; flagged as an Open Question below rather
+  than undertaken as a side effect of Phase 3.
+- **`undo/tests.rs` moved wholesale to `undo/core/tests.rs`** with NO content
+  changes (verified every test in it exercises a function that moved into
+  `undo::core`: `classify_action`, `build_plan`, `needs_action`,
+  `finalize_state`, `undo_one`, `revert_merged` via its `run_revert` helper —
+  none touch `print_plan`/`confirm_undo`/`render_results`), so a `git mv` +
+  re-pointing the `#[cfg(test)] mod tests;` declaration was sufficient; no
+  test bodies needed splitting between wrapper and core.
+- **`create.rs`'s previously-inline `#[cfg(test)] mod tests { ... }` block is
+  now a proper `src/create/core/tests.rs` submodule** (Rust 2018+ style, per
+  house convention) as a direct byproduct of relocating the functions it
+  tests — not a separate cleanup pass. Same for `rollback/core/tests.rs`
+  (new; `rollback.rs`'s own pre-existing inline tests for the UNRELATED
+  `format_duration`/`parse_duration` helpers were left exactly where they
+  were, out of this phase's scope).
+- **Two new tests in `create/core/tests.rs` needed a bare-remote fixture**
+  (`init_repo_with_bare_remote`) rather than a bare `init_git_repo`:
+  `process_single_repo`'s `get_head_branch` call requires an `origin` remote
+  to resolve the head branch (pre-existing behavior, not new), so a
+  same-phase test exercising the happy path needs the same fixture the
+  existing Phase-4 tests already used.
+- **`crash::tests::test_crash_hook_call_sites_are_exactly_the_wired_points`
+  updated** to expect `src/create/core.rs` instead of `src/create.rs` for the
+  five non-`mid-finalize` crash hooks (they moved verbatim with
+  `process_single_repo`/`commit_changes_with_rollback`); `src/transaction.rs`
+  still wires `mid-finalize` unchanged. This is the exact "invert a test that
+  pinned prior behavior by name" case, not a weakening — the test still
+  proves the crash hooks are wired at exactly six points in exactly two
+  files, just naming the new file.
+- `otto ci`'s `whitespace -r` lint step made no changes this phase (verified
+  clean before commit).
+
+### Tradeoffs
+- `rollback::core::execute_recovery` NOT taking the `RepoLock` as an explicit
+  parameter (a "witness" that the caller already holds it) vs. re-acquiring
+  the lock inside core — chose neither: the wrapper's `_lock` local simply
+  outlives the synchronous call into `core::execute_recovery` in the same
+  stack frame, so the lock's protection window is UNCHANGED from before the
+  split (held from load through print/validate/confirm/execute) without core
+  needing to know about locking at all. Re-acquiring inside core would have
+  shrunk the protected window (lock only held during the confirmed execute,
+  not the print+prompt before it) — a real, if likely-benign, concurrency
+  behavior change that the phase's "byte-identical, refactor-only" mandate
+  doesn't license without a deliberate call.
+- `CreateResult.diff` as `Option<String>` (joined `diff_parts.join("\n")`) vs.
+  keeping `Vec<String>` on the struct — chose the joined string: it is
+  already the exact display-ready form every existing `diff_parts.push(...)`
+  call site produces, and a future consumer (present step, `change-get`) can
+  re-split on `"\n"` if it ever needs the per-file granularity; there was no
+  concrete consumer in this phase to design the richer shape against.
+- Kept `dry_run_error`'s new `diff_parts: &[String]` parameter required
+  (rather than optional/defaulted) so every one of its ~10 call sites in
+  `process_single_repo` states explicitly what diff state existed at that
+  point, instead of a silent default that could drift out of sync with the
+  surrounding code as future phases add more error paths.
+
+### Open questions
+- `main.rs` duplicating the entire `gx` lib module tree instead of depending
+  on the `gx` lib crate (`use gx::...`) is pre-existing and out of this
+  phase's scope, but it will keep tripping `-D warnings` on the bin target
+  for any forward-looking pub API added without an immediate non-test
+  production caller (this phase hit it for `Confirmation::Token`; Phase 4's
+  propose/apply and Phase 8/9's gx-mcp scaffolding are likely to hit it
+  again). Worth a dedicated cleanup (`main.rs` becomes a thin shell over
+  `use gx::*`, matching the documented Shell/Core Split convention) at some
+  point — not proposing it as part of this doc's remaining phases without
+  Scott's say-so.

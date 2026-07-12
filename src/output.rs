@@ -1337,6 +1337,7 @@ mod tests {
             pr_url: None,
             original_branch: None,
             base_sha: None,
+            diff: None,
             error: None,
         }
     }

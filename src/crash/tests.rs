@@ -117,17 +117,23 @@ fn test_crash_hook_call_sites_are_exactly_the_wired_points() {
         assert_eq!(count, 1, "crash point {point:?} must be wired exactly once");
     }
 
-    // Only the two pipeline files may wire the hook.
+    // Only the two pipeline files may wire the hook. `src/create.rs` split
+    // into a CLI wrapper + `src/create/core.rs` (design doc
+    // 2026-07-12-llm-propose-apply-and-mcp-server.md, Phase 3); the crash
+    // hooks live in the mutating pipeline, which moved into `core.rs`.
     for (file, point) in &sites {
         assert!(
-            file == "src/create.rs" || file == "src/transaction.rs",
+            file == "src/create/core.rs" || file == "src/transaction.rs",
             "unexpected crash call site in {file} for {point}"
         );
     }
     assert_eq!(
-        sites.iter().filter(|(f, _)| f == "src/create.rs").count(),
+        sites
+            .iter()
+            .filter(|(f, _)| f == "src/create/core.rs")
+            .count(),
         5,
-        "create.rs must wire five crash points (all but mid-finalize)"
+        "create/core.rs must wire five crash points (all but mid-finalize)"
     );
     assert_eq!(
         sites
