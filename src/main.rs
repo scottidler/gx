@@ -28,6 +28,7 @@ mod rollback;
 mod ssh;
 mod state;
 mod status;
+mod subprocess;
 mod transaction;
 mod undo;
 mod user_org;
@@ -296,6 +297,11 @@ fn run() -> Result<()> {
 
     // Load configuration
     let config = Config::load(cli.config.as_ref()).context("Failed to load configuration")?;
+
+    // Install the configured git/gh subprocess timeout before any command spins
+    // up a rayon pool: the deep git/gh call sites read it via
+    // `subprocess::subprocess_timeout()` (Phase 2).
+    subprocess::init_subprocess_timeout(config.subprocess_timeout());
 
     info!("Starting with config from: {:?}", cli.config);
 

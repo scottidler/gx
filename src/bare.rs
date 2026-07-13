@@ -16,6 +16,7 @@
 //! worktree*. gx operates in that single worktree and never fans write commands
 //! out across the container's N worktrees.
 
+use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{eyre, Result};
 use log::{debug, trace};
 use std::path::{Path, PathBuf};
@@ -73,11 +74,13 @@ pub fn is_git_path(path: &Path) -> bool {
 /// `git worktree list --porcelain` invocation.
 pub fn resolve_worktrees(container: &Path) -> Result<Vec<Worktree>> {
     debug!("resolve_worktrees: container={}", container.display());
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(container)
-        .args(["worktree", "list", "--porcelain"])
-        .output()?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(container)
+            .args(["worktree", "list", "--porcelain"]),
+        subprocess_timeout(),
+    )?;
     if !output.status.success() {
         return Err(eyre!(
             "git worktree list failed in {}: {}",
@@ -165,12 +168,14 @@ pub fn default_worktree(container: &Path) -> Result<PathBuf> {
 /// The container's default branch, read from the shared db's symbolic HEAD.
 /// Returns `None` if HEAD is detached or git cannot resolve it.
 fn default_branch(container: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(container)
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .output()
-        .ok()?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(container)
+            .args(["symbolic-ref", "--short", "HEAD"]),
+        subprocess_timeout(),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -187,11 +192,13 @@ fn default_branch(container: &Path) -> Option<String> {
 /// which resolves to the same shared config).
 pub fn origin_url(path: &Path) -> Result<String> {
     debug!("origin_url: path={}", path.display());
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["remote", "get-url", "origin"])
-        .output()?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["remote", "get-url", "origin"]),
+        subprocess_timeout(),
+    )?;
     if !output.status.success() {
         return Err(eyre!(
             "git remote get-url origin failed in {}: {}",

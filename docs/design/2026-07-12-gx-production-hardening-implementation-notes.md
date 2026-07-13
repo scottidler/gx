@@ -151,3 +151,95 @@ execution of `docs/design/2026-07-12-gx-production-hardening.md`. Append-only.
   files. The full lib suite is 100% green single-threaded (303/303). Confirms
   Phase 5's assignment is correct and this phase's changes are not the cause;
   flagged here so the parent doesn't mistake it for a Phase 1 regression.
+
+## Phase 2: Subprocess timeout + process-group kill
+
+### Design decisions
+- **`run_checked` lives in a new shared `src/subprocess.rs` module** — it is the
+  single chokepoint every `git`/`gh` call routes through (Architecture "Shared
+  subprocess runner"), and it must be reachable from `git.rs`, `github.rs`,
+  `output.rs`, `ssh.rs`, and `bare.rs`, so a shared module is the only seam that
+  fits. Harvested the process-group mechanism verbatim-in-spirit from
+  `create/core/propose.rs::run_agent` (own process group via
+  `CommandExt::process_group(0)`, poll `try_wait` to an `Instant` deadline,
+  `kill -KILL -<pgid>` via `/bin/kill` + reap on expiry). `const
+  POLL_INTERVAL_MS = 50` mirrors propose.rs.
+- **Concurrent thread-drain instead of propose's file-redirect** —
+  `subprocess.rs::run_checked` — `run_agent` redirects the child's stdio to a
+  log file (no pipes), but `run_checked` must RETURN the captured `Output`, so
+  it pipes stdout+stderr and drains BOTH on their own `std::thread`s while the
+  parent polls. Reading one pipe to completion before the other deadlocks a
+  child that fills the ~64 KB pipe buffer (`rust.md` subprocess hygiene) — that
+  deadlock would masquerade as a hang and trip the kill. A bite test
+  (`test_run_checked_drains_large_output_without_deadlock`, 200 KB) proves it.
+- **No new crate** — `subprocess.rs` — std only (`process_group` via
+  `std::os::unix::process::CommandExt`, `child.try_wait()`, `/bin/kill` for the
+  group kill), exactly as `propose.rs` does. The doc's Dependencies note said
+  "confirm whether propose.rs uses a helper crate; reuse it if so" — it does
+  not, so none was added.
+- **stdin is nulled** (`Stdio::null()`) — `run_checked` — a `gh`/`git` waiting on
+  an interactive/credential prompt is itself a wedge; a closed stdin turns that
+  prompt-hang into an immediate EOF failure. Bite test
+  (`test_run_checked_nulls_stdin` with `cat`) proves it returns promptly instead
+  of blocking to the timeout.
+- **Timeout is a config field, threaded to deep call sites via a write-once
+  `OnceLock`** — `config.rs` (`subprocess_timeout_secs` -> `subprocess-timeout-secs`,
+  `DEFAULT_SUBPROCESS_TIMEOUT_SECS = 300`, `Config::subprocess_timeout() ->
+  Duration`) + `subprocess.rs` (`init_subprocess_timeout` / `subprocess_timeout`).
+  `main::run` calls `init_subprocess_timeout(config.subprocess_timeout())` right
+  after the config loads, before any rayon pool spins up. The ~65 low-level
+  git/gh call sites read the value through the free `subprocess_timeout()` (which
+  falls back to the default const when uninitialized, e.g. under `cargo test`).
+  Config field mirrors the pinned schema and the existing `create.confirm-threshold`
+  / `github.pr-body-template` conventions (`#[serde(default, deny_unknown_fields)]`,
+  accessor + default const).
+- **Non-zero EXIT stays `Ok`; only a timeout is `Err`** — `run_checked` returns
+  `Ok(Output)` for any completed child regardless of exit code (callers inspect
+  `output.status` exactly as with `Command::output`); only a wall-clock timeout
+  (or a spawn/poll failure) is `Err`. A bite test pins this so a future refactor
+  can't silently turn every failed git into a timeout-shaped error.
+
+### Deviations
+- **Scope widened past `git.rs`/`github.rs` to `output.rs`, `ssh.rs`, `bare.rs`**
+  — the phase bullet names `git.rs`/`github.rs`, but the doc's own success
+  criterion is repo-wide (`rg 'Command::new("(git|gh)")' src/` shows every call
+  through `run_checked`, "no raw `.output()` on git/gh remains"). `output.rs`
+  (1 git call), `ssh.rs` (its `git config` call), and `bare.rs` (3 git calls)
+  each had raw git `.output()`, so they were routed too. Zero production git/gh
+  raw `.output()` remain.
+- **Left un-routed, deliberately:** the `Command::new("ssh")` connectivity probe
+  in `ssh.rs` (not a git/gh call; out of the criterion's scope and already
+  carries its own `-o ConnectTimeout`), and the git commands in test code
+  (`test_utils.rs`, `undo/core/tests.rs` — test fixtures, exempt). The
+  `gh_command` factory line (`Command::new("gh")` in `github.rs`) legitimately
+  keeps its bare form: it BUILDS and returns a `Command`; the actual execution
+  at every `gh_command(...)?` call site is wrapped in `run_checked`.
+- **Same-effect, correct-seam: file-redirect -> concurrent thread-drain** (see
+  Design decisions) — the harvested mechanism is the process-group kill; the
+  stdio handling differs because `run_checked` captures Output.
+
+### Tradeoffs
+- **Write-once `OnceLock<Duration>` global vs threading `Config`/`Duration`
+  through ~65 git functions** — chose the global. The git/gh helpers take `Repo`,
+  not `Config`, and threading a `Duration` through every signature (and its
+  callers) is enormous churn for a value that is uniform process-wide. A
+  write-once `OnceLock` set at startup has no shared-mutable-state hazard under
+  rayon's parallel workers (all reads see the same installed value). The pinned
+  `run_checked(cmd, timeout)` signature keeps the explicit timeout param so bite
+  tests inject short timeouts directly; production call sites pass
+  `subprocess_timeout()`.
+- **Two drain threads per call vs an async/`select` single-loop** — chose plain
+  `std::thread` draining: std-only, matches the `rust.md` concurrent-drain
+  reference, and these call sites are blocking `std::process::Command` under
+  rayon (NOT async), so introducing tokio here would be the wrong seam.
+
+### Open questions
+- The per-repo isolation of a timeout ("sibling repos complete, the run reaches
+  its summary") rides Phase 1's existing collected-results machinery unchanged:
+  `run_checked`'s `Err` propagates via `?` into the git helper's `Result`, which
+  the per-repo rayon worker records as that repo's `error: Option<String>` — the
+  exact path any git failure (e.g. a failed fetch) already travels. The
+  `run_checked` unit bite tests prove the kill + `Err`; no new full-fan-out
+  integration test was added, since the isolation seam is pre-existing and
+  untouched. Flag if the parent wants an end-to-end rigged-hang integration test
+  anyway.

@@ -45,6 +45,10 @@ fn test_config_defaults() {
     let config = Config::default();
     assert_eq!(config.confirm_threshold(), DEFAULT_CONFIRM_THRESHOLD);
     assert_eq!(config.pr_body_template(), DEFAULT_PR_BODY_TEMPLATE);
+    assert_eq!(
+        config.subprocess_timeout(),
+        std::time::Duration::from_secs(DEFAULT_SUBPROCESS_TIMEOUT_SECS)
+    );
     // The discovery defaults must NOT include `.git` (would hide every repo).
     assert!(!config.ignore_patterns().contains(&".git".to_string()));
     assert!(config
@@ -209,4 +213,29 @@ fn test_token_env_absent_yields_empty_default() {
     let token_env = config.token_env();
     assert!(token_env.by_org.is_empty());
     assert_eq!(token_env.default_env, None);
+}
+
+/// An explicit `subprocess-timeout-secs` overrides the default. Bite: the
+/// accessor must read the configured value, not the const.
+#[test]
+fn test_subprocess_timeout_honors_config() {
+    let yaml = "subprocess-timeout-secs: 42\n";
+    let config: Config = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        config.subprocess_timeout(),
+        std::time::Duration::from_secs(42)
+    );
+}
+
+/// A typo'd `subprocess-timeout-secs` key fails to parse loudly under the
+/// top-level `deny_unknown_fields` - a silently-ignored timeout would be worse
+/// than useless (the run would wedge with no timeout and no warning).
+#[test]
+fn test_subprocess_timeout_unknown_field_fails_loudly() {
+    let yaml = "subprocess-timeout-sec: 42\n"; // typo: missing trailing s
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("subprocess-timeout-sec"),
+        "error should name the unknown field, got: {err}"
+    );
 }

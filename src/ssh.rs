@@ -1,3 +1,4 @@
+use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
 use log::debug;
 use std::process::Command;
@@ -68,10 +69,11 @@ pub struct SshCommandDetector;
 impl SshCommandDetector {
     /// Get SSH command from git configuration
     pub fn get_ssh_command() -> Result<String> {
-        let output = Command::new("git")
-            .args(["config", "--get", "core.sshCommand"])
-            .output()
-            .context("Failed to execute git config command")?;
+        let output = run_checked(
+            Command::new("git").args(["config", "--get", "core.sshCommand"]),
+            subprocess_timeout(),
+        )
+        .context("Failed to execute git config command")?;
 
         if output.status.success() {
             let ssh_command = String::from_utf8_lossy(&output.stdout).trim().to_string();

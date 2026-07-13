@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -65,17 +66,17 @@ pub fn get_user_repos(
 
 /// Query GitHub API for repositories
 fn query_github_repos(query: &str, token: &str, archived_filter: &str) -> Result<Vec<String>> {
-    let output = Command::new("gh")
-        .env("GH_TOKEN", token)
-        .args([
+    let output = run_checked(
+        Command::new("gh").env("GH_TOKEN", token).args([
             "api",
             query,
             "--paginate",
             "--jq",
             &format!(".[]{archived_filter}  | .full_name"),
-        ])
-        .output()
-        .context("Failed to execute gh command")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh command")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -95,16 +96,16 @@ fn query_github_repos(query: &str, token: &str, archived_filter: &str) -> Result
 pub fn get_default_branch(repo_slug: &str, token: &str) -> Result<String> {
     debug!("Getting default branch for repo: {repo_slug}");
 
-    let output = Command::new("gh")
-        .env("GH_TOKEN", token)
-        .args([
+    let output = run_checked(
+        Command::new("gh").env("GH_TOKEN", token).args([
             "api",
             &format!("repos/{repo_slug}"),
             "--jq",
             ".default_branch",
-        ])
-        .output()
-        .context("Failed to get default branch")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to get default branch")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -295,9 +296,7 @@ fn retry_gh(
     let mut last_error = None;
 
     for attempt in 0..max_retries {
-        let output = gh_command(org, config)?
-            .args(args)
-            .output()
+        let output = run_checked(gh_command(org, config)?.args(args), subprocess_timeout())
             .context("Failed to execute gh")?;
 
         if output.status.success() {
@@ -505,10 +504,11 @@ pub fn list_prs_by_change_id(
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-        let output = gh_command(org, config)?
-            .args(&arg_refs)
-            .output()
-            .context("Failed to execute gh api graphql")?;
+        let output = run_checked(
+            gh_command(org, config)?.args(&arg_refs),
+            subprocess_timeout(),
+        )
+        .context("Failed to execute gh api graphql")?;
 
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
@@ -610,17 +610,18 @@ pub fn approve_and_merge_pr(
     let org = org_of(repo_slug);
 
     // First approve the PR
-    let approve_output = gh_command(org, config)?
-        .args([
+    let approve_output = run_checked(
+        gh_command(org, config)?.args([
             "pr",
             "review",
             &pr_number.to_string(),
             "--repo",
             repo_slug,
             "--approve",
-        ])
-        .output()
-        .context("Failed to execute gh pr review --approve")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh pr review --approve")?;
 
     if !approve_output.status.success() {
         let error = String::from_utf8_lossy(&approve_output.stderr);
@@ -647,10 +648,11 @@ pub fn approve_and_merge_pr(
         merge_args.push("--auto");
     }
 
-    let merge_output = gh_command(org, config)?
-        .args(&merge_args)
-        .output()
-        .context("Failed to execute gh pr merge")?;
+    let merge_output = run_checked(
+        gh_command(org, config)?.args(&merge_args),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh pr merge")?;
 
     if merge_output.status.success() {
         info!("Successfully merged PR #{pr_number} in {repo_slug}");
@@ -665,10 +667,17 @@ pub fn approve_and_merge_pr(
 pub fn close_pr(repo_slug: &str, pr_number: u64, config: &Config) -> Result<()> {
     debug!("Closing PR #{pr_number} in {repo_slug}");
 
-    let output = gh_command(org_of(repo_slug), config)?
-        .args(["pr", "close", &pr_number.to_string(), "--repo", repo_slug])
-        .output()
-        .context("Failed to execute gh pr close")?;
+    let output = run_checked(
+        gh_command(org_of(repo_slug), config)?.args([
+            "pr",
+            "close",
+            &pr_number.to_string(),
+            "--repo",
+            repo_slug,
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh pr close")?;
 
     if output.status.success() {
         info!("Successfully closed PR #{pr_number} in {repo_slug}");
@@ -683,15 +692,16 @@ pub fn close_pr(repo_slug: &str, pr_number: u64, config: &Config) -> Result<()> 
 pub fn delete_remote_branch(repo_slug: &str, branch_name: &str, config: &Config) -> Result<()> {
     debug!("Deleting remote branch '{branch_name}' in {repo_slug}");
 
-    let output = gh_command(org_of(repo_slug), config)?
-        .args([
+    let output = run_checked(
+        gh_command(org_of(repo_slug), config)?.args([
             "api",
             &format!("repos/{repo_slug}/git/refs/heads/{branch_name}"),
             "--method",
             "DELETE",
-        ])
-        .output()
-        .context("Failed to execute gh api DELETE")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh api DELETE")?;
 
     if output.status.success() {
         info!("Successfully deleted remote branch '{branch_name}' in {repo_slug}");
@@ -715,16 +725,17 @@ pub fn list_branches_with_prefix(
 ) -> Result<Vec<String>> {
     debug!("Listing branches with prefix '{prefix}' in {repo_slug}");
 
-    let output = gh_command(org_of(repo_slug), config)?
-        .args([
+    let output = run_checked(
+        gh_command(org_of(repo_slug), config)?.args([
             "api",
             "--paginate",
             &format!("repos/{repo_slug}/branches"),
             "--jq",
             &format!(".[] | select(.name | startswith(\"{prefix}\")) | .name"),
-        ])
-        .output()
-        .context("Failed to execute gh api branches")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh api branches")?;
 
     if output.status.success() {
         let branches = String::from_utf8(output.stdout)
@@ -745,16 +756,17 @@ pub fn list_branches_with_prefix(
 pub fn list_open_pr_branches(repo_slug: &str, config: &Config) -> Result<Vec<String>> {
     debug!("Listing open-PR head branches in {repo_slug}");
 
-    let output = gh_command(org_of(repo_slug), config)?
-        .args([
+    let output = run_checked(
+        gh_command(org_of(repo_slug), config)?.args([
             "api",
             "--paginate",
             &format!("repos/{repo_slug}/pulls?state=open&per_page=100"),
             "--jq",
             ".[].head.ref",
-        ])
-        .output()
-        .context("Failed to execute gh api pulls")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute gh api pulls")?;
 
     if output.status.success() {
         let branches = String::from_utf8(output.stdout)

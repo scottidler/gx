@@ -1,5 +1,6 @@
 use crate::repo::Repo;
 use crate::ssh::{SshCommandDetector, SshUrlBuilder};
+use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
 use log::debug;
 use std::process::Command;
@@ -131,16 +132,17 @@ pub fn get_repo_status_with_options(repo: &Repo, fetch_first: bool, no_remote: b
 
 /// Get current commit SHA (7 characters)
 fn get_current_commit_sha(repo: &Repo) -> Option<String> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo.path.to_string_lossy(),
             "rev-parse",
             "--short=7",
             "HEAD",
-        ])
-        .output()
-        .ok()?;
+        ]),
+        subprocess_timeout(),
+    )
+    .ok()?;
 
     if output.status.success() {
         let sha = String::from_utf8(output.stdout).ok()?;
@@ -152,13 +154,15 @@ fn get_current_commit_sha(repo: &Repo) -> Option<String> {
 
 /// Get the current branch name for a repository
 fn get_current_branch(repo: &Repo) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .arg("branch")
-        .arg("--show-current")
-        .output()
-        .ok()?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .arg("branch")
+            .arg("--show-current"),
+        subprocess_timeout(),
+    )
+    .ok()?;
 
     if output.status.success() {
         let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
@@ -176,14 +180,16 @@ fn get_current_branch(repo: &Repo) -> Option<String> {
 
 /// Get info for detached HEAD state
 fn get_detached_head_info(repo: &Repo) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&repo.path)
-        .arg("rev-parse")
-        .arg("--short")
-        .arg("HEAD")
-        .output()
-        .ok()?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .arg("rev-parse")
+            .arg("--short")
+            .arg("HEAD"),
+        subprocess_timeout(),
+    )
+    .ok()?;
 
     if output.status.success() {
         let commit = String::from_utf8(output.stdout).ok()?.trim().to_string();
@@ -235,13 +241,15 @@ pub fn parse_porcelain_status(text: &str) -> StatusChanges {
 
 /// Run `git status --porcelain=v1` in `repo_path` and return the output text.
 fn run_status_porcelain(repo_path: &std::path::Path) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("status")
-        .arg("--porcelain=v1")
-        .output()
-        .context("Failed to run git status")?;
+    let output = run_checked(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .arg("status")
+            .arg("--porcelain=v1"),
+        subprocess_timeout(),
+    )
+    .context("Failed to run git status")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -329,16 +337,16 @@ fn get_remote_status_native(repo: &Repo) -> RemoteStatus {
     );
 
     // Execute git status --porcelain --branch
-    let output = match Command::new("git")
-        .args([
+    let output = match run_checked(
+        Command::new("git").args([
             "-C",
             &repo.path.to_string_lossy(),
             "status",
             "--porcelain",
             "--branch",
-        ])
-        .output()
-    {
+        ]),
+        subprocess_timeout(),
+    ) {
         Ok(output) => output,
         Err(e) => {
             debug!("Git status command failed for {}: {}", repo.name, e);
@@ -398,9 +406,10 @@ fn get_remote_status_with_fetch(repo: &Repo, fetch_first: bool) -> RemoteStatus 
     if fetch_first {
         debug!("Fetching latest remote refs for {}", repo.name);
         // Perform lightweight fetch to update tracking refs
-        let fetch_result = Command::new("git")
-            .args(["-C", &repo.path.to_string_lossy(), "fetch", "--quiet"])
-            .output();
+        let fetch_result = run_checked(
+            Command::new("git").args(["-C", &repo.path.to_string_lossy(), "fetch", "--quiet"]),
+            subprocess_timeout(),
+        );
 
         match fetch_result {
             Ok(output) if output.status.success() => {
@@ -442,16 +451,17 @@ pub fn checkout_branch(
         if let Ok(status) = get_status_changes(repo) {
             if !status.is_empty() {
                 // Stash changes (excluding untracked files)
-                let stash_result = Command::new("git")
-                    .args([
+                let stash_result = run_checked(
+                    Command::new("git").args([
                         "-C",
                         &repo.path.to_string_lossy(),
                         "stash",
                         "push",
                         "-m",
                         &format!("gx auto-stash for {branch_name}"),
-                    ])
-                    .output();
+                    ]),
+                    subprocess_timeout(),
+                );
 
                 if let Ok(output) = stash_result {
                     if output.status.success() {
@@ -479,12 +489,13 @@ pub fn checkout_branch(
             cmd.arg(from);
         }
 
-        cmd.output()
+        run_checked(&mut cmd, subprocess_timeout())
     } else {
         // Checkout existing branch
-        Command::new("git")
-            .args(["-C", &repo.path.to_string_lossy(), "checkout", branch_name])
-            .output()
+        run_checked(
+            Command::new("git").args(["-C", &repo.path.to_string_lossy(), "checkout", branch_name]),
+            subprocess_timeout(),
+        )
     };
 
     // Handle checkout result
@@ -492,9 +503,15 @@ pub fn checkout_branch(
         Ok(output) if output.status.success() => {
             // Try to pull/sync with remote if not creating a new branch
             if !create_branch {
-                let _ = Command::new("git")
-                    .args(["-C", &repo.path.to_string_lossy(), "pull", "--ff-only"])
-                    .output();
+                let _ = run_checked(
+                    Command::new("git").args([
+                        "-C",
+                        &repo.path.to_string_lossy(),
+                        "pull",
+                        "--ff-only",
+                    ]),
+                    subprocess_timeout(),
+                );
             }
 
             // Check for untracked files after checkout
@@ -557,14 +574,15 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
     debug!("Getting default branch for repo: {}", repo.name);
 
     // Try to get the default branch from remote HEAD
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo.path.to_string_lossy(),
             "symbolic-ref",
             "refs/remotes/origin/HEAD",
-        ])
-        .output();
+        ]),
+        subprocess_timeout(),
+    );
 
     if let Ok(output) = output {
         if output.status.success() {
@@ -580,15 +598,16 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
 
     // Fallback: try common default branch names (check if they exist locally)
     for branch in &["main", "master"] {
-        let output = Command::new("git")
-            .args([
+        let output = run_checked(
+            Command::new("git").args([
                 "-C",
                 &repo.path.to_string_lossy(),
                 "rev-parse",
                 "--verify",
                 &format!("refs/heads/{branch}"),
-            ])
-            .output();
+            ]),
+            subprocess_timeout(),
+        );
 
         if let Ok(output) = output {
             if output.status.success() {
@@ -598,9 +617,10 @@ pub fn get_default_branch_local(repo: &Repo) -> Result<String> {
     }
 
     // Try to find the initial branch (the one created by git init)
-    let output = Command::new("git")
-        .args(["-C", &repo.path.to_string_lossy(), "branch", "--list"])
-        .output();
+    let output = run_checked(
+        Command::new("git").args(["-C", &repo.path.to_string_lossy(), "branch", "--list"]),
+        subprocess_timeout(),
+    );
 
     if let Ok(output) = output {
         if output.status.success() {
@@ -765,15 +785,17 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
         }
     };
 
-    let output = Command::new("git")
-        .env("GIT_SSH_COMMAND", ssh_command)
-        .args([
-            "clone",
-            "--quiet",
-            &clone_url,
-            &target_dir.to_string_lossy(),
-        ])
-        .output();
+    let output = run_checked(
+        Command::new("git")
+            .env("GIT_SSH_COMMAND", ssh_command)
+            .args([
+                "clone",
+                "--quiet",
+                &clone_url,
+                &target_dir.to_string_lossy(),
+            ]),
+        subprocess_timeout(),
+    );
 
     match output {
         Ok(result) if result.status.success() => {
@@ -843,16 +865,17 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
         if !status.is_empty() {
             debug!("Found uncommitted changes, stashing...");
             // Stash changes
-            let stash_result = Command::new("git")
-                .args([
+            let stash_result = run_checked(
+                Command::new("git").args([
                     "-C",
                     &repo_path.to_string_lossy(),
                     "stash",
                     "push",
                     "-m",
                     "gx auto-stash for clone update",
-                ])
-                .output();
+                ]),
+                subprocess_timeout(),
+            );
 
             if let Ok(output) = stash_result {
                 if output.status.success() {
@@ -864,9 +887,10 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
     }
 
     // Fetch latest changes from remote
-    let fetch_result = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "fetch", "origin"])
-        .output();
+    let fetch_result = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "fetch", "origin"]),
+        subprocess_timeout(),
+    );
 
     if let Err(e) = fetch_result {
         return CloneResult {
@@ -877,14 +901,15 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
     }
 
     // Checkout default branch
-    let checkout_result = Command::new("git")
-        .args([
+    let checkout_result = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "checkout",
             &default_branch,
-        ])
-        .output();
+        ]),
+        subprocess_timeout(),
+    );
 
     if let Err(e) = checkout_result {
         return CloneResult {
@@ -895,9 +920,10 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
     }
 
     // Pull latest (same as checkout: --ff-only)
-    let pull_result = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "pull", "--ff-only"])
-        .output();
+    let pull_result = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "pull", "--ff-only"]),
+        subprocess_timeout(),
+    );
 
     if let Err(e) = pull_result {
         return CloneResult {
@@ -923,16 +949,17 @@ fn update_existing_repo(repo_path: &std::path::Path, repo_slug: &str, token: &st
 
 /// Get remote origin URL for a repository
 fn get_remote_origin(repo_path: &std::path::Path) -> Result<String> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "remote",
             "get-url",
             "origin",
-        ])
-        .output()
-        .context("Failed to get remote origin")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to get remote origin")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -981,16 +1008,17 @@ pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
     }
 
     // Create new branch from current HEAD
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "checkout",
             "-b",
             branch_name,
-        ])
-        .output()
-        .context("Failed to execute git checkout -b")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git checkout -b")?;
 
     if output.status.success() {
         debug!(
@@ -1011,10 +1039,11 @@ pub fn create_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
 
 /// Switch to an existing branch
 pub fn switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "checkout", branch_name])
-        .output()
-        .context("Failed to execute git checkout")?;
+    let output = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "checkout", branch_name]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git checkout")?;
 
     if output.status.success() {
         debug!(
@@ -1035,16 +1064,17 @@ pub fn switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
 
 /// Delete a local branch
 pub fn delete_local_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "branch",
             "-D",
             branch_name,
-        ])
-        .output()
-        .context("Failed to execute git branch -D")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git branch -D")?;
 
     if output.status.success() {
         debug!(
@@ -1083,9 +1113,7 @@ pub fn add_files(repo_path: &std::path::Path, files: &[String]) -> Result<()> {
         args.push(spec.as_str());
     }
 
-    let output = Command::new("git")
-        .args(&args)
-        .output()
+    let output = run_checked(Command::new("git").args(&args), subprocess_timeout())
         .context("Failed to execute git add")?;
 
     if output.status.success() {
@@ -1104,10 +1132,11 @@ pub fn add_files(repo_path: &std::path::Path, files: &[String]) -> Result<()> {
 
 /// Commit staged changes with a message
 pub fn commit_changes(repo_path: &std::path::Path, message: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "commit", "-m", message])
-        .output()
-        .context("Failed to execute git commit")?;
+    let output = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "commit", "-m", message]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git commit")?;
 
     if output.status.success() {
         debug!(
@@ -1127,18 +1156,20 @@ pub fn push_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()>
     let ssh_command =
         SshCommandDetector::get_ssh_command().context("Failed to get SSH command for push")?;
 
-    let output = Command::new("git")
-        .env("GIT_SSH_COMMAND", ssh_command)
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "push",
-            "--set-upstream",
-            "origin",
-            branch_name,
-        ])
-        .output()
-        .context("Failed to execute git push")?;
+    let output = run_checked(
+        Command::new("git")
+            .env("GIT_SSH_COMMAND", ssh_command)
+            .args([
+                "-C",
+                &repo_path.to_string_lossy(),
+                "push",
+                "--set-upstream",
+                "origin",
+                branch_name,
+            ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git push")?;
 
     if output.status.success() {
         debug!(
@@ -1159,10 +1190,11 @@ pub fn push_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()>
 
 /// Check if repository has uncommitted changes
 pub fn has_uncommitted_changes(repo_path: &std::path::Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"])
-        .output()
-        .context("Failed to execute git status")?;
+    let output = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "status", "--porcelain"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git status")?;
 
     if output.status.success() {
         let status_output =
@@ -1176,15 +1208,16 @@ pub fn has_uncommitted_changes(repo_path: &std::path::Path) -> Result<bool> {
 
 /// Get the current branch name
 pub fn get_current_branch_name(repo_path: &std::path::Path) -> Result<String> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "branch",
             "--show-current",
-        ])
-        .output()
-        .context("Failed to execute git branch --show-current")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git branch --show-current")?;
 
     if output.status.success() {
         let branch = String::from_utf8(output.stdout)
@@ -1200,49 +1233,52 @@ pub fn get_current_branch_name(repo_path: &std::path::Path) -> Result<String> {
 
 /// Check if a branch exists locally
 pub fn branch_exists_locally(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "rev-parse",
             "--verify",
             &format!("refs/heads/{branch_name}"),
-        ])
-        .output()
-        .context("Failed to execute git rev-parse")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git rev-parse")?;
 
     Ok(output.status.success())
 }
 
 /// Check if a branch exists on remote
 pub fn branch_exists_on_remote(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "rev-parse",
             "--verify",
             &format!("refs/remotes/origin/{branch_name}"),
-        ])
-        .output()
-        .context("Failed to execute git rev-parse for remote branch")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git rev-parse for remote branch")?;
 
     Ok(output.status.success())
 }
 
 /// Checkout a branch that exists on remote (creates local tracking branch)
 pub fn checkout_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
+    let output = run_checked(
+        Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
             "checkout",
             "-b",
             branch_name,
             &format!("origin/{branch_name}"),
-        ])
-        .output()
-        .context("Failed to execute git checkout for remote branch")?;
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git checkout for remote branch")?;
 
     if output.status.success() {
         debug!(
@@ -1263,10 +1299,11 @@ pub fn checkout_remote_branch(repo_path: &std::path::Path, branch_name: &str) ->
 
 /// Pull latest changes from remote
 pub fn pull_latest(repo_path: &std::path::Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", &repo_path.to_string_lossy(), "pull"])
-        .output()
-        .context("Failed to execute git pull")?;
+    let output = run_checked(
+        Command::new("git").args(["-C", &repo_path.to_string_lossy(), "pull"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git pull")?;
 
     if output.status.success() {
         debug!("Pulled latest changes in '{}'", repo_path.display());
@@ -1292,10 +1329,11 @@ pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result
         ));
     }
 
-    let output = Command::new("git")
-        .args(["clone", clone_url, &target_dir.to_string_lossy()])
-        .output()
-        .context("Failed to execute git clone")?;
+    let output = run_checked(
+        Command::new("git").args(["clone", clone_url, &target_dir.to_string_lossy()]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git clone")?;
 
     if output.status.success() {
         debug!(
@@ -1312,11 +1350,13 @@ pub fn clone_repository(clone_url: &str, target_dir: &std::path::Path) -> Result
 /// Get the default/head branch name for the repository
 pub fn get_head_branch(repo_path: &std::path::Path) -> Result<String> {
     // First try to get the default branch from remote
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to get HEAD branch: {}", e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to get HEAD branch: {}", e))?;
 
     if output.status.success() {
         let head_ref = String::from_utf8_lossy(&output.stdout);
@@ -1339,11 +1379,16 @@ pub fn get_head_branch(repo_path: &std::path::Path) -> Result<String> {
 
 /// Check if a branch exists on remote
 pub fn branch_exists_remotely(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["ls-remote", "--heads", "origin", branch_name])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to check remote branch: {}", e))?;
+    let output = run_checked(
+        Command::new("git").current_dir(repo_path).args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            branch_name,
+        ]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to check remote branch: {}", e))?;
 
     Ok(output.status.success() && !output.stdout.is_empty())
 }
@@ -1361,11 +1406,17 @@ pub fn remote_branch_exists_probe(repo_path: &std::path::Path, branch_name: &str
         "remote_branch_exists_probe: repo_path={} branch={branch_name}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["ls-remote", "--exit-code", "--heads", "origin", branch_name])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to probe remote branch: {}", e))?;
+    let output = run_checked(
+        Command::new("git").current_dir(repo_path).args([
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            branch_name,
+        ]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to probe remote branch: {}", e))?;
 
     match output.status.code() {
         Some(0) => Ok(true),
@@ -1392,11 +1443,16 @@ pub fn delete_remote_branch(repo_path: &std::path::Path, branch_name: &str) -> R
         return Ok(());
     }
 
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["push", "origin", "--delete", branch_name])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to delete remote branch: {}", e))?;
+    let output = run_checked(
+        Command::new("git").current_dir(repo_path).args([
+            "push",
+            "origin",
+            "--delete",
+            branch_name,
+        ]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to delete remote branch: {}", e))?;
 
     if output.status.success() {
         debug!(
@@ -1424,11 +1480,13 @@ pub fn commit_parent_count(repo_path: &std::path::Path, oid: &str) -> Result<usi
         "commit_parent_count: repo_path={} oid={oid}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["rev-list", "--parents", "-n", "1", oid])
-        .output()
-        .context("Failed to execute git rev-list --parents")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-list", "--parents", "-n", "1", oid]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git rev-list --parents")?;
 
     if !output.status.success() {
         return Err(eyre::eyre!(
@@ -1454,12 +1512,14 @@ pub fn fetch_origin(repo_path: &std::path::Path) -> Result<()> {
     debug!("fetch_origin: repo_path={}", repo_path.display());
     let ssh_command =
         SshCommandDetector::get_ssh_command().context("Failed to get SSH command for fetch")?;
-    let output = Command::new("git")
-        .env("GIT_SSH_COMMAND", ssh_command)
-        .current_dir(repo_path)
-        .args(["fetch", "origin"])
-        .output()
-        .context("Failed to execute git fetch origin")?;
+    let output = run_checked(
+        Command::new("git")
+            .env("GIT_SSH_COMMAND", ssh_command)
+            .current_dir(repo_path)
+            .args(["fetch", "origin"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git fetch origin")?;
 
     if output.status.success() {
         debug!("Fetched origin in '{}'", repo_path.display());
@@ -1484,11 +1544,16 @@ pub fn create_branch_at(
         "create_branch_at: repo_path={} branch={branch_name} start_point={start_point}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["checkout", "-b", branch_name, start_point])
-        .output()
-        .context("Failed to execute git checkout -b")?;
+    let output = run_checked(
+        Command::new("git").current_dir(repo_path).args([
+            "checkout",
+            "-b",
+            branch_name,
+            start_point,
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git checkout -b")?;
 
     if output.status.success() {
         debug!(
@@ -1524,11 +1589,11 @@ pub fn revert_commit(repo_path: &std::path::Path, oid: &str, mainline: Option<u3
     args.push(oid.to_string());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(&arg_refs)
-        .output()
-        .context("Failed to execute git revert")?;
+    let output = run_checked(
+        Command::new("git").current_dir(repo_path).args(&arg_refs),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git revert")?;
 
     if output.status.success() {
         debug!("Reverted {oid} in '{}'", repo_path.display());
@@ -1550,11 +1615,13 @@ pub fn revert_commit(repo_path: &std::path::Path, oid: &str, mainline: Option<u3
 /// commit ([A14]). The dead `Already up to date` stderr sniff is gone - that
 /// message goes to stdout on a zero exit ([A28]).
 pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["pull", "--ff-only"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git pull --ff-only: {}", e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["pull", "--ff-only"]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to run git pull --ff-only: {}", e))?;
 
     if output.status.success() {
         debug!("Successfully pulled (ff-only) in '{}'", repo_path.display());
@@ -1571,11 +1638,13 @@ pub fn pull_latest_changes(repo_path: &std::path::Path) -> Result<()> {
 /// Get the full SHA of HEAD.
 pub fn get_head_sha(repo_path: &std::path::Path) -> Result<String> {
     debug!("get_head_sha: repo_path={}", repo_path.display());
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("Failed to execute git rev-parse HEAD")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", "HEAD"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git rev-parse HEAD")?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1595,11 +1664,13 @@ pub fn stash_save_with_untracked(repo_path: &std::path::Path, message: &str) -> 
         "stash_save_with_untracked: repo_path={} message={message}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "push", "-u", "-m", message])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git stash push -u: {}", e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["stash", "push", "-u", "-m", message]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to run git stash push -u: {}", e))?;
 
     if !output.status.success() {
         return Err(eyre::eyre!(
@@ -1609,11 +1680,13 @@ pub fn stash_save_with_untracked(repo_path: &std::path::Path, message: &str) -> 
     }
 
     // Resolve the SHA of the stash we just created.
-    let sha_output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["rev-parse", "stash@{0}"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to resolve stash SHA: {}", e))?;
+    let sha_output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", "stash@{0}"]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to resolve stash SHA: {}", e))?;
 
     if !sha_output.status.success() {
         return Err(eyre::eyre!(
@@ -1638,11 +1711,13 @@ pub fn stash_sha_by_message(repo_path: &std::path::Path, message: &str) -> Resul
         "stash_sha_by_message: repo_path={} message={message}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "list", "--format=%H %gs"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to list stashes: {}", e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["stash", "list", "--format=%H %gs"]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to list stashes: {}", e))?;
 
     if !output.status.success() {
         return Err(eyre::eyre!(
@@ -1671,11 +1746,13 @@ pub fn stash_apply_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result<(
         "stash_apply_sha: repo_path={} stash_sha={stash_sha}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "apply", stash_sha])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git stash apply: {}", e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["stash", "apply", stash_sha]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to run git stash apply: {}", e))?;
 
     if output.status.success() {
         Ok(())
@@ -1699,11 +1776,13 @@ pub fn stash_drop_by_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result
         "stash_drop_by_sha: repo_path={} stash_sha={stash_sha}",
         repo_path.display()
     );
-    let reflog = Command::new("git")
-        .current_dir(repo_path)
-        .args(["reflog", "show", "stash", "--format=%H"])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to read stash reflog: {}", e))?;
+    let reflog = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["reflog", "show", "stash", "--format=%H"]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to read stash reflog: {}", e))?;
 
     if !reflog.status.success() {
         return Err(eyre::eyre!(
@@ -1721,11 +1800,13 @@ pub fn stash_drop_by_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result
     let stash_ref = format!("stash@{{{index}}}");
 
     // Re-verify the SHA at that index before dropping.
-    let verify = Command::new("git")
-        .current_dir(repo_path)
-        .args(["rev-parse", &stash_ref])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to verify stash ref {}: {}", stash_ref, e))?;
+    let verify = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", &stash_ref]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to verify stash ref {}: {}", stash_ref, e))?;
     let verified_sha = String::from_utf8_lossy(&verify.stdout).trim().to_string();
     if verified_sha != stash_sha {
         return Err(eyre::eyre!(
@@ -1736,11 +1817,13 @@ pub fn stash_drop_by_sha(repo_path: &std::path::Path, stash_sha: &str) -> Result
         ));
     }
 
-    let drop = Command::new("git")
-        .current_dir(repo_path)
-        .args(["stash", "drop", &stash_ref])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to drop stash: {}", e))?;
+    let drop = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["stash", "drop", &stash_ref]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to drop stash: {}", e))?;
 
     if drop.status.success() {
         debug!("stash_drop_by_sha: dropped {stash_ref} ({stash_sha})");
@@ -1761,11 +1844,13 @@ pub fn reset_hard_to_sha(repo_path: &std::path::Path, sha: &str) -> Result<()> {
         "reset_hard_to_sha: repo_path={} sha={sha}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["reset", "--hard", sha])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git reset --hard {}: {}", sha, e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["reset", "--hard", sha]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to run git reset --hard {}: {}", sha, e))?;
 
     if output.status.success() {
         Ok(())
@@ -1785,11 +1870,13 @@ pub fn force_switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Re
         "force_switch_branch: repo_path={} branch={branch_name}",
         repo_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["checkout", "-f", branch_name])
-        .output()
-        .map_err(|e| eyre::eyre!("Failed to run git checkout -f {}: {}", branch_name, e))?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["checkout", "-f", branch_name]),
+        subprocess_timeout(),
+    )
+    .map_err(|e| eyre::eyre!("Failed to run git checkout -f {}: {}", branch_name, e))?;
 
     if output.status.success() {
         Ok(())
@@ -1827,11 +1914,13 @@ fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
 /// submodule gitlinks).
 pub fn list_index_files(repo_path: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>> {
     debug!("list_index_files: repo_path={}", repo_path.display());
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["ls-files", "--stage", "-z"])
-        .output()
-        .context("Failed to execute git ls-files --stage -z")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["ls-files", "--stage", "-z"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git ls-files --stage -z")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -1873,13 +1962,15 @@ pub fn worktree_add_detached(
         repo_path.display(),
         worktree_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["worktree", "add", "--detach"])
-        .arg(worktree_path)
-        .arg(base_sha)
-        .output()
-        .context("Failed to execute git worktree add")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree_path)
+            .arg(base_sha),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git worktree add")?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1901,12 +1992,14 @@ pub fn worktree_remove(repo_path: &std::path::Path, worktree_path: &std::path::P
         repo_path.display(),
         worktree_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["worktree", "remove", "--force"])
-        .arg(worktree_path)
-        .output()
-        .context("Failed to execute git worktree remove")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(repo_path)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_path),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git worktree remove")?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1925,11 +2018,13 @@ pub fn worktree_remove(repo_path: &std::path::Path, worktree_path: &std::path::P
 /// not apply here.
 pub fn stage_all(worktree_path: &std::path::Path) -> Result<()> {
     debug!("stage_all: worktree_path={}", worktree_path.display());
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["add", "-A"])
-        .output()
-        .context("Failed to execute git add -A")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(worktree_path)
+            .args(["add", "-A"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git add -A")?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1959,11 +2054,13 @@ pub fn resolve_worktree_repo(
     if !worktree_path.exists() {
         return Ok(None);
     }
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["rev-parse", "--git-common-dir"])
-        .output()
-        .context("Failed to execute git rev-parse --git-common-dir")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(worktree_path)
+            .args(["rev-parse", "--git-common-dir"]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git rev-parse --git-common-dir")?;
     if !output.status.success() {
         debug!(
             "resolve_worktree_repo: {} is not a valid git worktree",
@@ -1991,11 +2088,13 @@ pub fn diff_cached_patch(worktree_path: &std::path::Path, base_sha: &str) -> Res
         "diff_cached_patch: worktree_path={} base_sha={base_sha}",
         worktree_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["diff", "--cached", base_sha])
-        .output()
-        .context("Failed to execute git diff --cached")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(worktree_path)
+            .args(["diff", "--cached", base_sha]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git diff --cached")?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -2017,11 +2116,13 @@ pub fn diff_cached_raw_z(worktree_path: &std::path::Path, base_sha: &str) -> Res
         "diff_cached_raw_z: worktree_path={} base_sha={base_sha}",
         worktree_path.display()
     );
-    let output = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["diff", "--cached", "--raw", "-z", base_sha])
-        .output()
-        .context("Failed to execute git diff --cached --raw -z")?;
+    let output = run_checked(
+        Command::new("git")
+            .current_dir(worktree_path)
+            .args(["diff", "--cached", "--raw", "-z", base_sha]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git diff --cached --raw -z")?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -2227,27 +2328,35 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let repo_path = temp_dir.path().to_path_buf();
 
-            let output = Command::new("git")
-                .current_dir(&repo_path)
-                .args(["init"])
-                .output()
-                .expect("Failed to run git init");
+            let output = run_checked(
+                Command::new("git").current_dir(&repo_path).args(["init"]),
+                subprocess_timeout(),
+            )
+            .expect("Failed to run git init");
             assert!(
                 output.status.success(),
                 "git init failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
 
-            Command::new("git")
-                .current_dir(&repo_path)
-                .args(["config", "user.email", "test@example.com"])
-                .output()
-                .expect("Failed to set git email");
-            Command::new("git")
-                .current_dir(&repo_path)
-                .args(["config", "user.name", "Test User"])
-                .output()
-                .expect("Failed to set git name");
+            run_checked(
+                Command::new("git").current_dir(&repo_path).args([
+                    "config",
+                    "user.email",
+                    "test@example.com",
+                ]),
+                subprocess_timeout(),
+            )
+            .expect("Failed to set git email");
+            run_checked(
+                Command::new("git").current_dir(&repo_path).args([
+                    "config",
+                    "user.name",
+                    "Test User",
+                ]),
+                subprocess_timeout(),
+            )
+            .expect("Failed to set git name");
 
             (temp_dir, repo_path)
         }

@@ -2,6 +2,13 @@
 default-user-org: "scottidler"
 jobs: "nproc"
 
+# Wall-clock timeout (seconds) for EVERY git/gh subprocess. On expiry the child's
+# whole process group is SIGKILLed and that repo reports a timeout error while the
+# rest of the run continues to its summary. One value covers fast local git and
+# slow network fetches alike; stdin is nulled so credential/auth prompts fail fast
+# rather than wedging. Default: 300. Uncomment to override:
+# subprocess-timeout-secs: 300
+
 # Repository discovery settings
 repo-discovery:
   max-depth: 3  # Maximum directory depth to scan (default: 3)

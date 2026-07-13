@@ -24,6 +24,7 @@ pub mod rollback;
 pub mod ssh;
 pub mod state;
 pub mod status;
+pub mod subprocess;
 pub mod test_utils;
 pub mod transaction;
 pub mod undo;

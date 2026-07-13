@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// XDG config dir, honoring `$XDG_CONFIG_HOME` and falling back to `$HOME/.config`.
 fn xdg_config_dir() -> Option<PathBuf> {
@@ -53,6 +54,13 @@ pub struct Config {
     /// under `deny_unknown_fields` (Phase 1), a `mcp:` key in a shared `gx.yml`
     /// would otherwise fail to parse.
     pub mcp: Option<McpConfig>,
+    /// Wall-clock timeout, in seconds, for EVERY `git`/`gh` subprocess. On
+    /// expiry the child's whole process group is SIGKILLed and the owning repo
+    /// reports a timeout error (design doc `2026-07-12-gx-production-hardening.md`,
+    /// Phase 2). One field covers all git AND gh calls (Alternative 2 rejected
+    /// splitting network vs local); absent = `DEFAULT_SUBPROCESS_TIMEOUT_SECS`.
+    #[serde(rename = "subprocess-timeout-secs")]
+    pub subprocess_timeout_secs: Option<u64>,
 }
 
 /// The curated `gx-mcp` tool surface (design doc API Design > MCP tools). The
@@ -267,9 +275,16 @@ impl Default for Config {
             create: Some(CreateConfig::default()),
             github: Some(GithubConfig::default()),
             mcp: None,
+            subprocess_timeout_secs: None,
         }
     }
 }
+
+/// Default wall-clock timeout for every git/gh subprocess, in seconds. Generous
+/// on purpose: a single value covers both fast local git ops and slow network
+/// fetches, and `Stdio::null()` already makes credential/auth-prompt hangs fail
+/// fast, so this only bounds a genuinely wedged network op.
+pub const DEFAULT_SUBPROCESS_TIMEOUT_SECS: u64 = 300;
 
 impl Default for OutputConfig {
     fn default() -> Self {
@@ -346,6 +361,14 @@ impl Config {
             .and_then(|c| c.llm.as_ref())
             .and_then(|l| l.timeout_seconds)
             .unwrap_or(DEFAULT_LLM_TIMEOUT_SECONDS)
+    }
+
+    /// Effective wall-clock timeout for every git/gh subprocess.
+    pub fn subprocess_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.subprocess_timeout_secs
+                .unwrap_or(DEFAULT_SUBPROCESS_TIMEOUT_SECS),
+        )
     }
 
     /// Effective PR body template (`{commit_message}` is substituted).

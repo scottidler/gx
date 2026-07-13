@@ -5,6 +5,7 @@ use crate::git::{
 };
 use crate::repo::Layout;
 use crate::review::{ReviewAction, ReviewResult};
+use crate::subprocess::{run_checked, subprocess_timeout};
 use colored::*;
 use eyre::{Context, Result};
 use std::io::{self, Write};
@@ -1118,22 +1119,23 @@ pub fn display_checkout_result_immediate(result: &CheckoutResult) -> Result<()> 
 fn get_current_branch_name_fast(repo: &crate::repo::Repo) -> String {
     use std::process::Command;
 
-    Command::new("git")
-        .args([
+    run_checked(
+        Command::new("git").args([
             "-C",
             &repo.path.to_string_lossy(),
             "branch",
             "--show-current",
-        ])
-        .output()
-        .map(|output| {
-            if output.status.success() {
-                String::from_utf8_lossy(&output.stdout).trim().to_string()
-            } else {
-                "unknown".to_string()
-            }
-        })
-        .unwrap_or_else(|_| "unknown".to_string())
+        ]),
+        subprocess_timeout(),
+    )
+    .map(|output| {
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            "unknown".to_string()
+        }
+    })
+    .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// Calculate alignment widths quickly using fast git commands (no expensive operations)
