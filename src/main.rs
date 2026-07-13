@@ -76,6 +76,36 @@ fn setup_logging(level: cli::LogLevel) -> Result<()> {
     Ok(())
 }
 
+/// Install a panic hook that logs the panic (thread, location, message) at
+/// ERROR before the process unwinds. rayon already re-raises a worker panic
+/// out of `par_iter` (an uncaught panic still exits the process), so this
+/// hook does not change that outcome - it guarantees a diagnostic line lands
+/// in the log instead of the panic being a bare, undiagnosable abort. The
+/// prior hook (Rust's default `thread '<name>' panicked at ...` to stderr) is
+/// preserved by chaining through it, so nothing is lost, only added.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        default_hook(panic_info);
+
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown location>".to_string());
+        let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+
+        log::error!("panic on thread '{thread_name}' at {location}: {message}");
+    }));
+}
+
 fn run_application(cli: &Cli, config: &Config) -> Result<()> {
     info!("Starting gx with command: {:?}", cli.command);
 
@@ -125,6 +155,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             commit,
             pr,
             yes,
+            report,
             action,
         } => match action {
             None => create::show_matches(cli, config, files, patterns),
@@ -157,6 +188,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                     *yes,
                     change,
                     propose_only,
+                    report.as_deref(),
                 )
             }
         },
@@ -249,6 +281,11 @@ fn run() -> Result<()> {
 
     // Set up logging from the parsed --log-level.
     setup_logging(cli.log_level).context("Failed to setup logging")?;
+
+    // Install the panic hook now that logging is live, so a worker panic in
+    // any parallel command (rayon `par_iter`, e.g. `create`/`status`/
+    // `checkout`/`clone`) surfaces an ERROR log line rather than a bare abort.
+    install_panic_hook();
 
     // ONLY change directory if user explicitly provided --cwd
     if let Some(cwd) = &cli.cwd {

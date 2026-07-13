@@ -118,10 +118,14 @@ pub fn process_status_command(
         let result =
             git::get_repo_status_with_options(repo, effective_fetch_first, effective_no_remote);
 
-        // Store for final summary
-        if let Ok(mut results_vec) = results.lock() {
-            results_vec.push(result.clone());
-        }
+        // Store for final summary. Poison-recovery (not the primary fix - the
+        // panic hook in `main` is - but belt-and-suspenders: if a future
+        // `catch_unwind` ever contains a worker panic, partial results are
+        // recovered instead of silently blanked to empty).
+        results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(result.clone());
 
         // Display immediately with pre-calculated alignment
         if let Err(e) = output::display_status_result_immediate(&result, &status_opts, &widths) {
@@ -130,7 +134,7 @@ pub fn process_status_command(
     });
 
     // 6. Final summary
-    let results_vec = results.into_inner().unwrap_or_default();
+    let results_vec = results.into_inner().unwrap_or_else(|e| e.into_inner());
     let (clean_count, dirty_count, error_count) = categorize_status_results(&results_vec);
     output::display_unified_summary(clean_count, dirty_count, error_count, &status_opts);
 

@@ -84,10 +84,13 @@ pub fn process_checkout_command(
                     error: Some(format!("Failed to resolve branch name: {e}")),
                 };
 
-                // Store result and display immediately
-                if let Ok(mut results_vec) = results.lock() {
-                    results_vec.push(result.clone());
-                }
+                // Store result and display immediately. Poison-recovery
+                // belt-and-suspenders (the panic hook in `main` is the
+                // primary fix): recover partial results rather than blank.
+                results
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(result.clone());
                 if let Err(e) = output::display_checkout_result_immediate(&result) {
                     log::error!("Failed to display checkout result: {e}");
                 }
@@ -109,10 +112,13 @@ pub fn process_checkout_command(
                         error: Some(format!("Failed to resolve from branch '{from}': {e}")),
                     };
 
-                    // Store result and display immediately
-                    if let Ok(mut results_vec) = results.lock() {
-                        results_vec.push(result.clone());
-                    }
+                    // Store result and display immediately. Poison-recovery
+                    // belt-and-suspenders (the panic hook in `main` is the
+                    // primary fix).
+                    results
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(result.clone());
                     if let Err(e) = output::display_checkout_result_immediate(&result) {
                         log::error!("Failed to display checkout result: {e}");
                     }
@@ -131,17 +137,19 @@ pub fn process_checkout_command(
             stash,
         );
 
-        // Store result and display immediately
-        if let Ok(mut results_vec) = results.lock() {
-            results_vec.push(result.clone());
-        }
+        // Store result and display immediately. Poison-recovery
+        // belt-and-suspenders (the panic hook in `main` is the primary fix).
+        results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(result.clone());
         if let Err(e) = output::display_checkout_result_immediate(&result) {
             log::error!("Failed to display checkout result: {e}");
         }
     });
 
     // 4. Categorize results and show unified summary
-    let results_vec = results.into_inner().unwrap_or_default();
+    let results_vec = results.into_inner().unwrap_or_else(|e| e.into_inner());
     let (clean_count, dirty_count, error_count) = categorize_checkout_results(&results_vec);
 
     let status_opts = StatusOptions::default();

@@ -216,11 +216,23 @@ fn test_pushed_save_failure_retains_recovery_and_reports_committed() {
         .output()
         .expect("gx create failed to spawn");
 
-    // The run completes (the repo is a per-repo Committed-with-error), exit 0.
+    // The run completes and displays results (the repo is a per-repo
+    // Committed-with-error), but Phase 1 (2026-07-12-gx-production-hardening)
+    // makes `gx create` exit non-zero on any repo error - this repo's result
+    // carries one (the retained-recovery message), so the run must NOT look
+    // like a success. Before Phase 1 this asserted `out.status.success()`;
+    // that pinned the exact bug the phase closes (`create` ending `Ok(())`
+    // on a partial failure), so the assertion is inverted here rather than
+    // left green by accident.
     assert!(
-        out.status.success(),
-        "create should complete and display results: {}",
+        !out.status.success(),
+        "create must exit non-zero when a repo result carries an error (retained-recovery): {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "exit code should equal the error count (1 repo carries an error)"
     );
     let combined = format!(
         "{}{}",

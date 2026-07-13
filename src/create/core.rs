@@ -320,6 +320,31 @@ fn process_single_repo(
     let committing = commit_message.is_some();
     let mut diff_parts: Vec<String> = Vec::new();
 
+    // Test-only fault injection (inert unless GX_TEST_FORCE_REPO_ERROR names
+    // this repo), same "compiled in, inert by default" shape as
+    // `GX_TEST_FAIL_STATE_SAVE` (`state.rs`). Lets an e2e deterministically
+    // fail exactly one repo in a multi-repo run to exercise the Phase 1
+    // airtight-reporting path (non-zero exit + `--report` naming the failure)
+    // without needing to fabricate a real git failure.
+    if std::env::var("GX_TEST_FORCE_REPO_ERROR").as_deref() == Ok(repo.name.as_str()) {
+        return dry_run_error(
+            repo,
+            change_id,
+            "GX_TEST_FORCE_REPO_ERROR: simulated repo failure".to_string(),
+            &diff_parts,
+        );
+    }
+
+    // Test-only fault injection (inert unless GX_TEST_PANIC_WORKER names this
+    // repo): panics the rayon worker processing this repo, to exercise the
+    // Phase 1 panic hook (an ERROR diagnostic line rather than a bare abort).
+    if std::env::var("GX_TEST_PANIC_WORKER").as_deref() == Ok(repo.name.as_str()) {
+        panic!(
+            "GX_TEST_PANIC_WORKER: simulated worker panic for {}",
+            repo.name
+        );
+    }
+
     // Per-repo lock: a second concurrent gx invocation must not interleave
     // stash/branch operations on this repo (design Q5).
     let _lock = match crate::lock::RepoLock::acquire(repo_path) {

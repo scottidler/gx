@@ -329,6 +329,15 @@ EXAMPLES:
         )]
         yes: bool,
 
+        /// Write a machine-readable JSON failure summary to this file (stdout
+        /// stays human-readable; scriptable exit code + this file are the
+        /// machine-readable surface)
+        #[arg(
+            long = "report",
+            help = "Write a JSON failure summary to this file"
+        )]
+        report: Option<PathBuf>,
+
         #[command(subcommand)]
         action: Option<CreateAction>,
     },

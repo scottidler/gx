@@ -26,6 +26,7 @@ use crate::repo::{discover_repos, filter_repos, Repo};
 use colored::Colorize;
 use eyre::{Context, Result};
 use log::debug;
+use serde::Serialize;
 use std::path::Path;
 
 /// Show matched repositories and files without performing any actions (dry-run mode)
@@ -127,6 +128,7 @@ pub fn process_create_command(
     yes: bool,
     change: Change,
     propose_only: bool,
+    report: Option<&Path>,
 ) -> Result<()> {
     log::info!("Starting create command with change: {change:?}");
 
@@ -235,6 +237,85 @@ pub fn process_create_command(
     display_unified_results(&results, &opts);
     display_create_summary(&results, &opts);
 
+    // Machine-readable failure summary (Data Model `RunReport`): written to a
+    // FILE, never reshaping stdout ([2026-07-12 gx-production-hardening] Phase
+    // 1, Alternative 5). The on-screen summary above is unchanged.
+    if let Some(report_path) = report {
+        let run_report = build_run_report(&results);
+        write_run_report(report_path, &run_report)?;
+    }
+
+    // Exit non-zero when any repo result carries an error, mirroring
+    // `status`/`checkout`/`clone` (`status.rs:138`) so `gx create` is airtight
+    // and scriptable rather than always ending `Ok(())` on partial failure.
+    let error_count = count_errors(&results);
+    if error_count > 0 {
+        std::process::exit(error_count.min(255) as i32);
+    }
+
+    Ok(())
+}
+
+/// Count repo results carrying an error (mirrors the categorize helpers in
+/// `status`/`checkout`/`clone`).
+fn count_errors(results: &[CreateResult]) -> usize {
+    results.iter().filter(|r| r.error.is_some()).count()
+}
+
+/// One failing repo's outcome, the machine-readable counterpart to the
+/// unchanged human summary on stdout. `phase` is the pipeline stage the repo
+/// reached before failing (`CreateAction`), so a caller can tell "failed
+/// before any commit" from "committed, but the PR failed" without parsing the
+/// error string.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct RunReportEntry {
+    repo: String,
+    phase: String,
+    error: String,
+}
+
+/// A run's failure summary: only the repos that carry an error. Written to
+/// `--report <path>` as JSON; `Vec::is_empty()` -> `[]` when the whole run
+/// succeeded.
+type RunReport = Vec<RunReportEntry>;
+
+/// Build the failure-summary report from a run's results.
+fn build_run_report(results: &[CreateResult]) -> RunReport {
+    results
+        .iter()
+        .filter_map(|r| {
+            r.error.as_ref().map(|error| RunReportEntry {
+                repo: r.repo.slug.clone(),
+                phase: phase_label(&r.action).to_string(),
+                error: error.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The pipeline stage a `CreateResult` reached, as a stable machine-readable
+/// label (kebab-case, per repo convention) rather than the `Debug` form.
+fn phase_label(action: &CreateAction) -> &'static str {
+    match action {
+        CreateAction::DryRun => "dry-run",
+        CreateAction::Committed => "committed",
+        CreateAction::PrCreated => "pr-created",
+    }
+}
+
+/// Write the run report to `path` as JSON (atomic write: a crash mid-write
+/// can never leave a truncated report for a script to parse).
+fn write_run_report(path: &Path, report: &RunReport) -> Result<()> {
+    debug!(
+        "write_run_report: path={} failing_repos={}",
+        path.display(),
+        report.len()
+    );
+    let json =
+        serde_json::to_string_pretty(report).context("Failed to serialize run report to JSON")?;
+    file::atomic_write(path, json.as_bytes())
+        .with_context(|| format!("Failed to write run report to {}", path.display()))?;
     Ok(())
 }
 
