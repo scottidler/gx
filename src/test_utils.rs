@@ -366,20 +366,21 @@ pub fn create_test_repo_with_commits(
     repo_path
 }
 
-/// Check if GitHub integration tests should be run (requires scottidler token file)
+/// Check if GitHub integration tests should be run (requires `$GITHUB_PAT_HOME`
+/// to be set -- the persona-aware home token env var, replacing the retired
+/// per-org token-file scheme).
 pub fn should_run_github_tests() -> bool {
-    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        + "/.config/github/tokens/scottidler";
-    std::path::Path::new(&token_path).exists()
+    std::env::var("GITHUB_PAT_HOME")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
-/// Get the GitHub token for testing from token file
+/// Get the GitHub token for testing from `$GITHUB_PAT_HOME`.
 pub fn get_test_github_token() -> Option<String> {
-    let token_path = std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        + "/.config/github/tokens/scottidler";
-    std::fs::read_to_string(token_path)
+    std::env::var("GITHUB_PAT_HOME")
         .ok()
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Create a test environment configured for gx-testing organization
