@@ -43,3 +43,55 @@ Design doc: `docs/design/2026-07-12-persona-aware-github-auth.md`
 
 ### Open questions
 - **Pre-existing flaky test `lock::tests::test_lock_reacquirable_after_holder_drops` (`src/lock/tests.rs:77`), NOT caused by this phase.** It intermittently fails ONLY under `otto ci`'s concurrent `check`+`test` load (the reacquire of a dropped `File::try_lock`/flock returns `WouldBlock` under heavy CPU/FS contention); it passed 3/3 under plain `cargo test --workspace` including all persona tests, and the final `otto ci` gate for this commit was green. A pure, lib-only resolver reading only `$GH_PERSONA` + config (its unit tests touch no filesystem and no flock) cannot mechanically affect a flock reacquire. Out of scope for Phase 2 to fix (it lives in the lock module, unrelated to persona auth); flagged here for the parent — the lock test should be hardened against parallel-load flakiness (`taste.md`: flaky tests get hardened, not retried), likely as its own targeted fix.
+
+## Phase 3: Rewire read_token
+
+### Design decisions
+- Rewrote the BODY of `read_token(user_or_org: &str, config: &Config) -> Result<String>` (`src/github.rs`) to resolve a persona env-var NAME then read that var's VALUE; the signature is UNCHANGED, so all four call sites (`github.rs` get_user_repos, `github.rs` gh_command, `create/core.rs:1340` resolve_base_branch, `clone.rs:65`) compile untouched. Exact new body:
+  ```rust
+  pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
+      debug!("read_token: user_or_org={user_or_org}");
+
+      let var_name = crate::persona::resolve_token_env(user_or_org, config)?;
+
+      let token = std::env::var(&var_name)
+          .ok()
+          .map(|value| value.trim().to_string())
+          .filter(|value| !value.is_empty())
+          .ok_or_else(|| {
+              eyre::eyre!(
+                  "GitHub token env var {var_name} is unset or empty (selected for org {user_or_org}); \
+                   decrypt it with `manifest age` or set the correct persona"
+              )
+          })?;
+
+      debug!(
+          "read_token: user_or_org={user_or_org} resolved {var_name} (len={})",
+          token.len()
+      );
+      Ok(token)
+  }
+  ```
+- Fail-loud on unset OR trimmed-empty (`.filter(|v| !v.is_empty())` after trim), naming BOTH the missing var and the org that selected it — never a silent empty string, never a silent ambient fallback (design doc "Fail-loud vs the current swallow"). The trim also normalizes any trailing newline in the decrypted value.
+- Function-level debug logging (`logging.md`): entry logs `user_or_org`; success logs the chosen var NAME and the token LENGTH (`len={}`), NEVER the token value (`secrets.md` / `logging.md` sensitive-payload clause). The resolver already logs the NAME->org mapping.
+- Wired `persona` into the BIN crate: added `mod persona;` to `src/main.rs` (kept `pub mod persona;` in `src/lib.rs`). `read_token` lives in `github.rs`, compiled into both lib and bin targets, and now calls `crate::persona::resolve_token_env`, so the resolver is reachable from `main()` — this clears the Phase-2 lib-only dead-code state (rust-analyzer "not in module tree") without any fake caller or suppressed lint.
+- Retired the file scheme:
+  - Removed `build_token_path` (`src/user_org.rs`) and its two tests (`test_build_token_path`, `test_build_token_path_no_tilde`); dropped the now-unused `use std::path::PathBuf;` at the top of `user_org.rs` and inside its test module.
+  - Removed the `token_path` FIELD (`#[serde(rename = "token-path")]`) from `Config` (`src/config.rs`) and its `impl Default` line. Under `deny_unknown_fields` a stale `token-path:` key now fails to parse loudly — the accepted migration signal (no back-compat shim).
+  - Removed the now-unused `use std::fs;` from `src/github.rs` (`fs::read_to_string` was its only use).
+  - Updated the `[A23]` comment in `config.rs` (CWD-config-fallback rationale) from "redirect token-path" to "override a token-env mapping" so it doesn't cite a now-deleted field.
+- Added the unit test `github::tests::test_read_token_home_persona_set_and_unset` (in `github.rs`'s existing inline `mod tests`): with `$GH_PERSONA` removed, `$GITHUB_PAT_HOME` set (with surrounding whitespace) -> `read_token("scottidler", &Config::default())` returns the trimmed value; with `$GITHUB_PAT_HOME` unset -> `Err` whose message contains both `GITHUB_PAT_HOME` and `scottidler`. Saves/restores both `$GH_PERSONA` and `$GITHUB_PAT_HOME` under `crate::test_utils::env_lock()`.
+
+### Deviations
+- **API sketch showed `read_token` calling into a github.rs-local resolver; actual call is `crate::persona::resolve_token_env`.** Phase 2 placed the resolver in `src/persona.rs` (a doc-sanctioned seam) rather than github.rs, so Phase 3 wires to that module. Same effect, correct seam.
+- **`test_utils.rs` (`should_run_github_tests` / `get_test_github_token`, the last `~/.config/github/tokens/scottidler` references in `src/`) left in place.** The design doc's Phase 4 bullet explicitly owns migrating `test_utils.rs:369-383` to `$GITHUB_PAT_HOME`; touching it here would reach into a later phase. These are test-support helpers (the `token_path` there is a local variable, not the retired `Config` field). Not a spec deviation — it is the doc's phasing.
+- **`gh_command` (`src/github.rs`) left unchanged, including its now-slightly-stale "token file" doc comment.** Making `gh_command` fallible and updating its comment is explicitly Phase 4. It still calls `read_token` and retains the ambient-auth swallow this phase intentionally does NOT remove.
+- **New test added to the existing inline `#[cfg(test)] mod tests` in `github.rs`, not a `src/github/tests.rs` file.** `rust.md` prefers the 2018 submodule test layout, but `github.rs` already has an inline `mod tests`, and the design doc's Phase 4 explicitly owns moving it to `src/github/tests.rs`. Adding to the existing block keeps Phase 3 scoped and lets Phase 4 do the move in one mechanical pass.
+
+### Tradeoffs
+- Trim-then-filter-empty via `std::env::var(...).ok().map(...).filter(...).ok_or_else(...)` (chosen) vs. an explicit `match`: the combinator chain collapses "unset" and "trimmed-empty" into one loud `Err` arm with a single message, matching the doc's "unset OR trimmed-empty -> loud Err" spec without duplicating the error text.
+- Logging token LENGTH (chosen) vs. logging nothing about the value: length is a non-sensitive diagnostic that confirms a non-empty token was read (useful when debugging a wrong-persona 404) while never exposing the secret, per `logging.md`'s "previews or length summaries, never inlined full".
+
+### Open questions
+- **The pre-existing flock/change-lock test flakiness is broader than the one test the parent named.** Under `otto ci`'s parallel `cargo test` load I observed intermittent failures across the whole flock family — `lock::tests::test_lock_reacquirable_after_holder_drops`, `lock::tests::test_drop_never_unlinks_and_reopens_same_inode`, `create::core::apply::tests::test_apply_fails_fast_while_change_lock_is_held`, `state::tests::test_cleanup_old_skips_locked_change`, `review::tests::test_sync_change_state_fails_fast_under_concurrent_change_lock` — a rotating subset each run. ALL pass 100% under `cargo test --workspace -- --test-threads=1`, and the final `otto ci` gate for this commit was fully GREEN (295+295 lib/bin, 0 failed, "All CI checks passed!"). This phase touches only token-env resolution (zero flock code), so it cannot mechanically affect a flock acquire. Flagged for the parent: the flock test family should be hardened against parallel-thread contention as its own targeted fix (`taste.md`: flaky tests get hardened, not retried), likely by serializing them behind a shared lock or a temp-dir-per-test isolation, not by retrying.
+- Also note: the sandbox makes `~/.otto` read-only (`Read-only file system (os error 30)`), so `otto ci` must be run with the sandbox disabled to execute at all — otto owns `~/.otto` and nothing under it was touched.

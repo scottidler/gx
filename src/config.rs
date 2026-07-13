@@ -38,8 +38,6 @@ pub struct Config {
     #[serde(rename = "default-user-org")]
     pub default_user_org: Option<String>,
     pub jobs: Option<String>, // Can be "nproc" or a number
-    #[serde(rename = "token-path")]
-    pub token_path: Option<String>,
     pub output: Option<OutputConfig>,
     #[serde(rename = "repo-discovery")]
     pub repo_discovery: Option<RepoDiscoveryConfig>,
@@ -262,7 +260,6 @@ impl Default for Config {
         Self {
             default_user_org: None,
             jobs: None,
-            token_path: Some("~/.config/github/tokens/{user_or_org}".to_string()),
             output: None,
             repo_discovery: Some(RepoDiscoveryConfig::default()),
             logging: None,
@@ -381,7 +378,8 @@ impl Config {
 
         // Primary (and only) location: $XDG_CONFIG_HOME/<project>/<project>.yml.
         // There is deliberately NO `./<project>.yml` CWD fallback - any directory
-        // could otherwise reconfigure the tool (e.g. redirect token-path) ([A23]).
+        // could otherwise reconfigure the tool (e.g. override a token-env
+        // mapping) ([A23]).
         if let Some(config_dir) = xdg_config_dir() {
             let project_name = env!("CARGO_PKG_NAME");
             let primary_config = config_dir

@@ -2,7 +2,6 @@ use crate::config::Config;
 use eyre::{Context, Result};
 use log::{debug, info, warn};
 use serde::Deserialize;
-use std::fs;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -117,27 +116,34 @@ pub fn get_default_branch(repo_slug: &str, token: &str) -> Result<String> {
     Ok(branch)
 }
 
-/// Read GitHub token for a user/org using configurable path
+/// Read the GitHub token for `user_or_org` from its persona env var.
+///
+/// Resolves the env-var NAME per org (see [`crate::persona::resolve_token_env`])
+/// then reads that var's value. Signature is unchanged from the retired
+/// file-scheme version, so every call site is untouched. A missing or
+/// trimmed-empty var is a LOUD error naming both the var and the org that
+/// selected it -- never a silent empty string, never a silent ambient
+/// fallback (design doc `2026-07-12-persona-aware-github-auth.md`, Phase 3).
 pub fn read_token(user_or_org: &str, config: &Config) -> Result<String> {
-    let token_template = config
-        .token_path
-        .as_deref()
-        .unwrap_or("~/.config/github/tokens/{user_or_org}");
+    debug!("read_token: user_or_org={user_or_org}");
 
-    let token_path = super::user_org::build_token_path(token_template, user_or_org);
+    let var_name = crate::persona::resolve_token_env(user_or_org, config)?;
 
-    let token = fs::read_to_string(&token_path)
-        .context(format!(
-            "Failed to read token from {}",
-            token_path.display()
-        ))?
-        .trim()
-        .to_string();
+    let token = std::env::var(&var_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "GitHub token env var {var_name} is unset or empty (selected for org {user_or_org}); \
+                 decrypt it with `manifest age` or set the correct persona"
+            )
+        })?;
 
-    if token.is_empty() {
-        return Err(eyre::eyre!("Token file is empty: {}", token_path.display()));
-    }
-
+    debug!(
+        "read_token: user_or_org={user_or_org} resolved {var_name} (len={})",
+        token.len()
+    );
     Ok(token)
 }
 
@@ -770,6 +776,51 @@ pub fn list_open_pr_branches(repo_slug: &str, config: &Config) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::env_lock;
+
+    /// `read_token` resolves the persona env var NAME then reads that var's
+    /// VALUE, and fails loudly (naming both var and org) when it is unset.
+    /// Exercises the org-`scottidler` -> `$GITHUB_PAT_HOME` built-in floor, so
+    /// `$GH_PERSONA` must be unset for the classification to apply; both env
+    /// vars are saved and restored under the process-wide env lock.
+    #[test]
+    fn test_read_token_home_persona_set_and_unset() {
+        let _guard = env_lock();
+        let prior_persona = std::env::var("GH_PERSONA").ok();
+        let prior_home = std::env::var("GITHUB_PAT_HOME").ok();
+
+        // No GH_PERSONA override: scottidler classifies to the HOME floor.
+        unsafe { std::env::remove_var("GH_PERSONA") };
+
+        let config = Config::default();
+
+        // Set -> read_token returns the trimmed value verbatim.
+        unsafe { std::env::set_var("GITHUB_PAT_HOME", "  home-token-value  ") };
+        let token = read_token("scottidler", &config).unwrap();
+        assert_eq!(token, "home-token-value");
+
+        // Unset -> loud Err naming BOTH the var and the org that selected it.
+        unsafe { std::env::remove_var("GITHUB_PAT_HOME") };
+        let err = read_token("scottidler", &config).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("GITHUB_PAT_HOME"),
+            "error must name the missing var: {msg}"
+        );
+        assert!(
+            msg.contains("scottidler"),
+            "error must name the org that selected it: {msg}"
+        );
+
+        match prior_home {
+            Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+            None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+        }
+        match prior_persona {
+            Some(v) => unsafe { std::env::set_var("GH_PERSONA", v) },
+            None => unsafe { std::env::remove_var("GH_PERSONA") },
+        }
+    }
 
     #[test]
     fn test_query_parsing() {

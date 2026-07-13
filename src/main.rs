@@ -21,6 +21,7 @@ mod github;
 mod hash;
 mod lock;
 mod output;
+mod persona;
 mod repo;
 mod review;
 mod rollback;

@@ -2,7 +2,6 @@ use crate::config::Config;
 use crate::repo::Repo;
 use eyre::Result;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 /// User/Org detection result
 #[derive(Debug, Clone)]
@@ -75,43 +74,9 @@ fn auto_detect_from_repos(repos: &[Repo]) -> Result<Vec<String>> {
     }
 }
 
-/// Build token path from template and user/org
-pub fn build_token_path(template: &str, user_or_org: &str) -> PathBuf {
-    let expanded = template.replace("{user_or_org}", user_or_org);
-
-    // Handle tilde expansion
-    if let Some(stripped) = expanded.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
-    }
-
-    PathBuf::from(expanded)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_build_token_path() {
-        let template = "~/.config/github/tokens/{user_or_org}";
-        let result = build_token_path(template, "tatari-tv");
-
-        if let Some(home) = dirs::home_dir() {
-            let expected = home.join(".config/github/tokens/tatari-tv");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_build_token_path_no_tilde() {
-        let template = "/etc/tokens/{user_or_org}";
-        let result = build_token_path(template, "scottidler");
-        let expected = PathBuf::from("/etc/tokens/scottidler");
-        assert_eq!(result, expected);
-    }
 
     #[test]
     fn test_auto_detect_from_repos() {
