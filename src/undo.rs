@@ -34,6 +34,9 @@ fn state_label(plan: &UndoPlan) -> &'static str {
         Some(RepoChangeStatus::Failed) => "failed",
         // A bare (unapplied) proposal: undo is local-only (delete artifacts).
         Some(RepoChangeStatus::Proposed) => "proposed",
+        // `review approve` skipped this (still-open) PR as not-mergeable; undo
+        // treats it like any other open PR.
+        Some(RepoChangeStatus::Skipped { .. }) => "PR open (skipped by approve)",
     }
 }
 

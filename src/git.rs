@@ -2,7 +2,7 @@ use crate::repo::Repo;
 use crate::ssh::{SshCommandDetector, SshUrlBuilder};
 use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
-use log::debug;
+use log::{debug, warn};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -1059,6 +1059,75 @@ pub fn switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
             branch_name,
             error
         ))
+    }
+}
+
+/// Prove a local branch's commits are all contained in the repo's
+/// freshly-fetched default base ref, the real guard `gx cleanup` runs before
+/// `git branch -D` (production-hardening doc, Phase 4).
+///
+/// Resolves the repo's default base branch NAME via [`get_head_branch`]
+/// (origin/HEAD, then main/master) - it does NOT assume `main`, falling back to
+/// `main` (with a warning) only when nothing resolves. Then FETCHES `origin`
+/// first (an ancestry test against a stale local base ref is worse than
+/// useless) and runs `git merge-base --is-ancestor <branch> origin/<base>`.
+///
+/// - exit 0 (branch is an ancestor of the base) -> `Ok(true)` (safe to delete)
+/// - exit 1 (branch has commits NOT in the base) -> `Ok(false)` (preserve)
+/// - any other exit / fetch failure -> `Err` (cannot verify; caller fails
+///   closed and preserves the branch)
+pub fn branch_merged_into_base(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
+    debug!(
+        "branch_merged_into_base: repo_path={} branch={branch_name}",
+        repo_path.display()
+    );
+    let base = match get_head_branch(repo_path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                "Could not resolve default base branch for {}; falling back to main: {e}",
+                repo_path.display()
+            );
+            "main".to_string()
+        }
+    };
+
+    // Fetch first: the ancestry test MUST run against the up-to-date remote base
+    // ref, not a stale local one.
+    fetch_origin(repo_path).with_context(|| {
+        format!(
+            "Failed to fetch origin before ancestry check in {}",
+            repo_path.display()
+        )
+    })?;
+
+    let base_ref = format!("origin/{base}");
+    let output = run_checked(
+        Command::new("git").args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "merge-base",
+            "--is-ancestor",
+            branch_name,
+            &base_ref,
+        ]),
+        subprocess_timeout(),
+    )
+    .context("Failed to execute git merge-base --is-ancestor")?;
+
+    match output.status.code() {
+        Some(0) => {
+            debug!("branch_merged_into_base: {branch_name} is an ancestor of {base_ref}");
+            Ok(true)
+        }
+        Some(1) => {
+            debug!("branch_merged_into_base: {branch_name} is NOT an ancestor of {base_ref}");
+            Ok(false)
+        }
+        other => Err(eyre::eyre!(
+            "git merge-base --is-ancestor {branch_name} {base_ref} failed (exit {other:?}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
     }
 }
 

@@ -16,11 +16,13 @@ use std::path::PathBuf;
 /// Bumped 1 -> 2 for Phase 4 (design doc
 /// `2026-07-12-llm-propose-apply-and-mcp-server.md`): the new
 /// `RepoChangeStatus::Proposed` variant. Bumped 2 -> 3 for Phase 7 (ringer
-/// addendum #3): the new `ChangeStatus::Proposed` aggregate variant. Combined
-/// with `deny_unknown_fields`, an OLDER gx reading a state file that carries
-/// `"status": "Proposed"` (repo- or change-level) fails loudly on the unknown
-/// enum variant (fail closed, correct) rather than silently mis-loading it.
-const CHANGE_STATE_VERSION: u32 = 3;
+/// addendum #3): the new `ChangeStatus::Proposed` aggregate variant. Bumped
+/// 3 -> 4 for the production-hardening doc Phase 4: the new
+/// `RepoChangeStatus::Skipped { reason }` variant (`review approve` skips a
+/// non-mergeable PR). Combined with `deny_unknown_fields`, an OLDER gx reading
+/// a state file that carries a newer variant fails loudly on the unknown enum
+/// variant (fail closed, correct) rather than silently mis-loading it.
+const CHANGE_STATE_VERSION: u32 = 4;
 
 /// Default `version` for a change state file that predates the field (serde
 /// fills this in for version-less files written by an older gx), matching
@@ -147,6 +149,13 @@ pub enum RepoChangeStatus {
     Failed,
     /// Local branch cleaned up
     CleanedUp,
+    /// `review approve` SKIPPED this PR because it was not proven-mergeable
+    /// (production-hardening doc, Phase 4). The PR is still open on GitHub --
+    /// this is neither merged nor an error, so it must be recorded distinctly
+    /// or the `error == None` state update would mis-record it as merged. The
+    /// `reason` (e.g. mergeability not yet computed, or a merge conflict) is
+    /// carried so the operator knows whether re-running resolves it.
+    Skipped { reason: String },
 }
 
 impl ChangeState {
@@ -234,6 +243,18 @@ impl ChangeState {
     pub fn mark_closed(&mut self, repo_slug: &str) {
         if let Some(repo) = self.repositories.get_mut(repo_slug) {
             repo.status = RepoChangeStatus::PrClosed;
+            self.updated_at = Utc::now();
+            self.update_overall_status();
+        }
+    }
+
+    /// Mark a repository's PR as SKIPPED by `review approve` because it was not
+    /// proven-mergeable (production-hardening doc, Phase 4). The PR stays open
+    /// on GitHub; this records that gx deliberately did NOT merge it (and why),
+    /// so the `error == None` outcome loop can't mis-record it as merged.
+    pub fn mark_skipped(&mut self, repo_slug: &str, reason: String) {
+        if let Some(repo) = self.repositories.get_mut(repo_slug) {
+            repo.status = RepoChangeStatus::Skipped { reason };
             self.updated_at = Utc::now();
             self.update_overall_status();
         }
@@ -742,6 +763,53 @@ mod tests {
             state.status,
             ChangeStatus::PartiallyMerged,
             "a mix of Proposed + merged must not misreport Proposed"
+        );
+    }
+
+    #[test]
+    fn test_mark_skipped_records_distinct_status_not_merged() {
+        // Production-hardening Phase 4: a PR skipped by `review approve` for
+        // non-mergeability must be recorded as `Skipped { reason }` - NOT
+        // merged. Bite: before the variant, the `error == None` outcome loop
+        // would `mark_merged` a skipped PR; here it stays open-and-skipped.
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-test".to_string());
+        state.set_pr_info(
+            "org/repo",
+            7,
+            "https://github.com/org/repo/pull/7".to_string(),
+            false,
+        );
+        state.mark_skipped("org/repo", "mergeability not yet computed".to_string());
+
+        let repo = state.repositories.get("org/repo").unwrap();
+        assert_eq!(
+            repo.status,
+            RepoChangeStatus::Skipped {
+                reason: "mergeability not yet computed".to_string()
+            }
+        );
+        assert_ne!(
+            repo.status,
+            RepoChangeStatus::PrMerged,
+            "a skipped PR must never be recorded as merged"
+        );
+    }
+
+    #[test]
+    fn test_skipped_status_roundtrips_through_serde() {
+        // The struct variant serializes/deserializes intact (schema v4).
+        let mut state = ChangeState::new("test".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-test".to_string());
+        state.mark_skipped("org/repo", "merge conflict with base branch".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ChangeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.repositories.get("org/repo").unwrap().status,
+            RepoChangeStatus::Skipped {
+                reason: "merge conflict with base branch".to_string()
+            }
         );
     }
 

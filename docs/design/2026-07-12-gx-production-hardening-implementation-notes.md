@@ -333,3 +333,114 @@ execution of `docs/design/2026-07-12-gx-production-hardening.md`. Append-only.
 - None. All three ops fail closed naming `--yes` on non-interactive stdin (bite
   tests green), `--yes` proceeds, and the preflight aborts the whole batch on a
   single org's discovery error with zero mutations proven via spy shims.
+
+## Phase 4: Correctness guards
+
+### Design decisions
+- **`Mergeability` enum (`MERGEABLE`/`CONFLICTING`/`UNKNOWN`) + `mergeable`
+  field on `PrInfo`** — `github.rs` — modeled as an enum, not a string
+  (`rust.md`); parsed from a new `mergeable` node in `PR_SEARCH_QUERY` via
+  `Mergeability::parse`. The raw GraphQL struct field is `#[serde(default)]
+  Option<String>` so a hand-written test shim (or an older cached response)
+  that omits it deserializes to `None` -> `Mergeability::Unknown` (fail
+  closed), never a parse error. Only `mergeable` was wired (the required gate
+  field per Phase 0); `statusCheckRollup`/`reviewDecision` were NOT added (see
+  Deviations).
+- **`is_mergeable(pr) -> bool`** — `github.rs` — `matches!(pr.mergeable,
+  Mergeability::Mergeable)`; `Conflicting` and `Unknown` both return false. The
+  single seam `review approve` consults before merging.
+- **A failed `--approve` now ABORTS that PR's merge** — `github::
+  approve_and_merge_pr` — previously the failure was only `warn!`'d and the
+  merge proceeded (Problem Statement's "a failed `--approve` still merges"
+  gap). Now it returns `Err` and the merge never runs. (See Open questions for
+  the `--admin`/self-approval interaction this surfaces.)
+- **`RepoChangeStatus::Skipped { reason }` + `mark_skipped`; schema v3 -> v4**
+  — `state.rs` — a PR skipped for non-mergeability is neither merged nor an
+  error, so the `error == None => mark_merged` outcome loop would mis-record it
+  as merged. `review approve` records skips via `mark_skipped` (reason carried
+  so the operator knows whether a re-run resolves it). Bumped
+  `CHANGE_STATE_VERSION` to 4 so an older gx reading the new variant fails
+  closed on the unknown enum (same protection the Proposed variants added).
+  Handled the new variant in the two exhaustive `RepoChangeStatus` matches
+  (`undo.rs::state_label`, `undo/core.rs::classify_action`) - a Skipped PR is
+  still OPEN on GitHub, so undo treats it exactly like `PrOpen`.
+- **`review approve` partitions open PRs into mergeable vs. skipped** —
+  `review.rs::process_review_approve_command` — only the proven-mergeable
+  subset is merged in parallel; skips are recorded via a single
+  `record_approve_outcomes` helper (load-once/apply/save-once under the change
+  lock, [A10]) covering merged + failed + skipped. An all-skipped batch records
+  the skips and returns WITHOUT prompting or mutating anything. `print_skip_hints`
+  prints the re-run hint ("N PR(s) skipped (mergeability not yet computed) -
+  re-run `gx review approve`") plus a distinct conflict hint.
+- **`review delete`'s consent prompt was already truthful** — `confirm.rs::
+  DestructiveOp::action_phrase` (Phase 3) — `ReviewDelete` already renders
+  "CLOSE {count} open (UNMERGED) PR(s) and DELETE their branches", which is
+  exactly the Phase 4 requirement, so no change was needed. Its command still
+  filters to `PrState::Open` and closes+deletes them (behavior kept, not
+  flipped to merged-only).
+- **`cleanup` fetched-ancestry guard** — `git.rs::branch_merged_into_base` +
+  `cleanup.rs::cleanup_change` — before `git branch -D`, resolve the repo's
+  default base branch NAME via `get_head_branch` (origin/HEAD, then main/master;
+  never assumes `main`), FETCH `origin` first, then
+  `git merge-base --is-ancestor <branch> origin/<base>`. Exit 0 -> ancestor
+  (delete), exit 1 -> not-ancestor (skip + warn, preserve), other/fetch-error
+  -> `Err` (fail closed, preserve). `--force` bypasses the guard entirely.
+  `PrMerged` stays a fast-path signal (the pre-existing merged-status gate) but
+  the fetched-ancestry check is the real guard, run even for `PrMerged` repos.
+
+### Deviations
+- **Enum named `Mergeability`, not `Mergeable`** — the brief pinned `enum
+  Mergeable { Mergeable, ... }`, but that trips `clippy::enum_variant_names`
+  ("variant name ends with the enum's name") under `-D warnings`. Renamed the
+  enum to `Mergeability`; the variant stays `Mergeable`. Same effect, the name
+  clippy allows.
+- **`cleanup` base-branch resolution reuses `resolve_base_branch`'s LOCAL logic
+  directly, not the private `create/core::resolve_base_branch`** — that helper
+  takes `&Repo` + `&Config` and includes a GitHub-API middle step needing a
+  token. `cleanup_change` has neither, and always operates on a repo that has an
+  `origin` remote, so `git::branch_merged_into_base` calls `get_head_branch`
+  (the same origin/HEAD -> main/master resolution `resolve_base_branch` tries
+  first) and falls back to `main` with a warning (its same ultimate fallback),
+  skipping only the token-requiring API step. Same intent ("resolve the name,
+  don't assume main"), correct seam for cleanup.
+- **`statusCheckRollup` / `reviewDecision` NOT surfaced** — the brief says these
+  MAY be added "if clean"; `mergeable` is the required gate and Phase 0 pinned
+  the guard on it, so I kept scope to the one field. Adding CI-rollup gating is
+  a follow-up if wanted (the query path already proves them reachable).
+- **Confirm-gate blast radius changed from `open_prs.len()` (Phase 3) to
+  `mergeable_prs.len()`** — `review.rs` — the gate now counts the PRs that will
+  ACTUALLY be merged (the mergeable subset), which is the truthful blast radius
+  now that non-mergeable PRs are skipped rather than attempted. The Phase 3
+  fail-closed bite test still passes (its shim PR is `MERGEABLE`).
+- **Updated the Phase 3 `GH_APPROVE_SPY_SHIM` to carry `"mergeable":
+  "MERGEABLE"`** — without it the shim's open PR would deserialize to `Unknown`
+  and be skipped BEFORE the confirm gate, defeating the Phase 3 fail-closed test.
+  Adding the field keeps that test exercising the gate (the shim predates the
+  field).
+
+### Tradeoffs
+- **Skip hints printed as plain lines, not a new `ReviewAction::Skipped`
+  variant** — adding a `ReviewAction` variant would force handling in
+  `output.rs`'s exhaustive display matches (unrelated blast radius). The skipped
+  PRs are tracked in a local `Vec<(&PrInfo, SkipReason)>`, recorded in state,
+  and summarized via `print_skip_hints`; the displayed `ReviewResult` list stays
+  merged/failed only.
+- **Ancestry verification error -> `failed` (surfaced), not-ancestor ->
+  `skipped`** — both preserve the branch (fail closed), but a fetch/verify error
+  is an operational problem worth surfacing in the errors list, whereas a clean
+  "not an ancestor" is an expected skip.
+- **`Skipped` carries a `String` reason, not a typed enum, in state** — the
+  richer `SkipReason` enum lives in `review.rs` for the summary hint; state only
+  needs the human phrase, so it stores the flattened string (mirrors how
+  `Failed` stores an error string).
+
+### Open questions
+- **A failed `--approve` now aborts the merge even under `--admin`.** For a solo
+  SRE approving their OWN campaign's PRs, `gh pr review --approve` fails ("Can
+  not approve your own pull request"), and `--admin` is the intended way to
+  merge regardless. With this change that path now aborts on the approve
+  failure. I implemented the doc as written ("a failed `--approve` step aborts
+  THAT merge") and did NOT invent an `--admin` carve-out, but flag it: if the
+  owner runs `review approve --admin` on self-authored PRs, they will now be
+  blocked. Should `--admin` (or a "cannot approve own PR" classification) be
+  exempted from the abort? Needs the owner's call.

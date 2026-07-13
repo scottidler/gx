@@ -307,6 +307,103 @@ pub fn process_review_clone_command(
     Ok(())
 }
 
+/// Why `review approve` SKIPPED a PR instead of merging it. The mergeable guard
+/// fails closed on anything but a proven-mergeable PR (production-hardening doc,
+/// Phase 4); this records WHICH not-mergeable state it was in so the operator
+/// knows whether a re-run resolves it.
+#[derive(Debug, Clone, Copy)]
+enum SkipReason {
+    /// GitHub has not yet computed mergeability (`mergeable: UNKNOWN`, its lazy
+    /// state). Re-running once GitHub finishes computing resolves it.
+    MergeabilityUnknown,
+    /// The PR conflicts with its base branch and cannot merge as-is.
+    Conflicting,
+}
+
+impl SkipReason {
+    /// Classify a not-mergeable PR's verdict. `Mergeability::Mergeable` never
+    /// reaches here (it is not skipped); `Unknown` and anything else map to the
+    /// re-runnable unknown case.
+    fn from_mergeable(m: github::Mergeability) -> Self {
+        match m {
+            github::Mergeability::Conflicting => SkipReason::Conflicting,
+            _ => SkipReason::MergeabilityUnknown,
+        }
+    }
+
+    /// Human phrase recorded in state and logged; also the summary wording.
+    fn label(self) -> &'static str {
+        match self {
+            SkipReason::MergeabilityUnknown => "mergeability not yet computed",
+            SkipReason::Conflicting => "merge conflict with base branch",
+        }
+    }
+
+    fn is_unknown(self) -> bool {
+        matches!(self, SkipReason::MergeabilityUnknown)
+    }
+}
+
+/// Single race-free state update after `review approve` (design [A10]): load
+/// once under the change lock, apply merged/failed outcomes AND the
+/// mergeability skips, save once. Skips are recorded as `Skipped { reason }`
+/// (NOT merged, NOT error) so the `error == None` merged path can't mis-record
+/// a skipped-but-open PR as merged.
+fn record_approve_outcomes(
+    change_id: &str,
+    results: &[ReviewResult],
+    skipped: &[(&PrInfo, SkipReason)],
+) {
+    debug!(
+        "record_approve_outcomes: change_id={change_id} merged_or_failed={} skipped={}",
+        results.len(),
+        skipped.len()
+    );
+    match crate::lock::ChangeLock::acquire(change_id) {
+        Ok(_change_lock) => {
+            if let Ok(manager) = StateManager::new() {
+                if let Ok(Some(mut state)) = manager.load(change_id) {
+                    for result in results {
+                        match &result.error {
+                            None => state.mark_merged(&result.repo.slug),
+                            Some(e) => state.mark_failed(&result.repo.slug, e.clone()),
+                        }
+                    }
+                    for (pr, reason) in skipped {
+                        state.mark_skipped(&pr.repo_slug, reason.label().to_string());
+                    }
+                    if let Err(e) = manager.save(&state) {
+                        warn!("Failed to save change state after approve: {e}");
+                    }
+                }
+            }
+        }
+        Err(e) => warn!("Failed to acquire change lock for {change_id}: {e}"),
+    }
+}
+
+/// Print the re-run hints for PRs `review approve` skipped as not-mergeable
+/// (production-hardening doc, Phase 4): the UNKNOWN case resolves on a plain
+/// re-run once GitHub finishes computing mergeability; the conflict case needs
+/// the operator to resolve conflicts first.
+fn print_skip_hints(skipped: &[(&PrInfo, SkipReason)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let unknown = skipped.iter().filter(|(_, r)| r.is_unknown()).count();
+    let conflicting = skipped.len() - unknown;
+    if conflicting > 0 {
+        println!(
+            "{conflicting} PR(s) skipped (merge conflict) - resolve conflicts, then re-run `gx review approve`."
+        );
+    }
+    if unknown > 0 {
+        println!(
+            "{unknown} PR(s) skipped (mergeability not yet computed) - re-run `gx review approve`."
+        );
+    }
+}
+
 /// Process review approve command - approve and merge PRs
 #[allow(clippy::too_many_arguments)]
 pub fn process_review_approve_command(
@@ -361,18 +458,48 @@ pub fn process_review_approve_command(
         return Ok(());
     }
 
-    println!("Found {} open PRs to approve and merge:", open_prs.len());
+    println!("Found {} open PR(s) for change ID: {change_id}", open_prs.len());
     for pr in &open_prs {
         println!("  PR #{}: {} ({})", pr.number, pr.title, pr.repo_slug);
     }
 
-    // Confirm gate (Phase 3): prompt only once the count reaches the threshold
-    // (mirrors `create`'s confirm-threshold), fail closed on non-interactive
-    // stdin without `--yes`. Runs AFTER discovery is proven complete, so the
-    // count shown is the true blast radius.
+    // Mergeable guard (Phase 4): only merge PRs GitHub proved mergeable. A
+    // Conflicting or Unknown (lazily-computed) PR is SKIPPED, never merged -
+    // gx never merges on uncertainty (fail closed). Skips are recorded as
+    // `Skipped { reason }`, NOT merged; the summary hints a re-run for UNKNOWN.
+    let mut mergeable_prs: Vec<&PrInfo> = Vec::new();
+    let mut skipped: Vec<(&PrInfo, SkipReason)> = Vec::new();
+    for &pr in &open_prs {
+        if github::is_mergeable(pr) {
+            mergeable_prs.push(pr);
+        } else {
+            let reason = SkipReason::from_mergeable(pr.mergeable);
+            warn!(
+                "Skipping PR #{} in {} - {}",
+                pr.number,
+                pr.repo_slug,
+                reason.label()
+            );
+            skipped.push((pr, reason));
+        }
+    }
+
+    // Nothing proven-mergeable: record the skips and report, WITHOUT prompting
+    // or mutating a single PR.
+    if mergeable_prs.is_empty() {
+        println!("No mergeable PRs to approve; {} skipped.", skipped.len());
+        record_approve_outcomes(change_id, &[], &skipped);
+        print_skip_hints(&skipped);
+        return Ok(());
+    }
+
+    // Confirm gate (Phase 3): the blast radius is the PRs that will actually be
+    // MERGED (the mergeable subset), not the raw open-PR count. Prompt only once
+    // that count reaches the threshold; fail closed on non-interactive stdin
+    // without `--yes`. Runs AFTER discovery is proven complete.
     let threshold = config.review_confirm_threshold();
-    if open_prs.len() >= threshold
-        && !confirm_destructive(DestructiveOp::ReviewApprove, open_prs.len(), yes)?
+    if mergeable_prs.len() >= threshold
+        && !confirm_destructive(DestructiveOp::ReviewApprove, mergeable_prs.len(), yes)?
     {
         println!("Aborted; no PRs approved or merged.");
         return Ok(());
@@ -390,35 +517,18 @@ pub fn process_review_approve_command(
         .build()
         .context("Failed to create thread pool")?;
 
-    // Process PRs in parallel
+    // Merge only the proven-mergeable PRs in parallel.
     let results: Vec<ReviewResult> = pool.install(|| {
-        open_prs
+        mergeable_prs
             .par_iter()
             .map(|pr| approve_and_merge_pr(pr, change_id, admin_override, auto_merge, config))
             .collect()
     });
 
-    // Single race-free state update: load once, apply all outcomes, save once
-    // ([A10]), under the change-level lock (Phase 7 [F6]) so a concurrent
-    // `review sync`/`cleanup`/`undo` on the same change-id can't interleave.
-    match crate::lock::ChangeLock::acquire(change_id) {
-        Ok(_change_lock) => {
-            if let Ok(manager) = StateManager::new() {
-                if let Ok(Some(mut state)) = manager.load(change_id) {
-                    for result in &results {
-                        match &result.error {
-                            None => state.mark_merged(&result.repo.slug),
-                            Some(e) => state.mark_failed(&result.repo.slug, e.clone()),
-                        }
-                    }
-                    if let Err(e) = manager.save(&state) {
-                        warn!("Failed to save change state after approve: {e}");
-                    }
-                }
-            }
-        }
-        Err(e) => warn!("Failed to acquire change lock for {change_id}: {e}"),
-    }
+    // Single race-free state update (load once, apply merged/failed AND the
+    // mergeability skips, save once) under the change-level lock (Phase 7 [F6])
+    // so a concurrent `review sync`/`cleanup`/`undo` can't interleave.
+    record_approve_outcomes(change_id, &results, &skipped);
 
     // Display results
     let opts = StatusOptions {
@@ -433,6 +543,7 @@ pub fn process_review_approve_command(
 
     display_review_results(&results, &opts);
     display_review_summary(&results, &opts);
+    print_skip_hints(&skipped);
 
     Ok(())
 }
@@ -1449,7 +1560,8 @@ cat <<'JSON'
   "repository": {"nameWithOwner": "gx-testing/repo"},
   "mergedAt": null,
   "mergeCommit": null,
-  "baseRefName": "main"
+  "baseRefName": "main",
+  "mergeable": "MERGEABLE"
 }]}}}
 JSON
   exit 0
@@ -1519,6 +1631,130 @@ exit 0
         assert!(
             !mut_log.exists(),
             "ZERO mutations: no merge/close gh call may have run, but the spy logged one"
+        );
+
+        match prior_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prior_tok {
+            Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+            None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+        }
+        match prior_mut {
+            Some(v) => unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", v) },
+            None => unsafe { std::env::remove_var("GX_TEST_MUTATION_LOG") },
+        }
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
+    /// A gh spy shim returning ONE OPEN PR whose `mergeable` is `UNKNOWN`
+    /// (GitHub's lazily-computed state). Discovery (`api graphql`) succeeds; ANY
+    /// other (mutating) invocation appends to `$GX_TEST_MUTATION_LOG` so the
+    /// test can assert ZERO merges ran.
+    const GH_APPROVE_UNKNOWN_SHIM: &str = r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+cat <<'JSON'
+{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{
+  "number": 21,
+  "title": "GX-approve-unknown: change",
+  "headRefName": "GX-approve-unknown",
+  "author": {"login": "tester"},
+  "state": "OPEN",
+  "url": "https://github.com/gx-testing/repo/pull/21",
+  "repository": {"nameWithOwner": "gx-testing/repo"},
+  "mergedAt": null,
+  "mergeCommit": null,
+  "baseRefName": "main",
+  "mergeable": "UNKNOWN"
+}]}}}
+JSON
+  exit 0
+fi
+echo "MUTATION: $@" >> "$GX_TEST_MUTATION_LOG"
+exit 0
+"#;
+
+    /// Mergeable-guard bite (Phase 4): `review approve` must NOT merge a PR whose
+    /// `mergeable != MERGEABLE`. With a single UNKNOWN PR, the command performs
+    /// ZERO GitHub mutations (the spy logs none) and records the repo as
+    /// `Skipped { reason }` - NOT merged. Remove the guard (revert to merging
+    /// every open PR) and a merge mutation is logged AND the repo is marked
+    /// PrMerged, so this test fails.
+    #[test]
+    fn test_review_approve_skips_non_mergeable_pr_and_records_skipped() {
+        use clap::Parser;
+        use crate::state::RepoChangeStatus;
+        let guard = crate::test_utils::env_lock();
+        let prior_path = std::env::var("PATH").ok();
+        let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
+        let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let shim_dir = TempDir::new().unwrap();
+        install_shim(shim_dir.path(), GH_APPROVE_UNKNOWN_SHIM);
+        let new_path = format!(
+            "{}:{}",
+            shim_dir.path().display(),
+            prior_path.clone().unwrap_or_default()
+        );
+        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+        let mut_log = shim_dir.path().join("mutations.log");
+        unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", &mut_log) };
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        // Pre-existing state with the repo's PR open (as `gx create` would leave
+        // it), so `record_approve_outcomes` has a change to update.
+        let change_id = "GX-approve-unknown";
+        let manager = StateManager::new().unwrap();
+        let mut state = ChangeState::new(change_id.to_string(), None);
+        state.add_repository("gx-testing/repo".to_string(), change_id.to_string());
+        state.set_pr_info(
+            "gx-testing/repo",
+            21,
+            "https://github.com/gx-testing/repo/pull/21".to_string(),
+            false,
+        );
+        manager.save(&state).unwrap();
+
+        let work = TempDir::new().unwrap();
+        let cwd = work.path().to_string_lossy().to_string();
+        let cli = Cli::parse_from(["gx", "--cwd", &cwd, "review", "approve", change_id]);
+        let config = Config::default();
+
+        let result = process_review_approve_command(
+            &cli,
+            &config,
+            Some("gx-testing"),
+            &[],
+            change_id,
+            false,
+            false,
+            false, // yes = false; the guard skips before any confirm gate
+        );
+        assert!(
+            result.is_ok(),
+            "an all-skipped approve completes cleanly (no merge attempted): {result:?}"
+        );
+        assert!(
+            !mut_log.exists(),
+            "ZERO mutations: a non-mergeable PR must never be merged, but the spy logged a mutation"
+        );
+
+        let reloaded = manager
+            .load(change_id)
+            .unwrap()
+            .expect("state must still exist");
+        let repo_status = &reloaded.repositories.get("gx-testing/repo").unwrap().status;
+        assert!(
+            matches!(repo_status, RepoChangeStatus::Skipped { .. }),
+            "a skipped PR must be recorded as Skipped, not merged: {repo_status:?}"
         );
 
         match prior_path {

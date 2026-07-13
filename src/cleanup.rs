@@ -358,6 +358,34 @@ fn cleanup_change(
             }
         };
 
+        // Fetched-ancestry guard (Phase 4): even for a `PrMerged` repo, PROVE
+        // the branch's commits are all contained in the freshly-fetched base ref
+        // before `-D`. `PrMerged` stays a fast-path signal, but the git-level
+        // ancestry check is the real guard against deleting unmerged work.
+        // `--force` bypasses it (the operator explicitly opted into an
+        // unconditional delete); on Ok(false) or a verification error we fail
+        // CLOSED and PRESERVE the branch.
+        if !force {
+            match git::branch_merged_into_base(&local_path, &branch_name) {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        "Skipping {repo_slug}: branch {branch_name} has commits not in the base branch; re-check the merge or use --force"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "Skipping {repo_slug}: could not verify {branch_name} is merged into the base branch: {e}"
+                    );
+                    errors.push(format!("{repo_slug}: ancestry check failed: {e}"));
+                    failed += 1;
+                    continue;
+                }
+            }
+        }
+
         // Delete local branch. Existence is checked explicitly FIRST (F13) so
         // an already-deleted branch is a no-op rather than the caller sniffing
         // the delete error's text for "not found"/"does not exist".
@@ -541,6 +569,73 @@ mod tests {
         assert_eq!(eligible_cleanup_count(&state, false), 1);
         // With --force, both needing-cleanup repos (merged + closed) are eligible.
         assert_eq!(eligible_cleanup_count(&state, true), 2);
+    }
+
+    /// Fetched-ancestry guard bite (Phase 4): `cleanup` WITHOUT `--force` must
+    /// PRESERVE a branch whose commits are NOT contained in the freshly-fetched
+    /// base ref - even when the recorded status is `PrMerged` (the fast-path
+    /// signal is trusted no further than the git-level ancestry check). The
+    /// branch carries a commit that never landed on the base; the ancestry check
+    /// returns "not an ancestor", so the branch survives. Remove the guard and
+    /// the branch is `-D`'d (test fails).
+    #[test]
+    fn test_cleanup_preserves_branch_with_commits_absent_from_base() {
+        // An upstream repo with a base branch, cloned locally; the gx branch then
+        // gets an EXTRA local commit that never merged upstream.
+        let parent = TempDir::new().unwrap();
+        let upstream = parent.path().join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        run_git_command(&["init", "--quiet"], &upstream);
+        run_git_command(&["config", "user.email", "t@e.com"], &upstream);
+        run_git_command(&["config", "user.name", "T"], &upstream);
+        run_git_command(&["config", "commit.gpgsign", "false"], &upstream);
+        std::fs::write(upstream.join("README.md"), "# base").unwrap();
+        run_git_command(&["add", "-A"], &upstream);
+        run_git_command(&["commit", "--quiet", "-m", "base commit"], &upstream);
+
+        // Clone so origin/HEAD (the resolved base) and an `origin` remote exist.
+        let work = parent.path().join("work");
+        run_git_command(
+            &[
+                "clone",
+                "--quiet",
+                &upstream.to_string_lossy(),
+                &work.to_string_lossy(),
+            ],
+            parent.path(),
+        );
+        run_git_command(&["config", "user.email", "t@e.com"], &work);
+        run_git_command(&["config", "user.name", "T"], &work);
+        run_git_command(&["config", "commit.gpgsign", "false"], &work);
+
+        // A gx branch with an extra commit that is NOT on the base branch.
+        run_git_command(&["checkout", "--quiet", "-b", "GX-unmerged"], &work);
+        std::fs::write(work.join("extra.txt"), "unmerged work").unwrap();
+        run_git_command(&["add", "-A"], &work);
+        run_git_command(&["commit", "--quiet", "-m", "unmerged commit"], &work);
+        assert!(crate::git::branch_exists_locally(&work, "GX-unmerged").unwrap());
+
+        // Recorded as PrMerged (the fast-path signal) - the ancestry check must
+        // STILL veto the delete because the commit isn't in the base.
+        let mut state = ChangeState::new("GX-unmerged".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-unmerged".to_string());
+        {
+            let rs = state.repositories.get_mut("org/repo").unwrap();
+            rs.local_path = Some(work.to_string_lossy().to_string());
+            rs.status = RepoChangeStatus::PrMerged;
+        }
+
+        // force = false -> the fetched-ancestry guard runs and preserves.
+        let result = cleanup_change(&mut state, false, false).unwrap();
+        assert_eq!(
+            result.repos_cleaned, 0,
+            "a branch with commits absent from the base must NOT be deleted"
+        );
+        assert_eq!(result.repos_skipped, 1, "the unmerged branch is skipped");
+        assert!(
+            crate::git::branch_exists_locally(&work, "GX-unmerged").unwrap(),
+            "the unmerged branch must survive a non-force cleanup"
+        );
     }
 
     /// Command-level bite (Phase 3): the confirm gate is WIRED into `cleanup`.

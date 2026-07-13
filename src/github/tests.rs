@@ -201,6 +201,87 @@ fn test_parse_graphql_prs_json_merged_pr_fields() {
 }
 
 #[test]
+fn test_parse_graphql_prs_json_parses_mergeable_field() {
+    // Phase 4 (production hardening): the `mergeable` enum parses from the
+    // GraphQL field. MERGEABLE -> Mergeable, CONFLICTING -> Conflicting.
+    let json = r#"{"data":{"search":{"nodes":[
+        {
+            "number": 1,
+            "title": "GX-ok: PR",
+            "headRefName": "GX-ok",
+            "author": {"login": "u"},
+            "state": "OPEN",
+            "url": "https://github.com/org/repo/pull/1",
+            "repository": {"nameWithOwner": "org/repo"},
+            "baseRefName": "main",
+            "mergeable": "MERGEABLE"
+        },
+        {
+            "number": 2,
+            "title": "GX-conflict: PR",
+            "headRefName": "GX-conflict",
+            "author": {"login": "u"},
+            "state": "OPEN",
+            "url": "https://github.com/org/repo/pull/2",
+            "repository": {"nameWithOwner": "org/repo"},
+            "baseRefName": "main",
+            "mergeable": "CONFLICTING"
+        }
+    ]}}}"#;
+
+    let result = parse_graphql_prs_json(json).unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].mergeable, Mergeability::Mergeable);
+    assert!(is_mergeable(&result[0]), "MERGEABLE -> is_mergeable true");
+    assert_eq!(result[1].mergeable, Mergeability::Conflicting);
+    assert!(
+        !is_mergeable(&result[1]),
+        "CONFLICTING -> is_mergeable false (fail closed)"
+    );
+}
+
+#[test]
+fn test_parse_graphql_mergeable_fails_closed_to_unknown() {
+    // A PR with `mergeable: UNKNOWN` (GitHub's lazily-computed state) AND a PR
+    // that omits the field entirely BOTH map to `Mergeability::Unknown`, and
+    // `is_mergeable` returns false for them -- never merge on uncertainty.
+    let json = r#"{"data":{"search":{"nodes":[
+        {
+            "number": 1,
+            "title": "GX-unknown: PR",
+            "headRefName": "GX-unknown",
+            "author": {"login": "u"},
+            "state": "OPEN",
+            "url": "https://github.com/org/repo/pull/1",
+            "repository": {"nameWithOwner": "org/repo"},
+            "baseRefName": "main",
+            "mergeable": "UNKNOWN"
+        },
+        {
+            "number": 2,
+            "title": "GX-absent: PR",
+            "headRefName": "GX-absent",
+            "author": {"login": "u"},
+            "state": "OPEN",
+            "url": "https://github.com/org/repo/pull/2",
+            "repository": {"nameWithOwner": "org/repo"},
+            "baseRefName": "main"
+        }
+    ]}}}"#;
+
+    let result = parse_graphql_prs_json(json).unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].mergeable, Mergeability::Unknown);
+    assert_eq!(
+        result[1].mergeable,
+        Mergeability::Unknown,
+        "an absent mergeable field must fail closed to Unknown"
+    );
+    assert!(!is_mergeable(&result[0]));
+    assert!(!is_mergeable(&result[1]));
+}
+
+#[test]
 fn test_pr_search_string_has_no_open_filter() {
     // Phase 4 [F11] bite-proof: the old query filtered `is:open`, so
     // `gx review sync` could never see merged/closed PRs. Broadened here;

@@ -371,6 +371,46 @@ pub struct PrInfo {
     pub merge_commit_oid: Option<String>,
     /// The PR's base branch name.
     pub base_ref_name: String,
+    /// GitHub's mergeability verdict for the PR head against its base
+    /// (production-hardening doc, Phase 4). Modeled as an enum, not a string
+    /// (`rust.md`); `is_mergeable` consults it to fail closed on anything but a
+    /// proven-mergeable PR before `review approve` merges it.
+    pub mergeable: Mergeability,
+}
+
+/// GitHub's `PullRequest.mergeable` verdict (production-hardening doc, Phase 0
+/// verified the field + value domain against real PRs). `Unknown` is GitHub's
+/// lazily-computed state: a freshly-opened PR returns it until the merge commit
+/// is enqueued. An unrecognized or absent value maps to `Unknown` so the
+/// mergeable gate fails CLOSED (never merges on uncertainty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mergeability {
+    /// `MERGEABLE`: GitHub proved the PR merges cleanly.
+    Mergeable,
+    /// `CONFLICTING`: the PR conflicts with its base and cannot merge as-is.
+    Conflicting,
+    /// `UNKNOWN` / absent / unrecognized: mergeability not (yet) determinable.
+    Unknown,
+}
+
+impl Mergeability {
+    /// Parse GitHub's `mergeable` enum string, failing closed to `Unknown` on
+    /// anything but the two known mergeable/conflicting values.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::to_uppercase).as_deref() {
+            Some("MERGEABLE") => Mergeability::Mergeable,
+            Some("CONFLICTING") => Mergeability::Conflicting,
+            _ => Mergeability::Unknown,
+        }
+    }
+}
+
+/// Whether a PR is safe to merge: only a proven `Mergeability::Mergeable` returns
+/// true. `Conflicting` and `Unknown` both return false (fail closed) - the
+/// production-hardening doc pins that gx never merges on uncertainty
+/// (production-hardening doc, Phase 4 API Design).
+pub fn is_mergeable(pr: &PrInfo) -> bool {
+    matches!(pr.mergeable, Mergeability::Mergeable)
 }
 
 /// PR state enumeration. GitHub's GraphQL `PullRequest.state` is one of
@@ -426,6 +466,12 @@ struct GhGraphqlPrItem {
     merge_commit: Option<GhGraphqlMergeCommit>,
     #[serde(rename = "baseRefName")]
     base_ref_name: String,
+    /// GitHub's `mergeable` enum (`MERGEABLE`/`CONFLICTING`/`UNKNOWN`).
+    /// `#[serde(default)]` so a hand-written test shim (or an older cached
+    /// response) that omits it deserializes to `None` -> `Mergeability::Unknown`
+    /// (fail closed), never a parse error.
+    #[serde(default)]
+    mergeable: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +509,7 @@ const PR_SEARCH_QUERY: &str = r#"query($q: String!, $cursor: String) {
         mergedAt
         mergeCommit { oid }
         baseRefName
+        mergeable
       }
     }
   }
@@ -587,6 +634,7 @@ fn parse_graphql_prs_page(
             merged_at: gh_pr.merged_at,
             merge_commit_oid: gh_pr.merge_commit.map(|m| m.oid),
             base_ref_name: gh_pr.base_ref_name,
+            mergeable: Mergeability::parse(gh_pr.mergeable.as_deref()),
         })
         .collect();
 
@@ -623,9 +671,15 @@ pub fn approve_and_merge_pr(
     )
     .context("Failed to execute gh pr review --approve")?;
 
+    // A failed `--approve` ABORTS this PR's merge (production-hardening doc,
+    // Phase 4): previously the failure was only warned and the merge proceeded,
+    // landing a PR that never got its approval. Fail closed instead.
     if !approve_output.status.success() {
         let error = String::from_utf8_lossy(&approve_output.stderr);
         warn!("Failed to approve PR #{pr_number}: {error}");
+        return Err(eyre::eyre!(
+            "Aborting merge of PR #{pr_number}: approval step failed: {error}"
+        ));
     }
 
     // Then merge the PR

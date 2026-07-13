@@ -132,7 +132,11 @@ fn classify_action(status: &RepoChangeStatus, pr_number: Option<u64>) -> UndoAct
         // Already reverted (revert PR open) or cleaned up: nothing more to do.
         RepoChangeStatus::CleanedUp | RepoChangeStatus::RevertPrOpen => UndoAction::AlreadyGone,
         RepoChangeStatus::PrMerged => UndoAction::RequiresRevert { pr_number },
-        RepoChangeStatus::PrOpen | RepoChangeStatus::PrDraft => match pr_number {
+        // A `Skipped` PR (approve refused to merge it as not-mergeable) is still
+        // OPEN on GitHub, so undo handles it exactly like PrOpen/PrDraft.
+        RepoChangeStatus::PrOpen
+        | RepoChangeStatus::PrDraft
+        | RepoChangeStatus::Skipped { .. } => match pr_number {
             Some(n) => UndoAction::ClosePr { pr_number: n },
             // Open per state but no number recorded: treat as a pushed branch.
             None => UndoAction::DeleteRemoteAndLocal,
