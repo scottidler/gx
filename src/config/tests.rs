@@ -239,3 +239,36 @@ fn test_subprocess_timeout_unknown_field_fails_loudly() {
         "error should name the unknown field, got: {err}"
     );
 }
+
+/// Both finish-line confirm thresholds default to `DEFAULT_CONFIRM_THRESHOLD`
+/// when the block is absent, and each accessor reads its own configured value.
+#[test]
+fn test_review_and_cleanup_confirm_thresholds() {
+    let default = Config::default();
+    assert_eq!(
+        default.review_confirm_threshold(),
+        DEFAULT_CONFIRM_THRESHOLD
+    );
+    assert_eq!(
+        default.cleanup_confirm_threshold(),
+        DEFAULT_CONFIRM_THRESHOLD
+    );
+
+    let yaml = "review:\n  confirm-threshold: 2\ncleanup:\n  confirm-threshold: 9\n";
+    let config: Config = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.review_confirm_threshold(), 2);
+    assert_eq!(config.cleanup_confirm_threshold(), 9);
+}
+
+/// A typo'd nested key under `review`/`cleanup` fails loudly (each config
+/// struct carries `deny_unknown_fields`) rather than silently ignoring the
+/// operator's threshold.
+#[test]
+fn test_review_confirm_threshold_unknown_field_fails_loudly() {
+    let yaml = "review:\n  confirm-treshold: 2\n"; // typo: treshold
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("confirm-treshold"),
+        "error should name the unknown nested field, got: {err}"
+    );
+}

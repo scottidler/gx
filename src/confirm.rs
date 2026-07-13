@@ -14,6 +14,85 @@
 //! a persisted, hashable plan (propose/apply in Phase 4/5, MCP tools in Phase
 //! 9) - at that point the core gains a real check that the token's hash
 //! matches the plan the caller was shown.
+//!
+//! This module ALSO owns the single fail-closed TTY confirm gate for the
+//! irreversible finish-line ops ([`confirm_destructive`], design doc
+//! `2026-07-12-gx-production-hardening.md`, Phase 3). It is the generalization
+//! of the former per-command `confirm_purge`, shared by `review approve`,
+//! `review delete`, and `cleanup`.
+
+use eyre::{Context, Result};
+use log::debug;
+
+/// A finish-line operation that mutates GitHub/git irreversibly and therefore
+/// sits behind [`confirm_destructive`]. The variant selects the blast-radius
+/// wording shown in the prompt so the operator sees exactly what will happen -
+/// in particular that `ReviewDelete` abandons UNMERGED work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveOp {
+    /// `gx review approve`: approve + squash-merge open PRs (irreversible merge).
+    ReviewApprove,
+    /// `gx review delete`: close open (UNMERGED) PRs and delete their branches.
+    ReviewDelete,
+    /// `gx cleanup`: force-delete local branches (`git branch -D`).
+    Cleanup,
+}
+
+impl DestructiveOp {
+    /// The human action phrase, parameterized by count, shown in the prompt and
+    /// the fail-closed error. States the truth about what is destroyed (esp.
+    /// `ReviewDelete`'s unmerged abandonment) so consent is informed.
+    fn action_phrase(self, count: usize) -> String {
+        match self {
+            DestructiveOp::ReviewApprove => format!("approve and MERGE {count} open PR(s)"),
+            DestructiveOp::ReviewDelete => {
+                format!("CLOSE {count} open (UNMERGED) PR(s) and DELETE their branches")
+            }
+            DestructiveOp::Cleanup => format!("DELETE {count} local branch(es)"),
+        }
+    }
+}
+
+/// The single confirm gate for the irreversible finish-line ops, generalized
+/// from the former `confirm_purge`. Behavior:
+/// - `assume_yes` (`--yes`) -> `Ok(true)` without prompting.
+/// - interactive TTY -> prompt showing the blast radius; `y`/`yes` -> `true`.
+/// - non-interactive stdin without `--yes` -> `Err` naming `--yes` (FAIL
+///   CLOSED): a scripted run can never silently perform an irreversible
+///   mutation.
+///
+/// The caller prints the per-org/per-PR breakdown BEFORE calling this (as
+/// `review approve`/`delete` already list every PR with its repo slug) and
+/// gates the call on the count-vs-threshold check; this helper owns only the
+/// final consent moment.
+pub fn confirm_destructive(op: DestructiveOp, count: usize, assume_yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    debug!("confirm_destructive: op={op:?} count={count} assume_yes={assume_yes}");
+
+    let phrase = op.action_phrase(count);
+
+    if assume_yes {
+        debug!("confirm_destructive: --yes supplied; proceeding without prompt (op={op:?})");
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "Refusing to {phrase} without confirmation on non-interactive stdin; pass --yes to proceed"
+        ));
+    }
+
+    print!("This will {phrase}. This is IRREVERSIBLE. Proceed? (y/N): ");
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read confirmation from stdin")?;
+    let answer = input.trim().to_lowercase();
+    let proceed = answer == "y" || answer == "yes";
+    debug!("confirm_destructive: op={op:?} proceed={proceed}");
+    Ok(proceed)
+}
 
 /// Proof that a mutating operation has been confirmed to proceed.
 #[derive(Debug, Clone, PartialEq, Eq)]

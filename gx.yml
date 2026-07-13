@@ -32,6 +32,22 @@ create:
     agent-command: "claude -p --output-format text --permission-mode acceptEdits"
     timeout-seconds: 300  # wall-clock per repo; on expiry the agent's whole process group is killed
 
+# `gx review` finish-line ops (approve/delete). These merge or close+delete PRs
+# on GitHub and are IRREVERSIBLE. The confirm gate prompts once at least
+# `confirm-threshold` PRs are targeted (mirrors `create.confirm-threshold`);
+# below it, small batches proceed without a prompt. `--yes` bypasses the prompt
+# and is REQUIRED on non-interactive stdin (a scripted run fails closed without
+# it). Default: 5. Uncomment to override:
+# review:
+#   confirm-threshold: 5
+
+# `gx cleanup` force-deletes local branches (`git branch -D`). The confirm gate
+# prompts once at least `confirm-threshold` local branches are targeted; `--yes`
+# bypasses it and is REQUIRED on non-interactive stdin. Default: 5. Uncomment to
+# override:
+# cleanup:
+#   confirm-threshold: 5
+
 # Output preferences
 output:
   verbosity: summary  # compact, summary, detailed, or full (default: summary)

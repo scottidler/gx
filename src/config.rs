@@ -61,6 +61,14 @@ pub struct Config {
     /// splitting network vs local); absent = `DEFAULT_SUBPROCESS_TIMEOUT_SECS`.
     #[serde(rename = "subprocess-timeout-secs")]
     pub subprocess_timeout_secs: Option<u64>,
+    /// Confirm-gate threshold for the `review` finish-line ops (`approve`/
+    /// `delete`) (design doc `2026-07-12-gx-production-hardening.md`, Phase 3).
+    /// Absent block = `DEFAULT_CONFIRM_THRESHOLD`.
+    pub review: Option<ReviewConfig>,
+    /// Confirm-gate threshold for the `cleanup` command (design doc
+    /// `2026-07-12-gx-production-hardening.md`, Phase 3). Absent block =
+    /// `DEFAULT_CONFIRM_THRESHOLD`.
+    pub cleanup: Option<CleanupConfig>,
 }
 
 /// The curated `gx-mcp` tool surface (design doc API Design > MCP tools). The
@@ -172,6 +180,44 @@ impl Default for CreateConfig {
 /// Default confirm-threshold: prompt when committing to more repos than this.
 pub const DEFAULT_CONFIRM_THRESHOLD: usize = 5;
 
+/// Configuration for the `review` finish-line ops (`approve`/`delete`). The
+/// confirm gate prompts once at least `confirm-threshold` PRs are targeted
+/// (design doc `2026-07-12-gx-production-hardening.md`, Phase 3).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewConfig {
+    /// Prompt before approving/deleting when at least this many PRs are targeted.
+    #[serde(rename = "confirm-threshold")]
+    pub confirm_threshold: Option<usize>,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            confirm_threshold: Some(DEFAULT_CONFIRM_THRESHOLD),
+        }
+    }
+}
+
+/// Configuration for the `cleanup` command. The confirm gate prompts once at
+/// least `confirm-threshold` local branches are targeted for `-D` (design doc
+/// `2026-07-12-gx-production-hardening.md`, Phase 3).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CleanupConfig {
+    /// Prompt before deleting when at least this many local branches are targeted.
+    #[serde(rename = "confirm-threshold")]
+    pub confirm_threshold: Option<usize>,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            confirm_threshold: Some(DEFAULT_CONFIRM_THRESHOLD),
+        }
+    }
+}
+
 /// Configuration for the `gx create ... llm` change type (design doc
 /// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Config additions): the
 /// agent command run per repo in a throwaway worktree, and the wall-clock
@@ -276,6 +322,8 @@ impl Default for Config {
             github: Some(GithubConfig::default()),
             mcp: None,
             subprocess_timeout_secs: None,
+            review: Some(ReviewConfig::default()),
+            cleanup: Some(CleanupConfig::default()),
         }
     }
 }
@@ -361,6 +409,22 @@ impl Config {
             .and_then(|c| c.llm.as_ref())
             .and_then(|l| l.timeout_seconds)
             .unwrap_or(DEFAULT_LLM_TIMEOUT_SECONDS)
+    }
+
+    /// Effective confirm-gate threshold for the `review` finish-line ops.
+    pub fn review_confirm_threshold(&self) -> usize {
+        self.review
+            .as_ref()
+            .and_then(|c| c.confirm_threshold)
+            .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
+    }
+
+    /// Effective confirm-gate threshold for the `cleanup` command.
+    pub fn cleanup_confirm_threshold(&self) -> usize {
+        self.cleanup
+            .as_ref()
+            .and_then(|c| c.confirm_threshold)
+            .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
     }
 
     /// Effective wall-clock timeout for every git/gh subprocess.

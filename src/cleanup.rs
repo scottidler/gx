@@ -5,11 +5,24 @@
 
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::confirm::{confirm_destructive, DestructiveOp};
 use crate::git;
 use crate::lock::{ChangeLock, RepoLock};
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus, StateManager};
 use eyre::{Context, Result};
 use log::{debug, info, warn};
+
+/// Count the local branches a cleanup pass would actually `git branch -D` for
+/// one change: repos needing cleanup that are eligible under the `force` gate
+/// (merged-only unless `--force`). This is the true blast radius the confirm
+/// gate reports - not the raw repo count.
+fn eligible_cleanup_count(state: &ChangeState, force: bool) -> usize {
+    state
+        .get_repos_needing_cleanup()
+        .iter()
+        .filter(|r| force || r.status == RepoChangeStatus::PrMerged)
+        .count()
+}
 
 /// Result of a cleanup operation
 #[derive(Debug)]
@@ -23,14 +36,16 @@ pub struct CleanupResult {
 }
 
 /// Process cleanup command
+#[allow(clippy::too_many_arguments)]
 pub fn process_cleanup_command(
     _cli: &Cli,
-    _config: &Config,
+    config: &Config,
     change_id: Option<&str>,
     all: bool,
     list: bool,
     include_remote: bool,
     force: bool,
+    yes: bool,
 ) -> Result<()> {
     let state_manager = StateManager::new()?;
 
@@ -39,13 +54,20 @@ pub fn process_cleanup_command(
     }
 
     if all {
-        return cleanup_all_merged(&state_manager, include_remote, force);
+        return cleanup_all_merged(&state_manager, config, include_remote, force, yes);
     }
 
     let change_id = change_id
         .ok_or_else(|| eyre::eyre!("Change ID required unless --all or --list is specified"))?;
 
-    cleanup_single_change(&state_manager, change_id, include_remote, force)
+    cleanup_single_change(
+        &state_manager,
+        config,
+        change_id,
+        include_remote,
+        force,
+        yes,
+    )
 }
 
 /// List changes that can be cleaned up
@@ -94,8 +116,10 @@ fn list_cleanable_changes(state_manager: &StateManager) -> Result<()> {
 /// Clean up all merged changes
 fn cleanup_all_merged(
     state_manager: &StateManager,
+    config: &Config,
     include_remote: bool,
     force: bool,
+    yes: bool,
 ) -> Result<()> {
     let states = state_manager.list()?;
 
@@ -109,6 +133,22 @@ fn cleanup_all_merged(
 
     if cleanable.is_empty() {
         println!("No changes to clean up.");
+        return Ok(());
+    }
+
+    // Confirm gate (Phase 3): the true blast radius is every local branch this
+    // pass would `-D` across all cleanable changes. Prompt only once that count
+    // reaches the threshold; fail closed on non-interactive stdin without
+    // `--yes`.
+    let total_branches: usize = cleanable
+        .iter()
+        .map(|s| eligible_cleanup_count(s, force))
+        .sum();
+    let threshold = config.cleanup_confirm_threshold();
+    if total_branches >= threshold
+        && !confirm_destructive(DestructiveOp::Cleanup, total_branches, yes)?
+    {
+        println!("Aborted; no branches deleted.");
         return Ok(());
     }
 
@@ -180,9 +220,11 @@ fn cleanup_all_merged(
 /// Clean up a single change
 fn cleanup_single_change(
     state_manager: &StateManager,
+    config: &Config,
     change_id: &str,
     include_remote: bool,
     force: bool,
+    yes: bool,
 ) -> Result<()> {
     // Change-level lock (Phase 7 [F6]): held across the whole load-mutate-save
     // cycle below so a concurrent `review sync`/`approve`/`delete`/`undo` on
@@ -193,6 +235,17 @@ fn cleanup_single_change(
     let mut state = state_manager
         .load(change_id)?
         .ok_or_else(|| eyre::eyre!("Change not found: {}", change_id))?;
+
+    // Confirm gate (Phase 3): prompt once the branch count reaches the
+    // threshold, fail closed on non-interactive stdin without `--yes`. Held
+    // under the change lock but before any `-D` runs.
+    let branch_count = eligible_cleanup_count(&state, force);
+    let threshold = config.cleanup_confirm_threshold();
+    if branch_count >= threshold && !confirm_destructive(DestructiveOp::Cleanup, branch_count, yes)?
+    {
+        println!("Aborted; no branches deleted.");
+        return Ok(());
+    }
 
     let result = cleanup_change(&mut state, include_remote, force)?;
 
@@ -472,5 +525,87 @@ mod tests {
         // Should not error on empty state
         let result = list_cleanable_changes(&manager);
         assert!(result.is_ok());
+    }
+
+    /// The confirm gate's blast-radius count is the branches a cleanup would
+    /// actually `-D`: merged-only without `--force`, merged+closed with it.
+    #[test]
+    fn test_eligible_cleanup_count_respects_force_and_merged() {
+        let mut state = ChangeState::new("GX-count".to_string(), None);
+        state.add_repository("org/merged".to_string(), "GX-count".to_string());
+        state.add_repository("org/closed".to_string(), "GX-count".to_string());
+        state.repositories.get_mut("org/merged").unwrap().status = RepoChangeStatus::PrMerged;
+        state.repositories.get_mut("org/closed").unwrap().status = RepoChangeStatus::PrClosed;
+
+        // Without --force, only the MERGED repo is eligible for -D.
+        assert_eq!(eligible_cleanup_count(&state, false), 1);
+        // With --force, both needing-cleanup repos (merged + closed) are eligible.
+        assert_eq!(eligible_cleanup_count(&state, true), 2);
+    }
+
+    /// Command-level bite (Phase 3): the confirm gate is WIRED into `cleanup`.
+    /// With the eligible-branch count at/above the threshold and non-interactive
+    /// stdin (as under `cargo test`) without `--yes`, `cleanup --all` FAILS
+    /// CLOSED (loud error naming `--yes`) and deletes NOTHING - the real gx
+    /// branch that a cleanup would `-D` still exists afterward. The gate runs
+    /// before any `ChangeLock` acquisition, so this test never touches the
+    /// flock family. Remove the gate and the branch is deleted (test fails).
+    #[test]
+    fn test_cleanup_all_fails_closed_and_deletes_nothing() {
+        use clap::Parser;
+        let guard = crate::test_utils::env_lock();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        // A real repo with a gx branch a cleanup WOULD delete.
+        let repo = TempDir::new().unwrap();
+        let p = repo.path();
+        run_git_command(&["init", "--quiet"], p);
+        run_git_command(&["config", "user.email", "t@e.com"], p);
+        run_git_command(&["config", "user.name", "T"], p);
+        run_git_command(&["config", "commit.gpgsign", "false"], p);
+        std::fs::write(p.join("README.md"), "# r").unwrap();
+        run_git_command(&["add", "-A"], p);
+        run_git_command(&["commit", "--quiet", "-m", "init"], p);
+        run_git_command(&["branch", "GX-cleanup-gate"], p);
+        assert!(crate::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap());
+
+        let manager = StateManager::new().unwrap();
+        let mut state = ChangeState::new("GX-cleanup-gate".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-cleanup-gate".to_string());
+        state.repositories.get_mut("org/repo").unwrap().local_path =
+            Some(p.to_string_lossy().to_string());
+        // Merged -> the change is FullyMerged and the repo is eligible for -D.
+        state.mark_merged("org/repo");
+        manager.save(&state).unwrap();
+
+        let cli = Cli::parse_from(["gx", "cleanup", "--all"]);
+        let config = Config {
+            cleanup: Some(crate::config::CleanupConfig {
+                confirm_threshold: Some(1),
+            }),
+            ..Config::default()
+        };
+
+        // all=true, force=false, yes=false -> 1 eligible >= threshold 1 trips
+        // the gate, which fails closed on non-interactive stdin.
+        let result = process_cleanup_command(&cli, &config, None, true, false, false, false, false);
+        assert!(
+            result.is_err(),
+            "cleanup must fail closed on non-interactive stdin without --yes"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("--yes"), "error must name --yes: {msg}");
+        assert!(
+            crate::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap(),
+            "the branch must survive a fail-closed cleanup (ZERO deletions)"
+        );
+
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
     }
 }

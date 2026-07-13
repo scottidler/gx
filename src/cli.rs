@@ -497,6 +497,14 @@ EXAMPLES:
         /// Force cleanup even if PR status is unknown
         #[arg(long)]
         force: bool,
+
+        /// Skip the confirmation prompt before deleting local branches
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before deleting local branches"
+        )]
+        yes: bool,
     },
 
     /// Check required tools and report orphaned gx artifacts
@@ -538,11 +546,23 @@ pub enum ReviewAction {
             help = "Enable auto-merge (merge when all checks pass)"
         )]
         auto: bool,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before approving and merging"
+        )]
+        yes: bool,
     },
     /// Delete PRs and branches
     Delete {
         #[arg(help = "Change ID to delete")]
         change_id: String,
+        #[arg(
+            short = 'y',
+            long = "yes",
+            help = "Skip the confirmation prompt before closing and deleting"
+        )]
+        yes: bool,
     },
     /// True-up recorded change state against GitHub PR reality (merged/closed)
     Sync {

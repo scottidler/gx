@@ -52,3 +52,60 @@ fn test_confirmation_variants_are_constructible_and_comparable() {
     assert_ne!(already, token_a);
     assert_eq!(format!("{already:?}"), "AlreadyConfirmed");
 }
+
+/// Break-the-guard bite (Phase 3 success criterion): every finish-line op on
+/// non-interactive stdin (which is exactly what `cargo test` runs under)
+/// without `--yes` must FAIL CLOSED with a loud error naming `--yes`. If the
+/// guard is removed (e.g. the `is_terminal()` branch is dropped or made to
+/// return `Ok(false)`/`Ok(true)`), this test fails.
+#[test]
+fn test_confirm_destructive_fails_closed_naming_yes_for_each_op() {
+    for op in [
+        DestructiveOp::ReviewApprove,
+        DestructiveOp::ReviewDelete,
+        DestructiveOp::Cleanup,
+    ] {
+        let err = confirm_destructive(op, 7, false)
+            .expect_err("non-interactive stdin without --yes must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--yes"),
+            "fail-closed error for {op:?} must name --yes: {msg}"
+        );
+        // The blast radius (the count) rides the message so a scripted operator
+        // sees exactly what was refused.
+        assert!(
+            msg.contains('7'),
+            "fail-closed error for {op:?} must name the count: {msg}"
+        );
+    }
+}
+
+/// `--yes` bypasses the prompt entirely (no stdin read, no TTY needed) and
+/// proceeds. This is the documented non-interactive path.
+#[test]
+fn test_confirm_destructive_yes_proceeds_without_prompt() {
+    for op in [
+        DestructiveOp::ReviewApprove,
+        DestructiveOp::ReviewDelete,
+        DestructiveOp::Cleanup,
+    ] {
+        assert!(
+            confirm_destructive(op, 42, true).expect("--yes must not error"),
+            "--yes must proceed for {op:?}"
+        );
+    }
+}
+
+/// `review delete` abandons UNMERGED work; its consent/fail-closed message must
+/// state that truthfully so consent is informed (design doc Phase 4 wording,
+/// staged in the Phase 3 prompt).
+#[test]
+fn test_confirm_destructive_delete_message_states_unmerged() {
+    let err = confirm_destructive(DestructiveOp::ReviewDelete, 3, false).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("UNMERGED"),
+        "delete fail-closed message must state the unmerged destruction: {msg}"
+    );
+}

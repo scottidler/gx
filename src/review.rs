@@ -1,15 +1,53 @@
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::confirm::{confirm_destructive, DestructiveOp};
 use crate::git;
 use crate::github::{self, PrInfo};
 use crate::output::{display_review_results, StatusOptions};
 use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
 use crate::state::StateManager;
+use crate::user_org::UserOrgContext;
 use eyre::{Context, Result};
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use std::path::Path;
+
+/// Preflight-complete-or-abort PR discovery for a finish-line batch (design doc
+/// `2026-07-12-gx-production-hardening.md`, Phase 3). Resolves PR discovery for
+/// EVERY targeted org up front; if ANY org's `list_prs_by_change_id` errors,
+/// the whole batch aborts with a loud `Err` naming that org - it NEVER
+/// warn-and-continues over a partial set, which would let a token/network blip
+/// on one org yield a partial merge/delete reported as success. Because the
+/// caller binds this with `?` before the parallel mutation section, an aborted
+/// discovery guarantees ZERO GitHub writes on the other orgs.
+fn discover_all_prs(
+    user_org_contexts: &[UserOrgContext],
+    change_id: &str,
+    config: &Config,
+) -> Result<Vec<PrInfo>> {
+    debug!(
+        "discover_all_prs: change_id={change_id} orgs={}",
+        user_org_contexts.len()
+    );
+    let mut all_prs = Vec::new();
+    for context in user_org_contexts {
+        let prs = github::list_prs_by_change_id(&context.user_or_org, change_id, config)
+            .with_context(|| {
+                format!(
+                    "Aborting batch for {change_id}: PR discovery failed for org '{}' -- \
+                     refusing to run a partial batch (no partial merge/delete)",
+                    context.user_or_org
+                )
+            })?;
+        all_prs.extend(prs);
+    }
+    debug!(
+        "discover_all_prs: change_id={change_id} total_prs={}",
+        all_prs.len()
+    );
+    Ok(all_prs)
+}
 
 #[derive(Debug, Clone)]
 pub struct ReviewResult {
@@ -270,6 +308,7 @@ pub fn process_review_clone_command(
 }
 
 /// Process review approve command - approve and merge PRs
+#[allow(clippy::too_many_arguments)]
 pub fn process_review_approve_command(
     cli: &Cli,
     config: &Config,
@@ -278,6 +317,7 @@ pub fn process_review_approve_command(
     change_id: &str,
     admin_override: bool,
     auto_merge: bool,
+    yes: bool,
 ) -> Result<()> {
     info!("Approving PRs for change ID: {change_id}");
 
@@ -300,21 +340,10 @@ pub fn process_review_approve_command(
         return Ok(());
     }
 
-    // Collect PRs from all detected orgs
-    let mut all_prs = Vec::new();
-    for context in &user_org_contexts {
-        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
-            Ok(prs) => all_prs.extend(prs),
-            Err(e) => {
-                log::warn!(
-                    "Failed to get PRs from org '{}': {}",
-                    context.user_or_org,
-                    e
-                );
-            }
-        }
-    }
-    let prs = all_prs;
+    // Preflight-complete-or-abort (Phase 3): resolve discovery for EVERY org
+    // BEFORE any mutation; any org error aborts the whole batch loudly (no
+    // warn-and-continue over a partial set).
+    let prs = discover_all_prs(&user_org_contexts, change_id, config)?;
 
     if prs.is_empty() {
         println!("No PRs found for change ID: {change_id}");
@@ -335,6 +364,18 @@ pub fn process_review_approve_command(
     println!("Found {} open PRs to approve and merge:", open_prs.len());
     for pr in &open_prs {
         println!("  PR #{}: {} ({})", pr.number, pr.title, pr.repo_slug);
+    }
+
+    // Confirm gate (Phase 3): prompt only once the count reaches the threshold
+    // (mirrors `create`'s confirm-threshold), fail closed on non-interactive
+    // stdin without `--yes`. Runs AFTER discovery is proven complete, so the
+    // count shown is the true blast radius.
+    let threshold = config.review_confirm_threshold();
+    if open_prs.len() >= threshold
+        && !confirm_destructive(DestructiveOp::ReviewApprove, open_prs.len(), yes)?
+    {
+        println!("Aborted; no PRs approved or merged.");
+        return Ok(());
     }
 
     // Determine parallelism
@@ -403,6 +444,7 @@ pub fn process_review_delete_command(
     org: Option<&str>,
     _patterns: &[String],
     change_id: &str,
+    yes: bool,
 ) -> Result<()> {
     info!("Deleting PRs for change ID: {change_id}");
 
@@ -425,21 +467,10 @@ pub fn process_review_delete_command(
         return Ok(());
     }
 
-    // Collect PRs from all detected orgs
-    let mut all_prs = Vec::new();
-    for context in &user_org_contexts {
-        match github::list_prs_by_change_id(&context.user_or_org, change_id, config) {
-            Ok(prs) => all_prs.extend(prs),
-            Err(e) => {
-                log::warn!(
-                    "Failed to get PRs from org '{}': {}",
-                    context.user_or_org,
-                    e
-                );
-            }
-        }
-    }
-    let prs = all_prs;
+    // Preflight-complete-or-abort (Phase 3): resolve discovery for EVERY org
+    // BEFORE any mutation; any org error aborts the whole batch loudly (no
+    // warn-and-continue over a partial set).
+    let prs = discover_all_prs(&user_org_contexts, change_id, config)?;
 
     if prs.is_empty() {
         println!("No PRs found for change ID: {change_id}");
@@ -460,6 +491,18 @@ pub fn process_review_delete_command(
     println!("Found {} open PRs to delete:", open_prs.len());
     for pr in &open_prs {
         println!("  PR #{}: {} ({})", pr.number, pr.title, pr.repo_slug);
+    }
+
+    // Confirm gate (Phase 3): `review delete` CLOSES open (unmerged) PRs and
+    // deletes their branches - the prompt states that destruction truthfully.
+    // Prompt only once the count reaches the threshold; fail closed on
+    // non-interactive stdin without `--yes`. Runs AFTER discovery is complete.
+    let threshold = config.review_confirm_threshold();
+    if open_prs.len() >= threshold
+        && !confirm_destructive(DestructiveOp::ReviewDelete, open_prs.len(), yes)?
+    {
+        println!("Aborted; no PRs deleted.");
+        return Ok(());
     }
 
     // Determine parallelism
@@ -1289,6 +1332,207 @@ exit 0
         // And a sync AFTER release proceeds normally (the lock isn't stuck).
         assert!(sync_change_state(&[], change_id).is_ok());
 
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
+    /// A gh shim for the preflight test: succeeds (one open PR) for any org
+    /// EXCEPT `badorg`, for which it exits non-zero to simulate a token/network
+    /// blip. Any non-`api graphql` (i.e. mutating) invocation is also an error.
+    const GH_PREFLIGHT_SHIM: &str = r#"#!/bin/sh
+if [ "$1" != "api" ] || [ "$2" != "graphql" ]; then
+  echo "gh preflight shim: unexpected mutating invocation: $@" >&2
+  exit 1
+fi
+for arg in "$@"; do
+  case "$arg" in
+    *org:badorg*)
+      echo "gh preflight shim: simulated discovery failure for badorg" >&2
+      exit 1 ;;
+  esac
+done
+cat <<'JSON'
+{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{
+  "number": 7,
+  "title": "GX-preflight: change",
+  "headRefName": "GX-preflight",
+  "author": {"login": "tester"},
+  "state": "OPEN",
+  "url": "https://github.com/goodorg/repo/pull/7",
+  "repository": {"nameWithOwner": "goodorg/repo"},
+  "mergedAt": null,
+  "mergeCommit": null,
+  "baseRefName": "main"
+}]}}}
+JSON
+exit 0
+"#;
+
+    fn install_shim(dir: &std::path::Path, script: &str) {
+        let gh_path = dir.join("gh");
+        std::fs::write(&gh_path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&gh_path, perms).unwrap();
+    }
+
+    /// Preflight-complete-or-abort bite (Phase 3): if ANY targeted org's PR
+    /// discovery errors, `discover_all_prs` aborts the WHOLE batch with a loud
+    /// `Err` naming the failed org - it never warn-and-continues over a partial
+    /// set. The caller binds this with `?` before the mutation section, so an
+    /// aborted discovery is a structural guarantee of ZERO GitHub writes.
+    /// Reverting to warn-and-continue would make this return `Ok` and the test
+    /// fails.
+    #[test]
+    fn test_discover_all_prs_aborts_whole_batch_when_one_org_errors() {
+        let guard = crate::test_utils::env_lock();
+        let prior_path = std::env::var("PATH").ok();
+        let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
+
+        let shim_dir = TempDir::new().unwrap();
+        install_shim(shim_dir.path(), GH_PREFLIGHT_SHIM);
+        let new_path = format!(
+            "{}:{}",
+            shim_dir.path().display(),
+            prior_path.clone().unwrap_or_default()
+        );
+        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+
+        let contexts = vec![
+            UserOrgContext {
+                user_or_org: "goodorg".to_string(),
+                detection_method: crate::user_org::DetectionMethod::Explicit,
+            },
+            UserOrgContext {
+                user_or_org: "badorg".to_string(),
+                detection_method: crate::user_org::DetectionMethod::Explicit,
+            },
+        ];
+        let config = Config::default();
+        let err = discover_all_prs(&contexts, "GX-preflight", &config)
+            .expect_err("a failing org must abort the whole batch, not warn-and-continue");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("badorg"),
+            "abort error must name the failed org: {msg}"
+        );
+
+        match prior_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prior_tok {
+            Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+            None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+        }
+        drop(guard);
+    }
+
+    /// A gh spy shim for the command-level approve test: returns ONE open PR on
+    /// the discovery (`api graphql`) path; ANY other (mutating) invocation
+    /// appends to `$GX_TEST_MUTATION_LOG` so the test can assert ZERO mutations.
+    const GH_APPROVE_SPY_SHIM: &str = r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+cat <<'JSON'
+{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{
+  "number": 11,
+  "title": "GX-approve-shim: change",
+  "headRefName": "GX-approve-shim",
+  "author": {"login": "tester"},
+  "state": "OPEN",
+  "url": "https://github.com/gx-testing/repo/pull/11",
+  "repository": {"nameWithOwner": "gx-testing/repo"},
+  "mergedAt": null,
+  "mergeCommit": null,
+  "baseRefName": "main"
+}]}}}
+JSON
+  exit 0
+fi
+echo "MUTATION: $@" >> "$GX_TEST_MUTATION_LOG"
+exit 0
+"#;
+
+    /// Command-level bite (Phase 3): the confirm gate is actually WIRED into
+    /// `review approve`. With the open-PR count at/above the threshold and
+    /// non-interactive stdin (as under `cargo test`) without `--yes`, the
+    /// command FAILS CLOSED (loud error naming `--yes`) and performs ZERO
+    /// GitHub mutations - the spy shim records any non-discovery invocation and
+    /// the test asserts none happened. Remove the gate and this test fails
+    /// (either the command returns `Ok`, or a merge mutation is logged).
+    #[test]
+    fn test_review_approve_fails_closed_and_makes_zero_mutations() {
+        use clap::Parser;
+        let guard = crate::test_utils::env_lock();
+        let prior_path = std::env::var("PATH").ok();
+        let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
+        let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let shim_dir = TempDir::new().unwrap();
+        install_shim(shim_dir.path(), GH_APPROVE_SPY_SHIM);
+        let new_path = format!(
+            "{}:{}",
+            shim_dir.path().display(),
+            prior_path.clone().unwrap_or_default()
+        );
+        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+        let mut_log = shim_dir.path().join("mutations.log");
+        unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", &mut_log) };
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        let work = TempDir::new().unwrap();
+        let cwd = work.path().to_string_lossy().to_string();
+        let cli = Cli::parse_from(["gx", "--cwd", &cwd, "review", "approve", "GX-approve-shim"]);
+        // Threshold 1 so a single open PR trips the gate deterministically.
+        let config = Config {
+            review: Some(crate::config::ReviewConfig {
+                confirm_threshold: Some(1),
+            }),
+            ..Config::default()
+        };
+
+        let result = process_review_approve_command(
+            &cli,
+            &config,
+            Some("gx-testing"),
+            &[],
+            "GX-approve-shim",
+            false,
+            false,
+            false, // yes = false -> must fail closed
+        );
+
+        assert!(
+            result.is_err(),
+            "review approve must fail closed on non-interactive stdin without --yes"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("--yes"), "error must name --yes: {msg}");
+        assert!(
+            !mut_log.exists(),
+            "ZERO mutations: no merge/close gh call may have run, but the spy logged one"
+        );
+
+        match prior_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prior_tok {
+            Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+            None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+        }
+        match prior_mut {
+            Some(v) => unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", v) },
+            None => unsafe { std::env::remove_var("GX_TEST_MUTATION_LOG") },
+        }
         match prior_data_home {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_DATA_HOME") },

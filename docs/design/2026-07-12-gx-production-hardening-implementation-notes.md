@@ -243,3 +243,93 @@ execution of `docs/design/2026-07-12-gx-production-hardening.md`. Append-only.
   integration test was added, since the isolation seam is pre-existing and
   untouched. Flag if the parent wants an end-to-end rigged-hang integration test
   anyway.
+
+## Phase 3: Confirm gate + threshold on finish-line ops
+
+### Design decisions
+- **`DestructiveOp` + `confirm_destructive` live in the existing `confirm.rs`
+  module** — `confirm.rs` — that module is already "the confirmation seam";
+  putting the generalized fail-closed TTY gate beside the `Confirmation`/`Token`
+  core seam keeps every confirmation concept in one file, and it is the only
+  seam reachable from BOTH `review.rs` and `cleanup.rs`. Harvested the exact
+  fail-closed shape of `confirm_purge` (`is_terminal()` check -> loud `Err`
+  naming `--yes`; y/yes parsing) and generalized the wording per op via
+  `DestructiveOp::action_phrase`.
+- **`confirm_destructive` always engages when called; the caller gates on the
+  threshold** — `review.rs`/`cleanup.rs` — the pinned signature
+  `confirm_destructive(op, count, assume_yes)` has no threshold param, so each
+  caller computes `count >= threshold` and only then calls the gate (mirroring
+  how `create` computes `needs_prompt` and short-circuits below it). The
+  per-PR/per-branch blast-radius listing is printed by the caller BEFORE the
+  call (as `review approve`/`delete` already list every PR + repo slug), so the
+  gate owns only the final consent line — exactly `confirm_purge`'s division.
+- **Preflight-complete-or-abort is a single `discover_all_prs` helper** —
+  `review.rs::discover_all_prs` — used by BOTH `review approve` and `delete`,
+  replacing the two warn-and-continue loops (`review.rs:305-315`/`:430-441`).
+  It resolves discovery for EVERY org and fails the whole batch with a loud
+  `Err` naming the failed org on any error. The command binds it with `?`
+  BEFORE the parallel mutation section, so an aborted discovery is a structural
+  guarantee of zero GitHub writes.
+- **Cleanup blast radius = eligible-to-`-D` branches, not raw repo count** —
+  `cleanup.rs::eligible_cleanup_count` — the count shown/gated is the branches a
+  pass would actually delete (merged-only without `--force`, merged+closed with
+  it), not `get_repos_needing_cleanup().len()`, so the prompt does not overstate
+  the destruction. `cleanup --all` sums this across all cleanable changes; the
+  gate runs BEFORE any `ChangeLock` acquisition (so it never touches the flaky
+  flock family).
+- **Config: `ReviewConfig`/`CleanupConfig`, each `{ confirm_threshold }`** —
+  `config.rs` — mirrors `CreateConfig` exactly (`#[serde(default,
+  deny_unknown_fields)]`, kebab `confirm-threshold`, `Default` = the reused
+  `DEFAULT_CONFIRM_THRESHOLD = 5`), with accessors `review_confirm_threshold()`
+  / `cleanup_confirm_threshold()`. `review`/`cleanup` added to `Config` +
+  `Config::default()`. `gx.yml` gains commented `review:`/`cleanup:` blocks.
+- **`--yes` (`-y`) added to `review approve`, `review delete`, `cleanup`** —
+  `cli.rs` — same clap shape (`short='y', long="yes"`) as the existing
+  `review purge`/`rollback execute` flags; threaded through `main.rs` into each
+  command.
+
+### Deviations
+- **Threshold comparison is `count >= threshold`, where `create` uses
+  `count > threshold`** — `review.rs`/`cleanup.rs` — the design doc and this
+  phase's brief both pin "prompts only when count >= threshold" (stated twice),
+  so I used `>=`. `create`'s `confirm_blast_radius` uses strict `>`; the 1-off
+  difference means these irreversible finish-line ops prompt one item earlier
+  than `create`, which is the fail-safe direction for a merge/delete. Same
+  effect (a count-vs-threshold gate), the doc's exact boundary.
+- **New tests added to the EXISTING inline `#[cfg(test)] mod tests` blocks in
+  `review.rs` and `cleanup.rs`, not extracted `foo/tests.rs` files** — those two
+  files already carry inline test modules; adding a second external `mod tests;`
+  would collide, and `rust.md` explicitly says the inline->external migration is
+  a tree-wide mechanical pass, "never mixed into a feature." So I matched each
+  file's current structure. The genuinely new module (`confirm.rs`) already uses
+  the external `confirm/tests.rs` form, and the new `confirm_destructive` tests
+  went there per the rule. Config tests went in the existing external
+  `config/tests.rs`.
+- **`confirm_destructive`'s pinned signature is honored; the "org breakdown" in
+  the prompt is the caller's already-printed PR list** — the doc's Phase 3
+  bullet says the prompt shows "op + count + org breakdown", but the pinned API
+  (`confirm_destructive(op, count, assume_yes)`) carries no org data. Same
+  division as `confirm_purge`/`confirm_blast_radius`: the caller prints the
+  breakdown, the gate prints the final consent line. Correct seam, same effect.
+
+### Tradeoffs
+- **Bite tests at the function/command seam with a PATH-shimmed `gh`, not live
+  GitHub** — followed the repo's 2026-06-11 gh-shim precedent
+  (`test_review_sync_marks_merged_pr_via_gh_shim`). The confirm gate is
+  bite-tested directly for all three ops in `confirm/tests.rs` (fail-closed
+  naming `--yes`, `--yes` proceeds); the preflight is bite-tested via
+  `discover_all_prs` with a shim that errors one org; and each of `review
+  approve` + `cleanup --all` has a COMMAND-level test with a spy shim asserting
+  ZERO mutations (the merge never runs / the branch survives). `review delete`
+  shares the identical gate+preflight code path as `approve`, so its command
+  seam is covered transitively rather than with a third near-duplicate shim
+  test.
+- **`confirm_destructive` fail-closed relies on `cargo test` stdin being
+  non-interactive** — no env manipulation needed for the pure gate tests
+  (deterministic, lock-free); the command-level tests hold `env_lock()` because
+  they touch `PATH`/`XDG_DATA_HOME`/token env.
+
+### Open questions
+- None. All three ops fail closed naming `--yes` on non-interactive stdin (bite
+  tests green), `--yes` proceeds, and the preflight aborts the whole batch on a
+  single org's discovery error with zero mutations proven via spy shims.

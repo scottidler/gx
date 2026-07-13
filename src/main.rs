@@ -216,6 +216,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 change_id,
                 admin,
                 auto,
+                yes,
             } => review::process_review_approve_command(
                 cli,
                 config,
@@ -224,13 +225,15 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 change_id,
                 *admin,
                 *auto,
+                *yes,
             ),
-            cli::ReviewAction::Delete { change_id } => review::process_review_delete_command(
+            cli::ReviewAction::Delete { change_id, yes } => review::process_review_delete_command(
                 cli,
                 config,
                 org.as_deref(),
                 patterns,
                 change_id,
+                *yes,
             ),
             cli::ReviewAction::Sync { change_id } => review::process_review_sync_command(
                 cli,
@@ -255,6 +258,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             list,
             include_remote,
             force,
+            yes,
         } => cleanup::process_cleanup_command(
             cli,
             config,
@@ -263,6 +267,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             *list,
             *include_remote,
             *force,
+            *yes,
         ),
         Commands::Doctor { purge } => doctor::run_doctor(*purge),
     }
