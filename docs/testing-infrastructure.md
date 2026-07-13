@@ -51,10 +51,19 @@ All repositories in comprehensive workspace use `gx-testing/*` remote URLs.
 
 ## GitHub Integration Testing
 
+gx resolves its GitHub token per-org from environment variables, not a token file: built-in
+`tatari-tv` -> `$GITHUB_PAT_WORK`, everything else -> `$GITHUB_PAT_HOME` (override the
+whole run with `GH_PERSONA=work|home`, or override a specific org via the optional
+`github.token-env` config block naming an env var). The per-org token-FILE scheme this doc
+used to describe is retired. See `docs/clone-feature.md#authentication-requirements` for
+the full precedence.
+
 ### Setup
-1. Use existing Personal Access Token from `~/.config/github/tokens/scottidler`
-2. Authenticate gh CLI: `gh auth login --with-token < ~/.config/github/tokens/scottidler`
-3. GitHub integration tests will automatically run when token file is present
+1. Set `$GITHUB_PAT_HOME` in the shell (decrypted via `manifest age`, per
+   `~/repos/.claude/rules/secrets.md`). The `gx-testing` org classifies as home.
+2. Authenticate gh CLI, if needed for manual testing: `gh auth login --with-token <<< "$GITHUB_PAT_HOME"`
+3. GitHub integration tests are gated on `should_run_github_tests()`, which now checks
+   that `$GITHUB_PAT_HOME` is set and non-empty - no token file is read.
 
 ### Required Scopes
 - `repo` - Full repository access
@@ -109,18 +118,24 @@ cargo test --test status_tests
 # Run with output visible
 cargo test -- --nocapture
 
-# Run GitHub integration tests (requires ~/.config/github/tokens/scottidler)
+# Run GitHub integration tests (requires $GITHUB_PAT_HOME set, no token file)
 cargo test github_integration_tests
 
 # Run comprehensive multi-repo tests
 cargo test --test comprehensive_tests
 
 # Authenticate gh CLI for testing
-gh auth login --with-token < ~/.config/github/tokens/scottidler
+gh auth login --with-token <<< "$GITHUB_PAT_HOME"
 ```
 
 ## Environment Variables
 
-- `HOME` - Used to locate token file at `~/.config/github/tokens/scottidler`
+- `GITHUB_PAT_HOME` - GitHub token for the home persona; required to run GitHub
+  integration tests (`should_run_github_tests()` gates on it being set and non-empty).
+  `gx-testing` and other non-`tatari-tv` orgs classify as home.
+- `GITHUB_PAT_WORK` - GitHub token for the work (`tatari-tv`) persona; not needed for
+  the `gx-testing` scenarios above, but resolved the same way for any `tatari-tv/*` repo.
+- `GH_PERSONA` - `work`|`home`, forces the persona for the whole test run, overriding the
+  per-org classification.
 - `RUST_BACKTRACE=1` - Show detailed error traces
 - `RUST_LOG=debug` - Enable debug logging during tests

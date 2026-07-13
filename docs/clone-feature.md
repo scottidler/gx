@@ -102,17 +102,10 @@ Create new module `src/github.rs`:
 ```rust
 /// Get all non-archived repositories for a user/org
 pub fn get_user_repos(user_or_org: &str, include_archived: bool) -> Result<Vec<String>> {
-    // Read token from ~/.config/github/tokens/{user_or_org} (plain text)
-    let token_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("github")
-        .join("tokens")
-        .join(user_or_org);
-
-    let token = fs::read_to_string(&token_path)
-        .context(format!("Failed to read token from {}", token_path.display()))?
-        .trim()
-        .to_string();
+    // Resolve the token from env vars, persona-aware: `tatari-tv` -> $GITHUB_PAT_WORK,
+    // everything else -> $GITHUB_PAT_HOME (or `GH_PERSONA`/`github.token-env` overrides).
+    // See "Authentication Requirements" below; no token file involved.
+    let token = read_token(user_or_org, config)?;
 
     // Query GitHub API
     let archived_filter = if include_archived { "" } else { " | select(.archived == false)" };
@@ -325,49 +318,60 @@ pub fn display_clone_results(results: Vec<CloneResult>, detailed: bool) {
 
 The clone feature requires GitHub Personal Access Token (PAT) authentication to access the GitHub API.
 
-### Token File Setup
+**The per-org token-FILE scheme is retired.** gx no longer reads a token file at all; gx now
+resolves the token per-org from environment variables, matching the persona system every
+other Tatari tool already uses (`GH_PERSONA` + the `gh()` wrapper). There is no token file
+to create, symlink, or maintain.
 
-1. **Create token directory:**
-   ```bash
-   mkdir -p ~/.config/github/tokens
-   ```
+### How token resolution works
 
-2. **Generate GitHub PAT:**
-   - Go to GitHub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)
+For a repo slug `{org}/{repo}`, gx picks an env var to read, highest precedence wins:
+
+1. **`GH_PERSONA=work|home`** - if set, forces the persona for the whole run:
+   `work` -> `$GITHUB_PAT_WORK`, `home` -> `$GITHUB_PAT_HOME`. Any other non-empty value
+   is a loud error (never a silent fallback). This is the same override used by the
+   `gh()` shell wrapper and `gh-work`/`gh-home`.
+2. **`github.token-env.by-org.<org>`** in `gx.yml` - per-org override naming a different
+   env var (e.g. to point a third-party org at `GITHUB_PAT_SERVICE`).
+3. **Built in:** `org == tatari-tv` -> `$GITHUB_PAT_WORK`.
+4. **`github.token-env.default`** in `gx.yml` - override for the home floor (any org not
+   `tatari-tv` and not listed in `by-org`).
+5. **Built in:** everything else -> `$GITHUB_PAT_HOME`.
+
+A single `gx clone`/`gx status`/etc. run can therefore cross a mixed home/work fleet
+(`scottidler/*` alongside `tatari-tv/*`) correctly without re-running under a different
+shell persona.
+
+### Setting up the tokens
+
+1. **Generate a GitHub PAT** (once per persona, not per org):
+   - Go to GitHub.com -> Settings -> Developer settings -> Personal access tokens -> Tokens (classic)
    - Click "Generate new token (classic)"
-   - Give it a descriptive name (e.g., "gx-clone-token")
+   - Give it a descriptive name (e.g. "gx-work" or "gx-home")
    - Select required scopes:
      - **`public_repo`** - for public repositories only
      - **`repo`** - for both public and private repositories
    - Click "Generate token" and **copy the token**
 
-3. **Save token to file:**
-   ```bash
-   echo "your_token_here" > ~/.config/github/tokens/{user_or_org}
-   ```
+2. **Store it as an age-encrypted secret and export it as an env var at shell startup:**
+   `$GITHUB_PAT_WORK` for the `tatari-tv` persona, `$GITHUB_PAT_HOME` for everything else
+   (`scottidler/*` in practice). See `~/repos/.claude/rules/secrets.md` for the encrypt/decrypt
+   flow; gx just reads whichever var it resolves to. Never put a raw token in `gx.yml` or
+   any other committed file.
 
-   Replace `{user_or_org}` with the GitHub username or organization name you want to clone from.
+### Optional config override (`github.token-env`)
 
-### Token File Examples
+`gx.yml` may include a `github.token-env` block naming ALTERNATE env vars. Only env-var
+NAMES go in config, never secret values:
 
-```bash
-# For scottidler user/org
-echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/scottidler
-
-# For gx-testing org
-echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/gx-testing
-
-# For company org
-echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.config/github/tokens/my-company
-```
-
-### Using Symlinks for Shared Tokens
-
-If you want to use the same token for multiple organizations:
-
-```bash
-# Create symlink to reuse existing token
-ln -s scottidler ~/.config/github/tokens/gx-testing
+```yaml
+github:
+  # Token env-var resolution. Built-in: tatari-tv -> $GITHUB_PAT_WORK, else -> $GITHUB_PAT_HOME.
+  # GH_PERSONA=work|home overrides per-run. Uncomment to add overrides (names, never secrets):
+  # token-env:
+  #   default: GITHUB_PAT_HOME      # override the home floor for unlisted orgs
+  #   by-org:
+  #     some-org: GITHUB_PAT_SERVICE
 ```
 
 ### Token Permissions
@@ -378,18 +382,22 @@ The token needs the following GitHub API access:
 
 ### Authentication Error Handling
 
-If authentication fails, you'll see an error like:
+If the resolved env var is unset or empty, gx fails loudly and names both the variable
+and the org that selected it, e.g.:
 ```
-Error: Failed to read token from ~/.config/github/tokens/gx-testing
+Error: GitHub token env var GITHUB_PAT_HOME is unset or empty (selected for org gx-testing); decrypt it with `manifest age` or set the correct persona
 ```
 
-This means you need to create the token file for that specific user/organization.
+This means the persona env var for that org's classification isn't present in the
+current shell - decrypt it (`manifest age decrypt ...`) or set `GH_PERSONA`/`github.token-env`
+to point at the right one. gx never falls back to ambient `gh auth` on a mutating call;
+a missing or wrong-identity token is always a loud error, never a silent 404.
 
 ## Key Behaviors
 
 - **Working Directory**: Operates in current directory unless `--cwd` specified
 - **Clone Location**: `{working_dir}/{user_or_org}/{repo_name}/`
-- **Authentication**: Plain text tokens from `~/.config/github/tokens/{user_or_org}`
+- **Authentication**: Persona-aware env vars (`$GITHUB_PAT_WORK`/`$GITHUB_PAT_HOME`), resolved per-org - no token file
 - **Default Branch**: Always query GitHub API, never assume
 - **Uncommitted Changes**: Use same stashing logic as existing checkout command
 - **Parallelism**: Use existing rayon patterns with nproc default
@@ -403,13 +411,15 @@ Use the `gx-testing` GitHub organization for comprehensive testing of the clone 
 
 ### Setup Requirements
 
-1. **Authentication**: Create token file at `~/.config/github/tokens/gx-testing`
+1. **Authentication**: `gx-testing` is not `tatari-tv`, so it classifies as home and
+   resolves to `$GITHUB_PAT_HOME`. Have that env var set in the shell (decrypted via
+   `manifest age`, per `~/repos/.claude/rules/secrets.md`) - no token file needed.
    ```bash
-   # Option 1: Create new token file
-   echo "your_github_token" > ~/.config/github/tokens/gx-testing
+   # Confirm the persona var is present before running tests
+   test -n "$GITHUB_PAT_HOME" && echo "GITHUB_PAT_HOME is set"
 
-   # Option 2: Use symlink to existing token
-   ln -s scottidler ~/.config/github/tokens/gx-testing
+   # Or force home persona explicitly for the run
+   GH_PERSONA=home gx --cwd /tmp/test-workspace clone gx-testing
    ```
 
 2. **Test Workspace**: Use temporary directory for testing to avoid conflicts
@@ -497,12 +507,14 @@ Use the `gx-testing` GitHub organization for comprehensive testing of the clone 
 
 8. **Authentication Failure Test**
    ```bash
-   # Test with invalid token
-   echo "invalid_token" > ~/.config/github/tokens/gx-testing
-   gx --cwd /tmp/test-workspace clone gx-testing
+   # Test with the persona env var unset
+   env -u GITHUB_PAT_HOME gx --cwd /tmp/test-workspace clone gx-testing
+
+   # Or with an invalid token value
+   GITHUB_PAT_HOME=invalid_token gx --cwd /tmp/test-workspace clone gx-testing
    ```
    - Verify authentication error is handled gracefully
-   - Verify appropriate error message and emoji
+   - Verify appropriate error message (naming the env var and org) and emoji
 
 #### Working Directory Tests
 
