@@ -95,11 +95,12 @@ gx status frontend api       # Status for matching repos only
 
 **Usage**:
 ```
-gx create --files <pattern> [--commit <msg>] [--pr[=draft]] [--yes] [--report <path>] <action>
+gx create --files <pattern> [--commit <msg>] [--pr [--draft]] [--yes] [--report <path>] <action>
 ```
 
 **Behavior**:
 - Discovers matching files per repo, applies the requested action (`add`/`delete`/`sub`/`regex`), diffs, and (with `--commit`) commits + optionally opens a PR
+- `--pr` is a boolean flag (no value) that opens a PR per repo after committing; `--pr --draft` opens draft PRs instead of normal ones. `--draft` REQUIRES `--pr` -- a bare `--draft` with no `--pr` is a clap error, not a silent no-op. (The old `--pr=normal`/`--pr=draft`/`--pr <value>` form is gone -- it let clap swallow the next token as the flag's value, which misparsed `--pr regex ...` as an unrecognized subcommand.)
 - **Exits non-zero when any repo fails** (matches `status`/`checkout`/`clone`): the exit code is the failed-repo count, so a script can gate on it directly
 - `--yes` skips the confirm prompt above `create.confirm-threshold` (default 5); required on non-interactive stdin or the run fails closed naming `--yes`
 - `--report <path>` writes a JSON array of `{repo, phase, error}` for every FAILED repo to that file; on-screen output is unchanged (human summary stays human, the file is the scriptable surface). An all-success run writes `[]`
@@ -109,7 +110,32 @@ gx create --files <pattern> [--commit <msg>] [--pr[=draft]] [--yes] [--report <p
 ```bash
 gx create --files '*.md' --commit 'Update docs' sub 'old-text' 'new-text'
 gx create --files '*.json' --commit 'Bump version' --pr regex '"version": "[^"]+"' '"version": "1.2.3"'
+gx create --files '*.md' --commit 'Draft update' --pr --draft sub 'old-text' 'new-text'
 gx create --files '*.txt' --commit 'Remove old files' --yes --report /tmp/failures.json delete
+```
+
+---
+
+## apply
+
+**Purpose**: Apply a persisted `llm` proposal (from `gx create ... llm "<prompt>" --propose`), re-presenting the diffs and running the same confirm gate as the one-shot `create ... llm` flow
+
+**Usage**:
+```
+gx apply <change-id> [--pr [--draft]] [--yes]
+```
+
+**Behavior**:
+- Re-presents the diffs recorded for `<change-id>`'s persisted proposal, then applies them across the targeted repos
+- `--pr` is a boolean flag (no value) that opens a PR per repo after committing; `--pr --draft` opens draft PRs instead of normal ones. `--draft` REQUIRES `--pr` -- a bare `--draft` with no `--pr` is a clap error, not a silent no-op
+- `--yes` skips the confirmation prompt before applying; required on non-interactive stdin or the run fails closed naming `--yes`
+
+**Examples**:
+```bash
+gx apply GX-2026-07-12              # re-present diffs, confirm, then apply
+gx apply GX-2026-07-12 --yes        # apply without the confirmation prompt
+gx apply GX-2026-07-12 --pr         # apply and open a PR per repo
+gx apply GX-2026-07-12 --pr --draft # apply and open a DRAFT PR per repo
 ```
 
 ---

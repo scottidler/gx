@@ -638,6 +638,113 @@ mod tests {
         );
     }
 
+    /// The POSITIVE squash-merge cleanup bite test (gx-shakedown-fixes doc,
+    /// Phase 3): this is the test that would have caught Bug 1 -
+    /// production-hardening Phase 4 shipped only the negative case above. `gx
+    /// review approve` merges with `gh pr merge --squash`, which writes ONE
+    /// NEW commit onto the base (same diff, different SHA) - the branch's own
+    /// commit never becomes a literal ancestor of base. Against the OLD
+    /// `--is-ancestor` commit-identity guard this scenario FAILS: the squash
+    /// commit is never an ancestor, so the branch is skipped and the
+    /// assertions below fail (`repos_cleaned == 0`, branch still present).
+    /// The `git cherry` patch-identity guard (Phase 2) recognizes the
+    /// squashed commit's patch as already present in base and cleans it
+    /// WITHOUT `--force`.
+    #[test]
+    fn test_cleanup_squash_merged_branch_is_cleaned_without_force() {
+        // An upstream repo with a base branch, cloned locally.
+        let parent = TempDir::new().unwrap();
+        let upstream = parent.path().join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        run_git_command(&["init", "--quiet"], &upstream);
+        run_git_command(&["config", "user.email", "t@e.com"], &upstream);
+        run_git_command(&["config", "user.name", "T"], &upstream);
+        run_git_command(&["config", "commit.gpgsign", "false"], &upstream);
+        std::fs::write(upstream.join("README.md"), "# base").unwrap();
+        run_git_command(&["add", "-A"], &upstream);
+        run_git_command(&["commit", "--quiet", "-m", "base commit"], &upstream);
+
+        // Clone so origin/HEAD (the resolved base) and an `origin` remote exist.
+        let work = parent.path().join("work");
+        run_git_command(
+            &[
+                "clone",
+                "--quiet",
+                &upstream.to_string_lossy(),
+                &work.to_string_lossy(),
+            ],
+            parent.path(),
+        );
+        run_git_command(&["config", "user.email", "t@e.com"], &work);
+        run_git_command(&["config", "user.name", "T"], &work);
+        run_git_command(&["config", "commit.gpgsign", "false"], &work);
+        let base_branch = crate::test_utils::get_current_branch(&work);
+
+        // gx's own create flow: a feature branch with exactly ONE commit.
+        run_git_command(&["checkout", "--quiet", "-b", "GX-squash"], &work);
+        std::fs::write(work.join("feature.txt"), "feature change").unwrap();
+        run_git_command(&["add", "-A"], &work);
+        run_git_command(&["commit", "--quiet", "-m", "feature commit"], &work);
+        assert!(crate::git::branch_exists_locally(&work, "GX-squash").unwrap());
+
+        // Push the branch to upstream, as `gx create` does, so upstream has a
+        // ref it can squash-merge (the PR).
+        let push = run_git_command(&["push", "--quiet", "origin", "GX-squash"], &work);
+        assert!(
+            push.status.success(),
+            "push of GX-squash to upstream failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+
+        // Simulate `gh pr merge --squash`: upstream squash-merges the branch
+        // onto its default branch as ONE NEW commit (new SHA, same diff -
+        // the branch's own commit never enters base history by identity).
+        let squash = run_git_command(&["merge", "--quiet", "--squash", "GX-squash"], &upstream);
+        assert!(
+            squash.status.success(),
+            "git merge --squash failed: {}",
+            String::from_utf8_lossy(&squash.stderr)
+        );
+        let commit = run_git_command(
+            &["commit", "--quiet", "-m", "squash-merge feature commit"],
+            &upstream,
+        );
+        assert!(
+            commit.status.success(),
+            "commit of squashed change failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+
+        // Switch `work`'s HEAD back to the base branch, as a real campaign
+        // would after review approve merges the PR - `git branch -D` refuses
+        // to delete the branch a worktree currently has checked out, which is
+        // orthogonal to the guard under test.
+        run_git_command(&["checkout", "--quiet", &base_branch], &work);
+
+        // Recorded as PrMerged - the fast-path signal `gx review approve` sets.
+        let mut state = ChangeState::new("GX-squash".to_string(), None);
+        state.add_repository("org/repo".to_string(), "GX-squash".to_string());
+        {
+            let rs = state.repositories.get_mut("org/repo").unwrap();
+            rs.local_path = Some(work.to_string_lossy().to_string());
+            rs.status = RepoChangeStatus::PrMerged;
+        }
+
+        // force = false: the patch-identity guard must PROVE the squash merge
+        // and clean the branch WITHOUT --force. cleanup_change fetches origin
+        // inside `work` (picking up upstream's new squash commit) before
+        // proving via `git cherry`.
+        let result = cleanup_change(&mut state, false, false).unwrap();
+        assert_eq!(
+            result.repos_cleaned, 1,
+            "a squash-merged branch must be cleaned WITHOUT --force"
+        );
+        assert!(
+            !crate::git::branch_exists_locally(&work, "GX-squash").unwrap(),
+            "the squash-merged branch must be deleted"
+        );
+    }
+
     /// Command-level bite (Phase 3): the confirm gate is WIRED into `cleanup`.
     /// With the eligible-branch count at/above the threshold and non-interactive
     /// stdin (as under `cargo test`) without `--yes`, `cleanup --all` FAILS
