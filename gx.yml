@@ -1,7 +1,6 @@
 # gx.yml - Sample configuration file
 default-user-org: "scottidler"
 jobs: "nproc"
-token-path: "~/.config/github/tokens/{user_or_org}"  # {user_or_org} is replaced at runtime
 
 # Repository discovery settings
 repo-discovery:
@@ -41,6 +40,15 @@ output:
 logging:
   level: "info"
   file: "~/.local/share/gx/logs/gx.log"
+
+# GitHub-related settings (design doc 2026-07-12-persona-aware-github-auth.md)
+github:
+  # Token env-var resolution. Built-in: tatari-tv -> $GITHUB_PAT_WORK, else -> $GITHUB_PAT_HOME.
+  # GH_PERSONA=work|home overrides per-run. Uncomment to add overrides (names, never secrets):
+  # token-env:
+  #   default: GITHUB_PAT_HOME      # override the home floor for unlisted orgs
+  #   by-org:
+  #     some-org: GITHUB_PAT_SERVICE
 
 # `gx-mcp` MCP server: per-tool gating (design doc
 # 2026-07-12-llm-propose-apply-and-mcp-server.md). This block is optional; with

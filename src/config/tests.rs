@@ -171,3 +171,42 @@ fn test_mcp_unknown_field_fails_loudly() {
         "error should name the unknown mcp field, got: {message}"
     );
 }
+
+/// A specified `github.token-env` block round-trips through parse and
+/// `Config::token_env()` (design doc 2026-07-12-persona-aware-github-auth.md,
+/// Phase 1).
+#[test]
+fn test_token_env_block_round_trips() {
+    let yaml = "github:\n  token-env:\n    default: GITHUB_PAT_HOME\n    by-org:\n      some-org: GITHUB_PAT_SERVICE\n";
+    let config = serde_yaml::from_str::<Config>(yaml).unwrap();
+    let token_env = config.token_env();
+    assert_eq!(token_env.default_env.as_deref(), Some("GITHUB_PAT_HOME"));
+    assert_eq!(
+        token_env.by_org.get("some-org").map(String::as_str),
+        Some("GITHUB_PAT_SERVICE")
+    );
+}
+
+/// A bogus sub-key under `token-env` fails to parse loudly - the
+/// `deny_unknown_fields` bite on `TokenEnvConfig`.
+#[test]
+fn test_token_env_unknown_field_fails_loudly() {
+    let yaml = "github:\n  token-env:\n    defualt: GITHUB_PAT_HOME\n"; // typo: default
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("defualt"),
+        "error should name the unknown token-env field, got: {message}"
+    );
+}
+
+/// With no `github.token-env` block at all, `Config::token_env()` yields the
+/// empty default - no `by-org` entries and no `default` override. The
+/// built-in classification floor lives in the Phase 2 resolver, not here.
+#[test]
+fn test_token_env_absent_yields_empty_default() {
+    let config = Config::default();
+    let token_env = config.token_env();
+    assert!(token_env.by_org.is_empty());
+    assert_eq!(token_env.default_env, None);
+}

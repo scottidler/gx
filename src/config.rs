@@ -105,18 +105,43 @@ pub struct GithubConfig {
     /// Template for PR bodies. `{commit_message}` is substituted.
     #[serde(rename = "pr-body-template")]
     pub pr_body_template: Option<String>,
+    /// Per-org overrides for which env var supplies the `gh`/GitHub token
+    /// (design doc `2026-07-12-persona-aware-github-auth.md`). Absent block =
+    /// the built-in classification (`tatari-tv` -> work, else -> home) is the
+    /// whole story; see `Config::token_env()`.
+    #[serde(rename = "token-env")]
+    pub token_env: Option<TokenEnvConfig>,
 }
 
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
             pr_body_template: Some(DEFAULT_PR_BODY_TEMPLATE.to_string()),
+            token_env: None,
         }
     }
 }
 
 /// Default PR body: just the commit message.
 pub const DEFAULT_PR_BODY_TEMPLATE: &str = "{commit_message}";
+
+/// Overrides ONLY for the persona-aware GitHub token resolution (design doc
+/// `2026-07-12-persona-aware-github-auth.md`). Empty by default -- the
+/// built-in classification floor (`tatari-tv` -> work, else -> home) lives in
+/// the Phase 2 resolver, NOT here, so a partial block (e.g. only `by-org`)
+/// can never silently drop the built-in `tatari-tv` -> work rule via serde's
+/// no-deep-merge behavior (see the design doc's "serde footgun" note).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct TokenEnvConfig {
+    /// Override for the home floor (orgs that are not `tatari-tv` and not
+    /// listed in `by_org`). `default` is a Rust keyword, hence the rename.
+    #[serde(rename = "default")]
+    pub default_env: Option<String>,
+    /// org -> env-var NAME overrides. `BTreeMap` for deterministic iteration
+    /// and a keyed-map YAML shape.
+    pub by_org: BTreeMap<String, String>,
+}
 
 /// Configuration for the `create` command.
 #[derive(Debug, Deserialize, Serialize)]
@@ -334,6 +359,17 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_PR_BODY_TEMPLATE.to_string())
     }
 
+    /// Effective token-env overrides: the configured block, or the empty
+    /// default when `github.token-env` is absent. The built-in classification
+    /// floor (`tatari-tv` -> work, else -> home) is NOT encoded here; it lives
+    /// in the Phase 2 resolver that consumes this accessor.
+    pub fn token_env(&self) -> TokenEnvConfig {
+        self.github
+            .as_ref()
+            .and_then(|g| g.token_env.clone())
+            .unwrap_or_default()
+    }
+
     /// Load configuration with fallback chain
     pub fn load(config_path: Option<&PathBuf>) -> Result<Self> {
         debug!("Config::load: config_path={config_path:?}");
@@ -374,6 +410,12 @@ impl Config {
         let config: Self = serde_yaml::from_str(&content).context("Failed to parse config file")?;
 
         log::info!("Loaded config from: {}", path.as_ref().display());
+        let token_env = config.token_env();
+        debug!(
+            "Config::load_from_file: token-env default={:?} by-org entries={}",
+            token_env.default_env,
+            token_env.by_org.len()
+        );
         Ok(config)
     }
 }
