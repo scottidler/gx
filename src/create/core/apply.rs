@@ -49,7 +49,8 @@ pub struct ApplyReport {
 pub fn execute_apply(
     change_id: &str,
     commit_message: Option<&str>,
-    pr: Option<&crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     config: &Config,
     parallel_jobs: usize,
     confirmation: Confirmation,
@@ -150,6 +151,7 @@ pub fn execute_apply(
         &change,
         Some(&msg),
         pr,
+        draft,
         config,
         parallel_jobs,
         confirmation,

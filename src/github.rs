@@ -174,7 +174,7 @@ pub fn create_pr(
     branch_name: &str,
     commit_message: &str,
     base_branch: &str,
-    pr: &crate::cli::PR,
+    draft: bool,
     config: &Config,
 ) -> Result<CreatePrResult> {
     debug!("create_pr: repo={repo_slug} branch={branch_name} base={base_branch}");
@@ -199,7 +199,7 @@ pub fn create_pr(
         base_branch,
     ];
 
-    if matches!(pr, crate::cli::PR::Draft) {
+    if draft {
         args.push("--draft");
     }
 

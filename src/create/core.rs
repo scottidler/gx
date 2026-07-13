@@ -139,7 +139,8 @@ pub fn execute_create(
     files: &[String],
     change: &Change,
     commit_message: Option<&str>,
-    pr: Option<&crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     config: &Config,
     parallel_jobs: usize,
     confirmation: Confirmation,
@@ -213,6 +214,7 @@ pub fn execute_create(
                     change,
                     commit_message,
                     pr,
+                    draft,
                     config,
                     change_state.as_ref(),
                     state_manager.as_ref(),
@@ -233,11 +235,7 @@ pub fn execute_create(
 }
 
 /// Update change state based on create result
-fn update_change_state(
-    state: &mut ChangeState,
-    result: &CreateResult,
-    pr: Option<&crate::cli::PR>,
-) {
+fn update_change_state(state: &mut ChangeState, result: &CreateResult, draft: bool) {
     // Only track if the operation actually did something
     match result.action {
         CreateAction::Committed | CreateAction::PrCreated => {
@@ -254,8 +252,7 @@ fn update_change_state(
             // If PR was created, update PR info using the new set_pr_info method
             if matches!(result.action, CreateAction::PrCreated) {
                 if let (Some(pr_number), Some(pr_url)) = (result.pr_number, result.pr_url.clone()) {
-                    let is_draft = matches!(pr, Some(crate::cli::PR::Draft));
-                    state.set_pr_info(&result.repo.slug, pr_number, pr_url, is_draft);
+                    state.set_pr_info(&result.repo.slug, pr_number, pr_url, draft);
                 }
             }
         }
@@ -307,7 +304,8 @@ fn process_single_repo(
     file_patterns: &[String],
     change: &Change,
     commit_message: Option<&str>,
-    pr: Option<&crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     config: &Config,
     change_state: Option<&Mutex<ChangeState>>,
     state_manager: Option<&StateManager>,
@@ -706,15 +704,15 @@ fn process_single_repo(
                 diff: join_diff(&diff_parts),
                 error: Some(format!("Committed and pushed, but finalize failed: {e}")),
             };
-            record_final_state(change_state, state_manager, &result, pr);
+            record_final_state(change_state, state_manager, &result, draft);
             return result;
         }
     };
 
     // 8. Create the PR against the (already-restored) remote. A PR failure is
     //    surfaced on the result, not swallowed ([A4]; Phase 5 refines).
-    let (action, pr_number, pr_url, mut error) = match pr {
-        Some(pr) => match create_pull_request(repo, change_id, commit_message, pr, config) {
+    let (action, pr_number, pr_url, mut error) = if pr {
+        match create_pull_request(repo, change_id, commit_message, draft, config) {
             Ok(result) => (
                 CreateAction::PrCreated,
                 Some(result.number),
@@ -727,8 +725,9 @@ fn process_single_repo(
                 None,
                 Some(format!("PR creation failed: {e}")),
             ),
-        },
-        None => (CreateAction::Committed, None, None, None),
+        }
+    } else {
+        (CreateAction::Committed, None, None, None)
     };
 
     // A stash-restore conflict is surfaced (design Q2): committed, but the user's
@@ -756,7 +755,7 @@ fn process_single_repo(
         diff: join_diff(&diff_parts),
         error,
     };
-    record_final_state(change_state, state_manager, &result, pr);
+    record_final_state(change_state, state_manager, &result, draft);
     result
 }
 
@@ -831,7 +830,7 @@ fn record_final_state(
     change_state: Option<&Mutex<ChangeState>>,
     state_manager: Option<&StateManager>,
     result: &CreateResult,
-    pr: Option<&crate::cli::PR>,
+    draft: bool,
 ) {
     debug!(
         "record_final_state: repo={} action={:?}",
@@ -847,7 +846,7 @@ fn record_final_state(
         );
         return;
     };
-    update_change_state(&mut state, result, pr);
+    update_change_state(&mut state, result, draft);
     if let Some(repo_state) = state.repositories.get_mut(&result.repo.slug) {
         repo_state.base_sha = result.base_sha.clone();
     }
@@ -1340,12 +1339,12 @@ fn create_pull_request(
     repo: &Repo,
     change_id: &str,
     commit_message: &str,
-    pr: &crate::cli::PR,
+    draft: bool,
     config: &Config,
 ) -> Result<github::CreatePrResult> {
     let repo_slug = &repo.slug;
     let base = resolve_base_branch(repo, config);
-    let result = github::create_pr(repo_slug, change_id, commit_message, &base, pr, config)
+    let result = github::create_pr(repo_slug, change_id, commit_message, &base, draft, config)
         .with_context(|| format!("Failed to create PR for {repo_slug}"))?;
     info!(
         "Created PR #{} for repository: {} - {}",

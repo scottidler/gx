@@ -111,7 +111,8 @@ fn test_apply_happy_path_commits_the_proposed_blob() {
         let report = execute_apply(
             change_id,
             Some("apply readme"),
-            None,
+            false,
+            false,
             &config,
             1,
             Confirmation::AlreadyConfirmed,
@@ -178,7 +179,8 @@ fn test_apply_refuses_on_base_sha_drift_and_touches_nothing() {
         let report = execute_apply(
             change_id,
             Some("apply"),
-            None,
+            false,
+            false,
             &config,
             1,
             Confirmation::AlreadyConfirmed,
@@ -260,7 +262,8 @@ fn test_apply_refuses_tampered_blob_and_writes_nothing() {
         let report = execute_apply(
             change_id,
             Some("apply"),
-            None,
+            false,
+            false,
             &config,
             1,
             Confirmation::AlreadyConfirmed,
@@ -300,7 +303,8 @@ fn test_apply_missing_proposal_is_a_loud_error_naming_the_path() {
         let err = execute_apply(
             "GX-does-not-exist",
             None,
-            None,
+            false,
+            false,
             &Config::default(),
             1,
             Confirmation::AlreadyConfirmed,
@@ -329,7 +333,8 @@ fn test_apply_refuses_on_token_mismatch() {
         let err = execute_apply(
             change_id,
             None,
-            None,
+            false,
+            false,
             &config,
             1,
             Confirmation::Token("deadbeefdeadbeef".to_string()),
@@ -403,7 +408,8 @@ fn test_apply_refuses_escaping_path_and_writes_nothing() {
         let report = execute_apply(
             change_id,
             Some("apply"),
-            None,
+            false,
+            false,
             &Config::default(),
             1,
             Confirmation::AlreadyConfirmed,
@@ -475,7 +481,8 @@ fn test_apply_fails_fast_while_change_lock_is_held() {
         let err = execute_apply(
             change_id,
             Some("apply"),
-            None,
+            false,
+            false,
             &config,
             1,
             Confirmation::AlreadyConfirmed,

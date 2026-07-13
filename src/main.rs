@@ -155,6 +155,7 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             patterns,
             commit,
             pr,
+            draft,
             yes,
             report,
             action,
@@ -185,7 +186,8 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                     change_id.clone(),
                     patterns,
                     commit.clone(),
-                    pr.clone(),
+                    *pr,
+                    *draft,
                     *yes,
                     change,
                     propose_only,
@@ -193,9 +195,12 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
                 )
             }
         },
-        Commands::Apply { change_id, pr, yes } => {
-            create::process_apply_command(cli, config, change_id, pr.as_ref(), *yes)
-        }
+        Commands::Apply {
+            change_id,
+            pr,
+            draft,
+            yes,
+        } => create::process_apply_command(cli, config, change_id, *pr, *draft, *yes),
         Commands::Review {
             org,
             patterns,

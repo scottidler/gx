@@ -124,7 +124,8 @@ pub fn process_create_command(
     change_id: Option<String>,
     patterns: &[String],
     commit_message: Option<String>,
-    pr: Option<crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     yes: bool,
     change: Change,
     propose_only: bool,
@@ -142,7 +143,8 @@ pub fn process_create_command(
             patterns,
             change_id,
             prompt,
-            pr.as_ref(),
+            pr,
+            draft,
             yes,
             propose_only,
         );
@@ -212,7 +214,8 @@ pub fn process_create_command(
         files,
         &change,
         commit_message.as_deref(),
-        pr.as_ref(),
+        pr,
+        draft,
         config,
         parallel_jobs,
         crate::confirm::already_confirmed(),
@@ -332,7 +335,8 @@ fn run_llm(
     patterns: &[String],
     change_id: Option<String>,
     prompt: &str,
-    pr: Option<&crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     yes: bool,
     propose_only: bool,
 ) -> Result<()> {
@@ -408,6 +412,7 @@ fn run_llm(
         &summary.change_id,
         None, // commit message: the core falls back to the recorded prompt
         pr,
+        draft,
         config,
         parallel_jobs,
         Confirmation::Token(summary.token),
@@ -426,7 +431,8 @@ pub fn process_apply_command(
     cli: &Cli,
     config: &Config,
     change_id: &str,
-    pr: Option<&crate::cli::PR>,
+    pr: bool,
+    draft: bool,
     yes: bool,
 ) -> Result<()> {
     log::info!("Starting apply for change ID: {change_id}");
@@ -469,6 +475,7 @@ pub fn process_apply_command(
         change_id,
         None, // commit message: the core falls back to the recorded prompt
         pr,
+        draft,
         config,
         parallel_jobs,
         Confirmation::Token(token),

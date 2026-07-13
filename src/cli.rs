@@ -2,17 +2,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-/// Pull request type
-#[derive(Debug, Clone, ValueEnum)]
-pub enum PR {
-    /// Create a normal pull request
-    #[value(name = "normal")]
-    Normal,
-    /// Create a draft pull request
-    #[value(name = "draft")]
-    Draft,
-}
-
 /// Log verbosity, mirroring `log::LevelFilter`. Case-insensitive on the CLI.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 #[clap(rename_all = "lowercase")]
@@ -281,7 +270,7 @@ EXAMPLES:
   gx create --files '*.md' --commit 'Update docs' sub 'old-text' 'new-text'
   gx create --files 'package.json' --commit 'Bump version' regex '\"version\": \"[^\"]+\"' '\"version\": \"1.2.3\"'
   gx create --files '*.txt' --commit 'Remove old files' --pr delete
-  gx create --files '*.md' --commit 'Draft update' --pr=draft sub 'old' 'new'")]
+  gx create --files '*.md' --commit 'Draft update' --pr --draft sub 'old' 'new'")]
     Create {
         /// Files to target (glob patterns)
         #[arg(short = 'f', long = "files", help = "File patterns to match")]
@@ -312,14 +301,18 @@ EXAMPLES:
         )]
         commit: Option<String>,
 
-        /// Create PR after committing (use --pr=draft for draft mode)
+        /// Create PR after committing (use --pr --draft for draft mode)
+        #[arg(long, help = "Create pull request after committing")]
+        pr: bool,
+
+        /// Make the PR a draft; requires --pr (a bare --draft is a clap error,
+        /// not a silent no-op)
         #[arg(
             long,
-            help = "Create pull request after committing (use --pr=draft for draft mode)",
-            default_missing_value = "normal",
-            num_args = 0..=1
+            help = "Make the PR a draft (requires --pr)",
+            requires = "pr"
         )]
-        pr: Option<PR>,
+        draft: bool,
 
         /// Skip the confirmation prompt before committing (for automation)
         #[arg(
@@ -354,14 +347,18 @@ EXAMPLES:
         #[arg(value_name = "CHANGE_ID", value_parser = validate_change_id)]
         change_id: String,
 
-        /// Create PR after committing (use --pr=draft for draft mode)
+        /// Create PR after committing (use --pr --draft for draft mode)
+        #[arg(long, help = "Create pull request after committing")]
+        pr: bool,
+
+        /// Make the PR a draft; requires --pr (a bare --draft is a clap error,
+        /// not a silent no-op)
         #[arg(
             long,
-            help = "Create pull request after committing (use --pr=draft for draft mode)",
-            default_missing_value = "normal",
-            num_args = 0..=1
+            help = "Make the PR a draft (requires --pr)",
+            requires = "pr"
         )]
-        pr: Option<PR>,
+        draft: bool,
 
         /// Skip the confirmation prompt before applying (for automation)
         #[arg(
@@ -680,5 +677,99 @@ mod tests {
         assert!(validate_change_id("my-change").is_err());
         assert!(validate_change_id("gx-lowercase").is_err());
         assert!(validate_change_id("").is_err());
+    }
+
+    // Bug 2 (design doc 2026-07-13-gx-shakedown-fixes.md, Phase 1): `--pr` was
+    // an optional-value flag (`Option<PR>` + `default_missing_value` +
+    // `num_args = 0..=1`), so the space form `--pr regex ...` let clap bind
+    // `regex` as the flag's OWN value, misreading the next positional as the
+    // subcommand. Bite check: revert `pr`/`draft` back to `Option<PR>` and
+    // these tests fail to parse or misroute the subcommand.
+
+    #[test]
+    fn test_create_pr_subcommand_form_parses_the_subcommand() {
+        let cli = Cli::try_parse_from([
+            "gx", "create", "--files", "x", "--commit", "m", "--pr", "regex", "a", "b",
+        ])
+        .expect("--pr regex 'a' 'b' must parse regex as the subcommand, not fail with 'unrecognized subcommand'");
+        match cli.command {
+            Commands::Create {
+                pr, draft, action, ..
+            } => {
+                assert!(pr, "--pr must be set");
+                assert!(!draft, "--pr alone (no --draft) must not be draft");
+                assert!(
+                    matches!(action, Some(CreateAction::Regex { .. })),
+                    "expected the regex subcommand to resolve, got: {action:?}"
+                );
+            }
+            other => panic!("expected Commands::Create, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_create_pr_draft_sets_draft_true() {
+        let cli = Cli::try_parse_from([
+            "gx", "create", "--files", "x", "--commit", "m", "--pr", "--draft", "sub", "a", "b",
+        ])
+        .expect("--pr --draft must parse");
+        match cli.command {
+            Commands::Create { pr, draft, .. } => {
+                assert!(pr);
+                assert!(draft);
+            }
+            other => panic!("expected Commands::Create, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_create_normal_pr_is_not_draft() {
+        let cli = Cli::try_parse_from([
+            "gx", "create", "--files", "x", "--commit", "m", "--pr", "add", "f", "c",
+        ])
+        .expect("--pr must parse");
+        match cli.command {
+            Commands::Create { pr, draft, .. } => {
+                assert!(pr);
+                assert!(!draft, "a normal --pr must not be draft");
+            }
+            other => panic!("expected Commands::Create, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_create_bare_draft_without_pr_is_a_clap_error() {
+        // Review finding #1: --draft must fail LOUD (clap error), never a
+        // silent no-op, when --pr is absent.
+        let result = Cli::try_parse_from([
+            "gx", "create", "--files", "x", "--commit", "m", "--draft", "add", "f", "c",
+        ]);
+        assert!(
+            result.is_err(),
+            "a bare --draft with no --pr must be a clap error on Create"
+        );
+    }
+
+    #[test]
+    fn test_apply_pr_draft_sets_draft_true() {
+        let cli = Cli::try_parse_from(["gx", "apply", "GX-2026-07-13", "--pr", "--draft"])
+            .expect("--pr --draft must parse for apply");
+        match cli.command {
+            Commands::Apply { pr, draft, .. } => {
+                assert!(pr);
+                assert!(draft);
+            }
+            other => panic!("expected Commands::Apply, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_bare_draft_without_pr_is_a_clap_error() {
+        // Review finding #1/#5: the fail-loud requirement covers Apply too.
+        let result = Cli::try_parse_from(["gx", "apply", "GX-2026-07-13", "--draft"]);
+        assert!(
+            result.is_err(),
+            "a bare --draft with no --pr must be a clap error on Apply"
+        );
     }
 }

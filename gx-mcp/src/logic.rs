@@ -271,7 +271,8 @@ pub fn create_apply(config: &Config, change_id: &str, token: &str) -> Result<App
     let report = gx::create::core::apply::execute_apply(
         change_id,
         None,
-        None,
+        false,
+        false,
         config,
         jobs(config),
         Confirmation::Token(token.to_string()),
