@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-07-13
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5
 **Review Panel:** Design Review complete (2026-07-13) -- Architect (Gemini) + Staff Engineer (Codex), both CONFIRMED Resolved Decisions 1 and 2; six findings folded in below.
 

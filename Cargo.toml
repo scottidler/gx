@@ -6,7 +6,7 @@ members = ["gx-mcp"]
 default-members = ["."]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 
 [package]
 name = "gx"
