@@ -17,6 +17,7 @@ pub mod github;
 pub mod hash;
 pub mod lock;
 pub mod output;
+pub mod persona;
 pub mod repo;
 pub mod review;
 pub mod rollback;
