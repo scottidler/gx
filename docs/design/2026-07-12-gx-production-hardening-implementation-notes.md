@@ -444,3 +444,150 @@ execution of `docs/design/2026-07-12-gx-production-hardening.md`. Append-only.
   owner runs `review approve --admin` on self-authored PRs, they will now be
   blocked. Should `--admin` (or a "cannot approve own PR" classification) be
   exempted from the abort? Needs the owner's call.
+
+  **Resolved 2026-07-12 (Phase 5, Part A):** yes -- see the doc's Resolved
+  Decisions entry and Phase 5 below. `--admin` now skips `gh pr review
+  --approve` entirely (never attempts, never can fail on it) and merges via
+  `gh pr merge --admin`. The abort-on-failed-approve guard from Phase 4 is
+  unchanged and applies only to the non-admin path. This question is closed;
+  do not re-litigate.
+
+## Phase 5: Tests that bite + flock-test fix + docs
+
+### Design decisions
+- **Part A (`--admin` exempts self-approve) implemented at `github.rs::
+  approve_and_merge_pr`** -- wrapped the `gh pr review --approve` call AND its
+  abort-on-failure guard in `if !admin_override { ... } else { debug!(...) }`.
+  `admin_override` was already threaded through as a parameter (Phase 4), so no
+  signature change was needed. This resolves the Phase 4 open question and the
+  doc's Resolved Decisions entry: on the `--admin` path, gx never attempts
+  self-approval (which GitHub categorically rejects) and merges straight
+  through with `--admin`; on the non-admin path, Phase 4's fail-closed
+  abort-on-failed-approve behavior is byte-for-byte unchanged.
+- **Part A bite tests live in `github/tests.rs`, not `review.rs`** --
+  `approve_and_merge_pr` (the function the guard actually lives in) is a
+  `github.rs` function; `github.rs` already uses the external `github/tests.rs`
+  file (not inline `mod tests`), so the new tests match that file's existing
+  structure. A local `install_approve_shim` helper (mirroring the `install_shim`
+  pattern already used in `review.rs`'s inline tests) installs a fake `gh` on
+  `PATH` that logs every invocation to `$GX_TEST_APPROVE_LOG` and lets the
+  `review` sub-invocation's exit code be pinned per test, so both the
+  non-admin-abort and admin-skip paths can be asserted precisely without a live
+  GitHub call.
+- **`review delete` command-level fail-closed bite test added** --
+  `review.rs::test_review_delete_fails_closed_and_makes_zero_mutations` -- the
+  Phase 3 tradeoffs section recorded `review delete`'s confirm gate as covered
+  "transitively" via the shared `discover_all_prs`/`confirm_destructive`
+  helpers, with only `review approve` getting a dedicated command-level spy
+  test. That left `process_review_delete_command`'s OWN wiring of the gate
+  unverified at the command seam (a regression that deleted the `if open_prs
+  .len() >= threshold && !confirm_destructive(...)` call from `process_review
+  _delete_command` specifically -- as opposed to from the shared helper --
+  would have gone undetected). Added a `GH_DELETE_SPY_SHIM` (same shape as the
+  existing `GH_APPROVE_SPY_SHIM`) and a command-level test proving `review
+  delete` fails closed naming `--yes` and performs ZERO close/branch-delete
+  mutations on non-interactive stdin. Manually reverted the gate and confirmed
+  the test fails (break-the-guard verified, not assumed).
+- **Root cause of the flaky flock-test family: an UNGUARDED reader of
+  `$XDG_DATA_HOME` racing a GUARDED test's ephemeral `TempDir`, not a kernel/
+  timing artifact, for the `create` member of the family** --
+  `create/core/tests.rs::test_apply_delete_change` /
+  `test_apply_substitution_change` -- `Transaction::backup_path_for` resolves
+  `$XDG_DATA_HOME` (via `backups_dir()`) UNCONDITIONALLY, regardless of the
+  transaction's `persist` flag (the doc's Data Model/Architecture never
+  documents this backup-path/persist coupling, which is exactly the gap). These
+  two tests create backups via `apply_delete_change`/`apply_substitution_change`
+  WITHOUT pinning `$XDG_DATA_HOME`, so under `cargo test`'s default
+  thread-per-test parallelism, they can transiently read an env value set by
+  some OTHER, properly `env_lock()`-guarded test (e.g. a `lock`/`state`/
+  `transaction` test that pins `$XDG_DATA_HOME` to its own `TempDir` for its
+  critical section). The backup for a file created inside that borrowed window
+  lands under the OTHER test's `TempDir`; when that test's `TempDir` guard
+  drops at the end of ITS OWN function, the directory tree -- including our
+  backup -- is deleted, so the later `transaction.rollback()` in the ORIGINAL
+  test can't find the backup to restore, and the file never reappears (proved
+  precisely this way: reproduced under `cargo test --lib` looped without
+  `otto ci` at all, isolated to exactly these two tests, confirmed against
+  `Transaction::backup_path_for`'s source). Fixed by wrapping both tests in the
+  file's OWN pre-existing `with_data_home` helper (already used by the
+  Phase-4-added pushed-state tests in the same file), pinning `$XDG_DATA_HOME`
+  to a private `TempDir` for the test's duration under the shared
+  `crate::test_utils::env_lock()`.
+- **Root cause of the flaky `lock` family member: a genuine kernel/harness
+  timing gap between `close(2)`'s flock release and an immediately-following
+  `open`+`try_lock` on the SAME thread, under heavy concurrent syscall load** --
+  `lock/tests.rs::test_lock_reacquirable_after_holder_drops` and
+  `test_drop_never_unlinks_and_reopens_same_inode` -- proved this empirically,
+  not by assumption: instrumented the test to print `std::process::id()` at
+  start and on failure, looped `cargo test --lib` until it failed, and
+  confirmed the "held by pid X" in the failure message is the test's OWN
+  process id every time (never a foreign pid) -- i.e. this is the SAME thread's
+  own just-dropped lock appearing to still be held for a brief window, not a
+  cross-process or cross-test collision. It reproduces ONLY under the full
+  330-test `cargo test --lib` run (never running the `lock` module alone, 20+
+  isolated runs, zero failures), confirming it needs the other ~29 threads'
+  concurrent VFS pressure to manifest -- exactly the "timing/harness under
+  load, not a production race" finding the two prior audits (referenced in the
+  design doc's Risks table) already reached. Fixed per the doc's directive:
+  widened the wall-clock margin with a bounded poll (2s deadline, 10ms
+  interval) on the reacquire, mirroring the file's OWN pre-existing
+  `test_spawned_child_does_not_inherit_lock_fd` poll-with-deadline idiom. The
+  LOGICAL assertion (a lock whose holder dropped becomes reacquirable, same
+  inode, no reclaim machinery) is unchanged; only the timing margin widened.
+  Production `RepoLock`/`ChangeLock` code is untouched -- the fail-fast,
+  no-retry contract (`test_second_acquire_fails_fast`) is exactly as strict as
+  before.
+- **Same root cause, two more instances found and fixed by the SAME poll
+  widening** -- `state.rs::test_cleanup_old_skips_locked_change` and
+  `review.rs::test_sync_change_state_fails_fast_under_concurrent_change_lock`
+  both `drop()` a held `ChangeLock` and then immediately assert the NEXT
+  operation (`cleanup_old`/`sync_change_state`) succeeds -- the identical
+  drop-then-immediately-reacquire shape as the two `lock.rs` tests. Applied the
+  same bounded-poll (2s/10ms) around the post-drop call in both, preserving the
+  exact logical assertions ("once unlocked, the aged-out change is removed" /
+  "the lock isn't stuck"). Audited every other `ChangeLock::acquire`/
+  `RepoLock::acquire` call site in test code (`grep` across `src/`) for the
+  same drop-then-reacquire shape; these two plus the two `lock.rs` tests were
+  the complete set -- no others found.
+
+### Deviations
+- **`review delete`'s Phase 3 "covered transitively" note is superseded** -- a
+  dedicated command-level bite test now exists (see Design decisions); the
+  Phase 3 tradeoff entry is left as-is (append-only) but this phase closes the
+  gap it flagged.
+- None beyond the above (Part A's fix and the flock fixes were implemented at
+  the seams the doc's Phase 5 bullet and the Part A amendment specify; no
+  signature or behavior changes beyond what was asked).
+
+### Tradeoffs
+- **Bounded-poll widening applied only to the four proven-flaky
+  drop-then-reacquire tests, not preemptively to every lock test** -- the doc
+  says "only the wall-clock margins move" for the tests that need it; tests
+  whose assertion is "must still fail while locked" (`test_second_acquire_
+  fails_fast`, the Phase 3/4 fail-closed gate tests) have no reacquire step and
+  were left untouched, since widening a margin where there is no timing
+  dependency would only mask a real regression.
+- **The `create` family's root cause (unguarded XDG reader) is fixed by adding
+  env isolation to the two vulnerable tests, not by making `Transaction::
+  backup_path_for` itself take an explicit data-dir parameter** -- the latter
+  would be a production API change this phase's brief doesn't ask for and
+  would ripple through every `Transaction` call site; the two vulnerable tests
+  already had a `with_data_home` helper in the same file (added for the
+  Phase-4 pushed-state tests) that was simply not applied to the delete/
+  substitution tests. Reusing it is the correct, minimal seam.
+- **No changes to `tests/lock_contention_test.rs`** (the cross-process,
+  real-subprocess contention/kill-9 tests) -- these spawn separate OS
+  processes with already-generous margins (200ms/800ms and 400ms/4000ms) and
+  did not reproduce any flake during this phase's validation (5 consecutive
+  `otto ci` runs, all green); the flakiness mechanism found and fixed here is
+  specific to same-process, same-thread flock release visibility under heavy
+  THREAD (not process) contention, which doesn't apply to that file's shape.
+  Flagged here rather than silently assumed fixed.
+
+### Open questions
+- None. Part A's admin-exemption question from Phase 4 is resolved (see
+  above). `otto ci` passed 5 consecutive runs at default test parallelism (see
+  the phase report for exit codes); the flock-test family (`lock`, `state`,
+  `review`, `create`) showed zero failures across the validation runs
+  (roughly 25+ full `cargo test --lib` loops plus 5 full `otto ci` runs during
+  this phase's work, versus reliable reproduction before the fix).

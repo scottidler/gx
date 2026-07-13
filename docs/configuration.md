@@ -21,6 +21,13 @@ Default search order:
 default-user-org: "tatari-tv"  # Can be GitHub user or organization
 jobs: "nproc"  # Number of concurrent operations (default: nproc)
 
+# Wall-clock timeout (seconds) for EVERY git/gh subprocess gx spawns (one value
+# covers fast local git and slow network fetches alike). On expiry the child's
+# whole process group is SIGKILLed; that repo reports a timeout error and the
+# rest of the run still reaches its summary. stdin is nulled so a credential/
+# auth prompt fails fast instead of wedging. Default: 300.
+subprocess-timeout-secs: 300
+
 # Repository discovery
 repo-discovery:
   max-depth: 10        # Max directory depth to scan
@@ -40,6 +47,19 @@ create:
     # `claude -p --output-format text` proposes nothing.
     agent-command: "claude -p --output-format text --permission-mode acceptEdits"
     timeout-seconds: 300  # Wall-clock per repo; on expiry the agent's process group is killed
+
+# `gx review approve`/`delete` finish-line ops: irreversible GitHub merges/
+# closes. The confirm gate prompts once at least this many PRs are targeted;
+# below it, small batches proceed without a prompt. `--yes` bypasses the
+# prompt and is REQUIRED on non-interactive stdin (fails closed naming --yes).
+review:
+  confirm-threshold: 5
+
+# `gx cleanup` force-deletes local branches (`git branch -D`) once their
+# fetched-ancestry check proves them merged. Same confirm-gate shape as
+# `review` above, gated on the count of branches eligible for deletion.
+cleanup:
+  confirm-threshold: 5
 
 # Output preferences (optional)
 output:

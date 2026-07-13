@@ -397,3 +397,143 @@ fn test_pr_body_template_substitution() {
     assert_eq!(body, "my commit");
     assert!(!body.contains("scottidler/gx"));
 }
+
+/// Installs a fake `gh` shim on `dir` executable as `gh`. Every invocation
+/// appends its args to `$GX_TEST_APPROVE_LOG` before exiting; `review`
+/// sub-invocations exit with `review_status`, `merge` sub-invocations exit 0.
+fn install_approve_shim(dir: &std::path::Path, review_status: i32) {
+    let gh_path = dir.join("gh");
+    let script = format!(
+        r#"#!/bin/sh
+echo "$@" >> "$GX_TEST_APPROVE_LOG"
+if [ "$1" = "pr" ] && [ "$2" = "review" ]; then
+  exit {review_status}
+fi
+exit 0
+"#
+    );
+    std::fs::write(&gh_path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&gh_path, perms).unwrap();
+}
+
+/// Break-the-guard (Part A, non-admin path): a failed `gh pr review --approve`
+/// must ABORT the merge -- `gh pr merge` must NEVER be invoked. Remove the
+/// abort-on-failed-approve guard (make the merge run regardless) and the
+/// logged calls contain a `merge` invocation, failing this test.
+#[test]
+fn test_approve_and_merge_pr_non_admin_failed_approve_makes_zero_merge_calls() {
+    let _guard = env_lock();
+    let prior_path = std::env::var("PATH").ok();
+    let prior_home = std::env::var("GITHUB_PAT_HOME").ok();
+    let prior_log = std::env::var("GX_TEST_APPROVE_LOG").ok();
+
+    let shim_dir = tempfile::TempDir::new().unwrap();
+    // review_status=1 -> the approve step fails.
+    install_approve_shim(shim_dir.path(), 1);
+    let new_path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe { std::env::set_var("PATH", &new_path) };
+    unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+    let log_path = shim_dir.path().join("approve.log");
+    unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", &log_path) };
+
+    let config = crate::config::Config::default();
+    let result = approve_and_merge_pr("scottidler/gx", 42, false, false, &config);
+
+    assert!(
+        result.is_err(),
+        "a failed --approve must abort the merge on the non-admin path"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log.contains("review"),
+        "the approve step must have been attempted: {log}"
+    );
+    assert!(
+        !log.contains("merge"),
+        "ZERO merge calls may run after a failed approve, but the log shows one: {log}"
+    );
+
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_home {
+        Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+        None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+    }
+    match prior_log {
+        Some(v) => unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", v) },
+        None => unsafe { std::env::remove_var("GX_TEST_APPROVE_LOG") },
+    }
+    drop(_guard);
+}
+
+/// Break-the-guard (Part A, `--admin` path): `admin_override=true` must SKIP
+/// `gh pr review --approve` entirely (self-approval is categorically rejected
+/// by GitHub) and merge via `gh pr merge --admin` regardless. Remove the
+/// admin exemption (run `--approve` unconditionally) and this test fails
+/// because the log gains a `review` call; revert the `--admin` flag wiring
+/// and it fails because the merge call lacks `--admin`.
+#[test]
+fn test_approve_and_merge_pr_admin_override_skips_approve_and_merges_with_admin() {
+    let _guard = env_lock();
+    let prior_path = std::env::var("PATH").ok();
+    let prior_home = std::env::var("GITHUB_PAT_HOME").ok();
+    let prior_log = std::env::var("GX_TEST_APPROVE_LOG").ok();
+
+    let shim_dir = tempfile::TempDir::new().unwrap();
+    // review_status is irrelevant on the admin path since review must never run;
+    // pin it to failure so an accidental approve call would abort loudly too.
+    install_approve_shim(shim_dir.path(), 1);
+    let new_path = format!(
+        "{}:{}",
+        shim_dir.path().display(),
+        prior_path.clone().unwrap_or_default()
+    );
+    unsafe { std::env::set_var("PATH", &new_path) };
+    unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+    let log_path = shim_dir.path().join("approve.log");
+    unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", &log_path) };
+
+    let config = crate::config::Config::default();
+    let result = approve_and_merge_pr("scottidler/gx", 42, true, false, &config);
+
+    assert!(
+        result.is_ok(),
+        "admin_override must merge without ever attempting self-approve: {result:?}"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        !log.contains("review"),
+        "NO approve call may run on the --admin path, but the log shows one: {log}"
+    );
+    let merge_line = log
+        .lines()
+        .find(|l| l.starts_with("pr merge"))
+        .unwrap_or_else(|| panic!("expected a merge call in the log: {log}"));
+    assert!(
+        merge_line.contains("--admin"),
+        "the merge call must carry --admin: {merge_line}"
+    );
+
+    match prior_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    match prior_home {
+        Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+        None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+    }
+    match prior_log {
+        Some(v) => unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", v) },
+        None => unsafe { std::env::remove_var("GX_TEST_APPROVE_LOG") },
+    }
+    drop(_guard);
+}

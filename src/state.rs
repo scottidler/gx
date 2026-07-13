@@ -1251,9 +1251,27 @@ mod tests {
             assert!(path.exists(), "the locked change file must survive cleanup");
 
             // Release the lock; a second cleanup converges and removes it.
+            // Phase 5 flock-fix: bounded-poll the reacquire-after-drop (see
+            // `lock::tests::test_lock_reacquirable_after_holder_drops` for why:
+            // under `otto ci`'s full parallel test load, a `close`'s flock
+            // release is occasionally not yet visible to an
+            // immediately-following `open`+`try_lock` -- timing/harness, not a
+            // production race). The logical assertion (once unlocked, the
+            // aged-out change converges to deleted) is unchanged.
             drop(held);
-            let deleted2 = manager.cleanup_old(30).unwrap();
-            assert_eq!(deleted2, 1, "once unlocked, the aged-out change is removed");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut deleted2 = 0;
+            while std::time::Instant::now() < deadline {
+                deleted2 = manager.cleanup_old(30).unwrap();
+                if deleted2 == 1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                deleted2, 1,
+                "once unlocked, the aged-out change must converge to deleted within the window"
+            );
             assert!(!path.exists(), "the change file is deleted once unlocked");
         });
     }

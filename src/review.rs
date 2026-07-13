@@ -458,7 +458,10 @@ pub fn process_review_approve_command(
         return Ok(());
     }
 
-    println!("Found {} open PR(s) for change ID: {change_id}", open_prs.len());
+    println!(
+        "Found {} open PR(s) for change ID: {change_id}",
+        open_prs.len()
+    );
     for pr in &open_prs {
         println!("  PR #{}: {} ({})", pr.number, pr.title, pr.repo_slug);
     }
@@ -1441,7 +1444,24 @@ exit 0
         );
 
         // And a sync AFTER release proceeds normally (the lock isn't stuck).
-        assert!(sync_change_state(&[], change_id).is_ok());
+        // Phase 5 flock-fix: bounded-poll the reacquire-after-drop (see
+        // `lock::tests::test_lock_reacquirable_after_holder_drops` for why:
+        // under `otto ci`'s full parallel test load, a `close`'s flock release
+        // is occasionally not yet visible to an immediately-following
+        // `open`+`try_lock` -- timing/harness, not a production race). The
+        // logical assertion (the lock isn't stuck after release) is unchanged.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let succeeded = loop {
+            let ok = sync_change_state(&[], change_id).is_ok();
+            if ok || std::time::Instant::now() >= deadline {
+                break ok;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(
+            succeeded,
+            "sync_change_state must succeed once the lock is released, within the window"
+        );
 
         match prior_data_home {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
@@ -1687,8 +1707,8 @@ exit 0
     /// PrMerged, so this test fails.
     #[test]
     fn test_review_approve_skips_non_mergeable_pr_and_records_skipped() {
-        use clap::Parser;
         use crate::state::RepoChangeStatus;
+        use clap::Parser;
         let guard = crate::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
@@ -1755,6 +1775,116 @@ exit 0
         assert!(
             matches!(repo_status, RepoChangeStatus::Skipped { .. }),
             "a skipped PR must be recorded as Skipped, not merged: {repo_status:?}"
+        );
+
+        match prior_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prior_tok {
+            Some(v) => unsafe { std::env::set_var("GITHUB_PAT_HOME", v) },
+            None => unsafe { std::env::remove_var("GITHUB_PAT_HOME") },
+        }
+        match prior_mut {
+            Some(v) => unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", v) },
+            None => unsafe { std::env::remove_var("GX_TEST_MUTATION_LOG") },
+        }
+        match prior_data_home {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        drop(guard);
+    }
+
+    /// A gh spy shim for the command-level delete test: returns ONE open PR on
+    /// the discovery (`api graphql`) path; ANY other (mutating) invocation
+    /// (`pr close`, the `api ... DELETE` branch-delete) appends to
+    /// `$GX_TEST_MUTATION_LOG` so the test can assert ZERO mutations.
+    const GH_DELETE_SPY_SHIM: &str = r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+cat <<'JSON'
+{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{
+  "number": 31,
+  "title": "GX-delete-shim: change",
+  "headRefName": "GX-delete-shim",
+  "author": {"login": "tester"},
+  "state": "OPEN",
+  "url": "https://github.com/gx-testing/repo/pull/31",
+  "repository": {"nameWithOwner": "gx-testing/repo"},
+  "mergedAt": null,
+  "mergeCommit": null,
+  "baseRefName": "main",
+  "mergeable": "MERGEABLE"
+}]}}}
+JSON
+  exit 0
+fi
+echo "MUTATION: $@" >> "$GX_TEST_MUTATION_LOG"
+exit 0
+"#;
+
+    /// Command-level bite (Phase 3, filling the Phase 3 tradeoff's deferred
+    /// gap): the confirm gate is WIRED into `review delete` itself, not just
+    /// exercised transitively via the shared `discover_all_prs`/`confirm_destructive`
+    /// helpers. With the open-PR count at/above the threshold and non-interactive
+    /// stdin (as under `cargo test`) without `--yes`, the command FAILS CLOSED
+    /// (loud error naming `--yes`) and performs ZERO GitHub mutations (no `pr
+    /// close`, no branch-delete `api ... DELETE`) - the spy shim records any
+    /// non-discovery invocation and the test asserts none happened. Remove the
+    /// gate from `process_review_delete_command` and this test fails (either
+    /// the command returns `Ok`, or a close/delete mutation is logged).
+    #[test]
+    fn test_review_delete_fails_closed_and_makes_zero_mutations() {
+        use clap::Parser;
+        let guard = crate::test_utils::env_lock();
+        let prior_path = std::env::var("PATH").ok();
+        let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
+        let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
+        let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let shim_dir = TempDir::new().unwrap();
+        install_shim(shim_dir.path(), GH_DELETE_SPY_SHIM);
+        let new_path = format!(
+            "{}:{}",
+            shim_dir.path().display(),
+            prior_path.clone().unwrap_or_default()
+        );
+        unsafe { std::env::set_var("PATH", &new_path) };
+        unsafe { std::env::set_var("GITHUB_PAT_HOME", "dummy-token-not-a-secret") };
+        let mut_log = shim_dir.path().join("mutations.log");
+        unsafe { std::env::set_var("GX_TEST_MUTATION_LOG", &mut_log) };
+        let data_home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+
+        let work = TempDir::new().unwrap();
+        let cwd = work.path().to_string_lossy().to_string();
+        let cli = Cli::parse_from(["gx", "--cwd", &cwd, "review", "delete", "GX-delete-shim"]);
+        // Threshold 1 so a single open PR trips the gate deterministically.
+        let config = Config {
+            review: Some(crate::config::ReviewConfig {
+                confirm_threshold: Some(1),
+            }),
+            ..Config::default()
+        };
+
+        let result = process_review_delete_command(
+            &cli,
+            &config,
+            Some("gx-testing"),
+            &[],
+            "GX-delete-shim",
+            false, // yes = false -> must fail closed
+        );
+
+        assert!(
+            result.is_err(),
+            "review delete must fail closed on non-interactive stdin without --yes"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("--yes"), "error must name --yes: {msg}");
+        assert!(
+            !mut_log.exists(),
+            "ZERO mutations: no close/delete-branch gh call may have run, but the spy logged one"
         );
 
         match prior_path {

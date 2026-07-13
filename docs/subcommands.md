@@ -89,6 +89,83 @@ gx status frontend api       # Status for matching repos only
 
 ---
 
+## create
+
+**Purpose**: Apply file changes across multiple repositories, optionally commit and open PRs
+
+**Usage**:
+```
+gx create --files <pattern> [--commit <msg>] [--pr[=draft]] [--yes] [--report <path>] <action>
+```
+
+**Behavior**:
+- Discovers matching files per repo, applies the requested action (`add`/`delete`/`sub`/`regex`), diffs, and (with `--commit`) commits + optionally opens a PR
+- **Exits non-zero when any repo fails** (matches `status`/`checkout`/`clone`): the exit code is the failed-repo count, so a script can gate on it directly
+- `--yes` skips the confirm prompt above `create.confirm-threshold` (default 5); required on non-interactive stdin or the run fails closed naming `--yes`
+- `--report <path>` writes a JSON array of `{repo, phase, error}` for every FAILED repo to that file; on-screen output is unchanged (human summary stays human, the file is the scriptable surface). An all-success run writes `[]`
+- Every `git`/`gh` subprocess this command spawns is wall-clock-bounded by `subprocess-timeout-secs` (default 300s); a hung op is killed and reported as that repo's error, the run still reaches its summary
+
+**Examples**:
+```bash
+gx create --files '*.md' --commit 'Update docs' sub 'old-text' 'new-text'
+gx create --files '*.json' --commit 'Bump version' --pr regex '"version": "[^"]+"' '"version": "1.2.3"'
+gx create --files '*.txt' --commit 'Remove old files' --yes --report /tmp/failures.json delete
+```
+
+---
+
+## review
+
+**Purpose**: Manage PRs opened by `gx create` across multiple repositories, by change ID
+
+**Usage**:
+```
+gx review approve <change-id> [--admin] [--auto] [--yes]
+gx review delete <change-id> [--yes]
+gx review sync <change-id>
+```
+
+**Behavior**:
+- `approve`/`delete` resolve every targeted org's PRs FIRST; if ANY org's discovery errors, the WHOLE batch aborts (naming the failed org) before a single GitHub write -- no partial merge/delete on a partial view
+- `approve` only merges a PR GitHub reports `mergeable: MERGEABLE`; a `CONFLICTING` or lazily-computed `UNKNOWN` PR is SKIPPED (recorded distinctly, not merged) with a re-run hint in the summary -- gx never merges on uncertainty
+- `--admin` bypasses branch protection on merge. Since GitHub always rejects self-approval, `--admin` SKIPS the `gh pr review --approve` step entirely and merges straight through; without `--admin`, a failed approve aborts that PR's merge
+- `delete` CLOSES open (unmerged) PRs and DELETES their branches -- its consent prompt states that destruction explicitly ("will CLOSE N open (unmerged) PR(s) and DELETE their branches")
+- Both `approve` and `delete` prompt for confirmation once the affected count reaches `review.confirm-threshold` (default 5); `--yes` bypasses it and is REQUIRED on non-interactive stdin (fails closed naming `--yes` otherwise, with ZERO mutations)
+
+**Examples**:
+```bash
+gx review approve GX-2026-07-12 --admin --yes   # merge own campaign, bypass branch protection
+gx review delete GX-2026-07-12                  # close + delete unmerged PRs (prompts above threshold)
+gx review sync GX-2026-07-12                    # true-up recorded state against GitHub reality
+```
+
+---
+
+## cleanup
+
+**Purpose**: Force-delete local `gx`-created branches once their change has landed
+
+**Usage**:
+```
+gx cleanup <change-id> [--force] [--include-remote] [--yes]
+gx cleanup --all [--yes]
+gx cleanup --list
+```
+
+**Behavior**:
+- Before `git branch -D`, fetches `origin` and proves the branch with `git merge-base --is-ancestor <branch> origin/<base>` against the FRESHLY-fetched base ref -- the recorded `PrMerged` status is a fast-path signal only; the fetched-ancestry check is the real guard. A branch that fails the check is preserved and reported, not deleted, unless `--force`
+- Prompts for confirmation once the eligible-for-deletion branch count reaches `cleanup.confirm-threshold` (default 5); `--yes` bypasses it and is REQUIRED on non-interactive stdin (fails closed naming `--yes`, ZERO branches deleted)
+- `--force` also deletes branches whose PR status is unknown, bypassing the fast-path signal (the ancestry check still runs)
+
+**Examples**:
+```bash
+gx cleanup GX-2026-07-12              # clean up one change's local branch
+gx cleanup --all --yes                # clean up every merged change, no prompt
+gx cleanup --list                     # list what's eligible, delete nothing
+```
+
+---
+
 ## Common Patterns
 
 ### Repository Filtering

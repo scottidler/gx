@@ -121,74 +121,94 @@ fn test_apply_add_change_file_exists() {
 
 #[test]
 fn test_apply_delete_change() {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_path = temp_dir.path();
+    // XDG-isolated (Phase 5 flock-fix): `apply_delete_change` writes an
+    // out-of-tree backup via `Transaction::backup_path_for`, which resolves
+    // `$XDG_DATA_HOME` UNCONDITIONALLY (regardless of `persist`). Left
+    // unpinned, this test's backup write can land inside some OTHER
+    // concurrently-running test's transient `XDG_DATA_HOME` TempDir; when that
+    // other test finishes and its TempDir drops, our backup file is deleted
+    // out from under us and the rollback restore silently finds nothing --
+    // exactly the `create::core::tests::test_apply_delete_change` flake this
+    // phase reproduced under parallel `cargo test`.
+    let data_home = TempDir::new().unwrap();
+    with_data_home(data_home.path(), || {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
 
-    // Create test files
-    fs::write(repo_path.join("file1.txt"), "content1").unwrap();
-    fs::write(repo_path.join("file2.txt"), "content2").unwrap();
-    fs::write(repo_path.join("file3.md"), "markdown").unwrap();
-    init_git_repo(repo_path);
+        // Create test files
+        fs::write(repo_path.join("file1.txt"), "content1").unwrap();
+        fs::write(repo_path.join("file2.txt"), "content2").unwrap();
+        fs::write(repo_path.join("file3.md"), "markdown").unwrap();
+        init_git_repo(repo_path);
 
-    let mut transaction = Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
-    let mut files_affected = Vec::new();
-    let mut diff_parts = Vec::new();
-    let patterns = vec!["*.txt".to_string()];
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
+        let mut files_affected = Vec::new();
+        let mut diff_parts = Vec::new();
+        let patterns = vec!["*.txt".to_string()];
 
-    let result = apply_delete_change(
-        repo_path,
-        &patterns,
-        &mut transaction,
-        &mut files_affected,
-        &mut diff_parts,
-    );
+        let result = apply_delete_change(
+            repo_path,
+            &patterns,
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        );
 
-    assert!(result.is_ok());
-    assert_eq!(files_affected.len(), 2);
-    assert!(!repo_path.join("file1.txt").exists());
-    assert!(!repo_path.join("file2.txt").exists());
-    assert!(repo_path.join("file3.md").exists()); // Should not be deleted
+        assert!(result.is_ok());
+        assert_eq!(files_affected.len(), 2);
+        assert!(!repo_path.join("file1.txt").exists());
+        assert!(!repo_path.join("file2.txt").exists());
+        assert!(repo_path.join("file3.md").exists()); // Should not be deleted
 
-    // Test rollback
-    transaction.rollback();
-    assert!(repo_path.join("file1.txt").exists());
-    assert!(repo_path.join("file2.txt").exists());
+        // Test rollback
+        transaction.rollback();
+        assert!(repo_path.join("file1.txt").exists());
+        assert!(repo_path.join("file2.txt").exists());
+    });
 }
 
 #[test]
 fn test_apply_substitution_change() {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_path = temp_dir.path();
+    // XDG-isolated (Phase 5 flock-fix): see `test_apply_delete_change` above --
+    // `apply_substitution_change` takes the same unconditional out-of-tree
+    // backup path.
+    let data_home = TempDir::new().unwrap();
+    with_data_home(data_home.path(), || {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
 
-    // Create test file
-    fs::write(repo_path.join("test.txt"), "Hello world\nHello again").unwrap();
-    init_git_repo(repo_path);
+        // Create test file
+        fs::write(repo_path.join("test.txt"), "Hello world\nHello again").unwrap();
+        init_git_repo(repo_path);
 
-    let mut transaction = Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
-    let mut files_affected = Vec::new();
-    let mut diff_parts = Vec::new();
-    let patterns = vec!["*.txt".to_string()];
+        let mut transaction =
+            Transaction::new(repo_path.to_path_buf(), "GX-test".to_string(), false);
+        let mut files_affected = Vec::new();
+        let mut diff_parts = Vec::new();
+        let patterns = vec!["*.txt".to_string()];
 
-    let result = apply_substitution_change(
-        repo_path,
-        &patterns,
-        "Hello",
-        "Hi",
-        &mut transaction,
-        &mut files_affected,
-        &mut diff_parts,
-    );
+        let result = apply_substitution_change(
+            repo_path,
+            &patterns,
+            "Hello",
+            "Hi",
+            &mut transaction,
+            &mut files_affected,
+            &mut diff_parts,
+        );
 
-    assert!(result.is_ok());
-    assert_eq!(files_affected.len(), 1);
+        assert!(result.is_ok());
+        assert_eq!(files_affected.len(), 1);
 
-    let content = fs::read_to_string(repo_path.join("test.txt")).unwrap();
-    assert_eq!(content, "Hi world\nHi again");
+        let content = fs::read_to_string(repo_path.join("test.txt")).unwrap();
+        assert_eq!(content, "Hi world\nHi again");
 
-    // Test rollback
-    transaction.rollback();
-    let content = fs::read_to_string(repo_path.join("test.txt")).unwrap();
-    assert_eq!(content, "Hello world\nHello again");
+        // Test rollback
+        transaction.rollback();
+        let content = fs::read_to_string(repo_path.join("test.txt")).unwrap();
+        assert_eq!(content, "Hello world\nHello again");
+    });
 }
 
 // ---- Phase 4: pushed-state safe point (F12) ----

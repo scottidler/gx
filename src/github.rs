@@ -654,32 +654,45 @@ pub fn approve_and_merge_pr(
     auto_merge: bool,
     config: &Config,
 ) -> Result<()> {
-    debug!("Approving and merging PR #{pr_number} in {repo_slug}");
+    debug!(
+        "Approving and merging PR #{pr_number} in {repo_slug} (admin_override={admin_override})"
+    );
     let org = org_of(repo_slug);
 
-    // First approve the PR
-    let approve_output = run_checked(
-        gh_command(org, config)?.args([
-            "pr",
-            "review",
-            &pr_number.to_string(),
-            "--repo",
-            repo_slug,
-            "--approve",
-        ]),
-        subprocess_timeout(),
-    )
-    .context("Failed to execute gh pr review --approve")?;
+    // The `--approve` step is skipped entirely on the `--admin` path (Phase 5
+    // amendment, Resolved Decisions "`--admin` exempts the self-approve step"):
+    // GitHub categorically rejects self-approval ("Can not approve your own
+    // pull request"), and gx's primary workflow is a single SRE landing their
+    // OWN campaign. Requiring a self-approval that always fails would make the
+    // documented merge-regardless `--admin` override unreachable. On the
+    // non-admin path, a failed `--approve` still ABORTS this PR's merge
+    // (Phase 4, unchanged): previously the failure was only warned and the
+    // merge proceeded, landing a PR that never got its approval.
+    if !admin_override {
+        let approve_output = run_checked(
+            gh_command(org, config)?.args([
+                "pr",
+                "review",
+                &pr_number.to_string(),
+                "--repo",
+                repo_slug,
+                "--approve",
+            ]),
+            subprocess_timeout(),
+        )
+        .context("Failed to execute gh pr review --approve")?;
 
-    // A failed `--approve` ABORTS this PR's merge (production-hardening doc,
-    // Phase 4): previously the failure was only warned and the merge proceeded,
-    // landing a PR that never got its approval. Fail closed instead.
-    if !approve_output.status.success() {
-        let error = String::from_utf8_lossy(&approve_output.stderr);
-        warn!("Failed to approve PR #{pr_number}: {error}");
-        return Err(eyre::eyre!(
-            "Aborting merge of PR #{pr_number}: approval step failed: {error}"
-        ));
+        if !approve_output.status.success() {
+            let error = String::from_utf8_lossy(&approve_output.stderr);
+            warn!("Failed to approve PR #{pr_number}: {error}");
+            return Err(eyre::eyre!(
+                "Aborting merge of PR #{pr_number}: approval step failed: {error}"
+            ));
+        }
+    } else {
+        debug!(
+            "admin_override set: skipping gh pr review --approve for PR #{pr_number} (self-approval is rejected by GitHub)"
+        );
     }
 
     // Then merge the PR
