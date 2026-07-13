@@ -1069,12 +1069,16 @@ pub fn switch_branch(repo_path: &std::path::Path, branch_name: &str) -> Result<(
 /// Resolves the repo's default base branch NAME via [`get_head_branch`]
 /// (origin/HEAD, then main/master) - it does NOT assume `main`, falling back to
 /// `main` (with a warning) only when nothing resolves. Then FETCHES `origin`
-/// first (an ancestry test against a stale local base ref is worse than
-/// useless) and runs `git merge-base --is-ancestor <branch> origin/<base>`.
+/// first (a containment test against a stale local base ref is worse than
+/// useless) and delegates the proof to [`branch_changes_in_base`], a
+/// PATCH-identity check (`git cherry origin/<base> <branch>`) that handles
+/// gx's own squash merges -- unlike the old commit-identity
+/// `git merge-base --is-ancestor`, which returned false for every
+/// squash-merged branch (Bug 1).
 ///
-/// - exit 0 (branch is an ancestor of the base) -> `Ok(true)` (safe to delete)
-/// - exit 1 (branch has commits NOT in the base) -> `Ok(false)` (preserve)
-/// - any other exit / fetch failure -> `Err` (cannot verify; caller fails
+/// - all branch patches present in base -> `Ok(true)` (safe to delete)
+/// - a branch patch absent from base    -> `Ok(false)` (preserve)
+/// - fetch failure / unverifiable cherry -> `Err` (cannot verify; caller fails
 ///   closed and preserves the branch)
 pub fn branch_merged_into_base(repo_path: &std::path::Path, branch_name: &str) -> Result<bool> {
     debug!(
@@ -1102,30 +1106,64 @@ pub fn branch_merged_into_base(repo_path: &std::path::Path, branch_name: &str) -
     })?;
 
     let base_ref = format!("origin/{base}");
+    branch_changes_in_base(repo_path, &base_ref, branch_name)
+}
+
+/// Prove -- by PATCH identity, not commit identity -- that every commit on
+/// `branch_name` already has its diff present in `base_ref`. This is the
+/// squash-merge-aware replacement for `git merge-base --is-ancestor` (a
+/// commit-identity test that returns false for every squash-merged branch;
+/// gx's own `review approve` merges with `--squash`, so the old guard skipped
+/// every branch gx itself merged).
+///
+/// Runs `git cherry <base_ref> <branch_name>`, which lists each branch commit
+/// with `-` (its patch is already in base, matched by patch-id) or `+` (its
+/// patch is NOT in base). The branch's changes are all in base iff there are
+/// ZERO `+` lines.
+///
+/// FAIL CLOSED (review finding #3): `run_checked` returns `Ok` on a non-zero
+/// exit, and `git cherry` exits 0 whether or not `+` lines exist -- so a fatal
+/// cherry (bad ref) yields empty stdout that would naively read as "no `+`
+/// lines -> merged -> delete". This primitive therefore requires a SUCCESS
+/// exit before interpreting stdout; any non-zero/error status is an `Err` that
+/// propagates so cleanup PRESERVES the branch (never deletes on an ambiguous
+/// cherry). Mirrors the exit-code mapping the old `--is-ancestor` guard did.
+///
+/// - exit 0, zero `+` lines -> `Ok(true)` (all changes in base; safe to delete)
+/// - exit 0, one+ `+` lines  -> `Ok(false)` (unmerged change present; preserve)
+/// - any other exit / spawn failure -> `Err` (cannot verify; caller fails closed)
+fn branch_changes_in_base(
+    repo_path: &std::path::Path,
+    base_ref: &str,
+    branch_name: &str,
+) -> Result<bool> {
+    debug!(
+        "branch_changes_in_base: repo_path={} base_ref={base_ref} branch={branch_name}",
+        repo_path.display()
+    );
     let output = run_checked(
         Command::new("git").args([
             "-C",
             &repo_path.to_string_lossy(),
-            "merge-base",
-            "--is-ancestor",
+            "cherry",
+            base_ref,
             branch_name,
-            &base_ref,
         ]),
         subprocess_timeout(),
     )
-    .context("Failed to execute git merge-base --is-ancestor")?;
+    .context("Failed to execute git cherry")?;
 
     match output.status.code() {
         Some(0) => {
-            debug!("branch_merged_into_base: {branch_name} is an ancestor of {base_ref}");
-            Ok(true)
-        }
-        Some(1) => {
-            debug!("branch_merged_into_base: {branch_name} is NOT an ancestor of {base_ref}");
-            Ok(false)
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let plus_lines = stdout.lines().filter(|line| line.starts_with('+')).count();
+            debug!(
+                "branch_changes_in_base: {branch_name} vs {base_ref} -> {plus_lines} unmerged (+) line(s)"
+            );
+            Ok(plus_lines == 0)
         }
         other => Err(eyre::eyre!(
-            "git merge-base --is-ancestor {branch_name} {base_ref} failed (exit {other:?}): {}",
+            "git cherry {base_ref} {branch_name} failed (exit {other:?}): {}",
             String::from_utf8_lossy(&output.stderr)
         )),
     }
@@ -2238,6 +2276,33 @@ mod tests {
         // A flat checkout resolves to itself.
         let flat = crate::test_utils::create_minimal_test_repo(temp.path(), "flat");
         assert_eq!(resolve_update_work_tree(&flat).unwrap(), flat);
+    }
+
+    #[test]
+    fn test_branch_changes_in_base_fails_closed_on_bad_base_ref() {
+        // FAIL-CLOSED (review finding #3, correctness-critical): a fatal
+        // `git cherry` (bad/non-existent base ref -> exit 128) MUST map to
+        // Err, never to "no + lines -> merged -> delete". `run_checked`
+        // returns Ok on a non-zero exit and `git cherry` exits 0 regardless of
+        // + lines, so without the success-exit gate the empty stdout of a
+        // fatal cherry would read as "merged" and cleanup would delete an
+        // unverified branch. If this returned Ok, that hole would be open.
+        use crate::test_utils::run_git_command;
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::test_utils::create_minimal_test_repo(temp.path(), "gx");
+
+        // A real feature branch with one commit, so the BRANCH ref resolves;
+        // only the BASE ref is bad -- isolating the fatal-cherry path.
+        run_git_command(&["checkout", "--quiet", "-b", "feature"], &repo);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git_command(&["add", "-A"], &repo);
+        run_git_command(&["commit", "--quiet", "-m", "feature commit"], &repo);
+
+        let result = branch_changes_in_base(&repo, "origin/does-not-exist", "feature");
+        assert!(
+            result.is_err(),
+            "a fatal git cherry (bad base ref) must be Err (fail closed), got {result:?}"
+        );
     }
 
     #[test]
