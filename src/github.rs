@@ -19,7 +19,23 @@ pub struct CreatePrResult {
     pub url: String,
 }
 
-/// Get all repositories for a user/org from GitHub API
+/// Upper bound on repos listed per owner. `gh repo list` defaults to 30, which
+/// would silently truncate any owner with more repos; set it far above any real
+/// user/org count so the listing is never quietly capped.
+const REPO_LIST_LIMIT: u32 = 4000;
+
+/// Get all repositories owned by a user/org, INCLUDING private repos the token
+/// can see.
+///
+/// Uses `gh repo list <owner>` (GraphQL owner query), NOT `gh api
+/// users/<owner>/repos` (REST). The REST `users/{username}/repos` endpoint
+/// returns ONLY public repos even when authenticated as that user, so the old
+/// orgs->users fallback made every private personal repo invisible to
+/// `gx clone` -- a fail-SILENT partial result (fewer repos, no error). GraphQL
+/// `gh repo list` returns private repos the token can access and works
+/// uniformly for both a user and an org, so the fallback is gone entirely.
+/// (Fix shipped v0.6.3; root-caused live 2026-07-15 against private
+/// `scottidler/*` repos.)
 pub fn get_user_repos(
     user_or_org: &str,
     include_archived: bool,
@@ -30,57 +46,51 @@ pub fn get_user_repos(
     let token = read_token(user_or_org, config)?;
     debug!("Using token for user/org: {user_or_org}");
 
-    // Query GitHub API - try both user and org endpoints
-    let archived_filter = if include_archived {
-        ""
-    } else {
-        " | select(.archived == false)"
-    };
+    let repos = query_github_repos(user_or_org, &token, include_archived)
+        .context(format!("Failed to get repositories for {user_or_org}"))?;
 
-    // First try as an organization
-    let org_query = format!("orgs/{user_or_org}/repos");
-    let org_result = query_github_repos(&org_query, &token, archived_filter);
-
-    if let Ok(repos) = org_result {
-        if !repos.is_empty() {
-            debug!("Found {} repos for org: {}", repos.len(), user_or_org);
-            return Ok(repos);
-        }
-    }
-
-    // If org query failed or returned no results, try as a user
-    let user_query = format!("users/{user_or_org}/repos");
-    let user_result = query_github_repos(&user_query, &token, archived_filter);
-
-    match user_result {
-        Ok(repos) => {
-            debug!("Found {} repos for user: {}", repos.len(), user_or_org);
-            Ok(repos)
-        }
-        Err(e) => {
-            // If both failed, return the user error (more common case)
-            Err(e).context(format!("Failed to get repositories for {user_or_org}"))
-        }
-    }
+    debug!("Found {} repos for {user_or_org}", repos.len());
+    Ok(repos)
 }
 
-/// Query GitHub API for repositories
-fn query_github_repos(query: &str, token: &str, archived_filter: &str) -> Result<Vec<String>> {
+/// Build the `gh repo list` argument vector for an owner. Pure and total so the
+/// endpoint choice can be asserted in a unit test without a network call.
+///
+/// `--no-archived` is passed (gh's own filter) only when archived repos are
+/// excluded; when `include_archived` is true no flag is passed so archived
+/// repos ride along.
+fn repo_list_args(owner: &str, include_archived: bool) -> Vec<String> {
+    let mut args = vec![
+        "repo".to_string(),
+        "list".to_string(),
+        owner.to_string(),
+        "--limit".to_string(),
+        REPO_LIST_LIMIT.to_string(),
+        "--json".to_string(),
+        "nameWithOwner".to_string(),
+        "--jq".to_string(),
+        ".[].nameWithOwner".to_string(),
+    ];
+    if !include_archived {
+        args.push("--no-archived".to_string());
+    }
+    args
+}
+
+/// List an owner's repositories via `gh repo list` (GraphQL; private-visible).
+fn query_github_repos(owner: &str, token: &str, include_archived: bool) -> Result<Vec<String>> {
+    debug!("query_github_repos: owner={owner} include_archived={include_archived}");
+
+    let args = repo_list_args(owner, include_archived);
     let output = run_checked(
-        Command::new("gh").env("GH_TOKEN", token).args([
-            "api",
-            query,
-            "--paginate",
-            "--jq",
-            &format!(".[]{archived_filter}  | .full_name"),
-        ]),
+        Command::new("gh").env("GH_TOKEN", token).args(&args),
         subprocess_timeout(),
     )
     .context("Failed to execute gh command")?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre::eyre!("GitHub API query failed: {}", error));
+        return Err(eyre::eyre!("GitHub repo list failed: {}", error));
     }
 
     let repos = String::from_utf8(output.stdout)?

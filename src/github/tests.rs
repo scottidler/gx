@@ -85,6 +85,44 @@ fn test_gh_command_fails_loud_when_persona_token_unset() {
     }
 }
 
+/// v0.6.3 fix: repo listing must use `gh repo list <owner>` (GraphQL, returns
+/// PRIVATE repos the token can see), never `gh api users/<owner>/repos` (REST,
+/// public-only). The old orgs->users REST fallback made every private personal
+/// repo invisible to `gx clone`, fail-silently. Bite: reverting to the
+/// `gh api users/<owner>/repos` endpoint re-introduces `api` / `users/` into
+/// the args and fails these asserts.
+#[test]
+fn test_repo_list_uses_graphql_not_public_only_rest() {
+    let args = repo_list_args("scottidler", false);
+
+    // GraphQL owner listing: `gh repo list scottidler ...`
+    assert_eq!(args[0], "repo", "must call `gh repo list`: {args:?}");
+    assert_eq!(args[1], "list", "must call `gh repo list`: {args:?}");
+    assert_eq!(
+        args[2], "scottidler",
+        "owner must be the third arg: {args:?}"
+    );
+
+    // Must NOT use the public-only REST endpoint that hid private repos.
+    assert!(
+        !args.iter().any(|a| a == "api" || a.contains("users/")),
+        "must not use the public-only `gh api users/<owner>/repos` endpoint: {args:?}"
+    );
+
+    // Archived excluded by default via gh's own flag.
+    assert!(
+        args.iter().any(|a| a == "--no-archived"),
+        "default must exclude archived repos: {args:?}"
+    );
+
+    // include_archived => no --no-archived flag, so archived repos ride along.
+    let with_archived = repo_list_args("scottidler", true);
+    assert!(
+        !with_archived.iter().any(|a| a == "--no-archived"),
+        "include_archived must not pass --no-archived: {with_archived:?}"
+    );
+}
+
 #[test]
 fn test_query_parsing() {
     let test_output = "owner/repo1\nowner/repo2\nowner/repo3\n";
