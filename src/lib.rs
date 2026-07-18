@@ -16,6 +16,7 @@ pub mod git;
 pub mod github;
 pub mod hash;
 pub mod lock;
+pub mod mcp;
 pub mod output;
 pub mod persona;
 pub mod repo;

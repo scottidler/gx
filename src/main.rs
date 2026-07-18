@@ -275,6 +275,9 @@ fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             *yes,
         ),
         Commands::Doctor { purge } => doctor::run_doctor(*purge),
+        // Intercepted in `run()` before `run_application` is ever called, so it
+        // never reaches this dispatch.
+        Commands::Mcp(_) => unreachable!("mcp is handled in run() before run_application"),
     }
 }
 
@@ -290,6 +293,28 @@ fn run() -> Result<()> {
     let matches = Cli::command().after_help(after_help).get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
 
+    // ONLY change directory if user explicitly provided --cwd. Done before any
+    // path resolution (config load, the mcp handoff below, repo discovery).
+    if let Some(cwd) = &cli.cwd {
+        env::set_current_dir(cwd)
+            .context(format!("Failed to change to directory: {}", cwd.display()))?;
+    }
+
+    // The `mcp` arm hands off to mcp-io, which owns its OWN file logging, tokio
+    // runtime, and stdio discipline, and never returns. It MUST intercept here,
+    // BEFORE gx's env_logger init (a second env_logger init would panic). It
+    // uses the gx *library* Config/handler types: main.rs's own `config` module
+    // is a separate compilation unit whose `Config` is a distinct type, so the
+    // handler (which holds `gx::config::Config`) must be fed the library one.
+    if let Commands::Mcp(cmd) = &cli.command {
+        let config = gx::config::Config::load(cli.config.as_ref())
+            .context("Failed to load configuration")?;
+        let io = mcp_io::mcp_io!();
+        std::process::exit(cmd.run(&io, || {
+            Ok::<_, std::convert::Infallible>(gx::mcp::server::GxMcpServer::new(config))
+        }));
+    }
+
     // Set up logging from the parsed --log-level.
     setup_logging(cli.log_level).context("Failed to setup logging")?;
 
@@ -298,10 +323,7 @@ fn run() -> Result<()> {
     // `checkout`/`clone`) surfaces an ERROR log line rather than a bare abort.
     install_panic_hook();
 
-    // ONLY change directory if user explicitly provided --cwd
     if let Some(cwd) = &cli.cwd {
-        env::set_current_dir(cwd)
-            .context(format!("Failed to change to directory: {}", cwd.display()))?;
         info!("Changed working directory to: {}", cwd.display());
     }
 

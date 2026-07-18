@@ -516,6 +516,10 @@ EXAMPLES:
         )]
         purge: bool,
     },
+
+    /// Run gx's MCP server: `serve` over stdio, or manage its Claude
+    /// registration / `.mcpb` bundle (scaffolding provided by mcp-io).
+    Mcp(mcp_io::McpCmd),
 }
 
 #[derive(Debug, Subcommand)]
