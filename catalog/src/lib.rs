@@ -9,3 +9,4 @@
 //! reappears.
 
 pub mod db;
+pub mod walk;

@@ -5,6 +5,7 @@
 //! The `gx` bin is a thin shim over this crate.
 
 pub mod app;
+pub mod catalog;
 pub mod checkout;
 pub mod cleanup;
 pub mod cli;

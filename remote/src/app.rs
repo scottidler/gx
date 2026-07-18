@@ -3,7 +3,7 @@
 //! intercept `mcp`, then hand off here.
 
 use crate::cli::{Cli, Commands};
-use crate::{checkout, cleanup, clone, create, doctor, review, rollback, status, undo};
+use crate::{catalog, checkout, cleanup, clone, create, doctor, review, rollback, status, undo};
 use eyre::Result;
 use local::config::Config;
 use log::info;
@@ -184,6 +184,7 @@ pub fn run_application(cli: &Cli, config: &Config) -> Result<()> {
             *yes,
         ),
         Commands::Doctor { purge } => doctor::run_doctor(*purge),
+        Commands::Catalog { fetch } => catalog::process_catalog_command(cli, config, *fetch),
         // Intercepted in the bin's `run()` before `run_application` is ever
         // called, so it never reaches this dispatch.
         Commands::Mcp(_) => unreachable!("mcp is handled before run_application"),

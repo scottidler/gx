@@ -517,6 +517,28 @@ EXAMPLES:
         purge: bool,
     },
 
+    /// Build the local intel catalog: index every repo under `catalog.root`
+    /// into the SQLite catalog. LOCAL only (no network); `--fetch` (a network
+    /// refresh) is not yet implemented (Phase 4).
+    #[command(after_help = "CATALOG:
+  Walks every repo under `catalog.root` (config; default ~/repos) and records
+  branch/dirty/ahead-behind (from LOCAL tracking refs, no fetch), last commit,
+  last fetch (FETCH_HEAD mtime), language, and dependencies into
+  $XDG_CACHE_HOME/gx/catalog.db.
+
+EXAMPLES:
+  gx catalog            # local walk: index the fleet, zero network
+  gx catalog --fetch    # (Phase 4) per-repo fetch then re-walk -- not yet")]
+    Catalog {
+        /// Fetch each repo's `origin` before indexing. Not yet implemented
+        /// (Phase 4 of the intel-catalog design doc); errors loudly for now.
+        #[arg(
+            long,
+            help = "Fetch each repo before indexing (Phase 4; not yet implemented)"
+        )]
+        fetch: bool,
+    },
+
     /// Run gx's MCP server: `serve` over stdio, or manage its Claude
     /// registration / `.mcpb` bundle (scaffolding provided by mcp-io).
     Mcp(mcp_io::McpCmd),
