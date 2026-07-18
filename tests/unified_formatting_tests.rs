@@ -1,8 +1,8 @@
-use gx::git::{CheckoutAction, CheckoutResult};
-use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 use local::config::OutputVerbosity;
 use local::git::RepoStatus;
 use local::repo::Repo;
+use remote::git::{CheckoutAction, CheckoutResult};
+use remote::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 
 #[test]
 fn test_unified_display_trait_for_repo_status() {

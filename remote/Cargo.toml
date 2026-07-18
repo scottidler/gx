@@ -1,0 +1,32 @@
+[package]
+name = "remote"
+version.workspace = true
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+chrono = { version = "0.4.42", features = ["clock", "serde"] }
+clap = { version = "4.5.47", features = ["derive"] }
+colored = "3.0.0"
+dirs = "6.0.0"
+eyre = "0.6.12"
+glob = "0.3.3"
+local = { path = "../local" }
+log = "0.4.28"
+mcp-io = { git = "https://github.com/tatari-tv/mcp-io-rs", tag = "v0.2.0", version = "0.2.0" }
+num_cpus = "1.17"
+rayon = "1.11"
+regex = "1.11.2"
+rmcp = { version = "2.2", features = ["server", "macros"] }
+schemars = "1.2"
+serde = { version = "1.0.225", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9.34"
+tempfile = "3.22"
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros"] }
+unicode-display-width = "0.3"
+walkdir = "2.5"
+# Using std::process::Command for git calls like slam
+
+[dev-dependencies]
+local = { path = "../local", features = ["testutil"] }

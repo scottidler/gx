@@ -1,4 +1,4 @@
-use gx::ssh::{SshCommandDetector, SshUrlBuilder};
+use remote::ssh::{SshCommandDetector, SshUrlBuilder};
 
 #[test]
 fn test_ssh_url_construction_integration() {

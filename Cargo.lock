@@ -538,29 +538,16 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "gx"
 version = "0.6.3"
 dependencies = [
- "chrono",
  "clap",
- "colored",
- "dirs",
  "env_logger",
  "eyre",
- "glob",
  "local",
  "log",
  "mcp-io",
- "num_cpus",
- "rayon",
- "regex",
- "rmcp",
- "schemars",
- "serde",
+ "remote",
  "serde_json",
  "serde_yaml",
- "similar",
  "tempfile",
- "tokio",
- "unicode-display-width",
- "walkdir",
 ]
 
 [[package]]
@@ -926,6 +913,33 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "remote"
+version = "0.6.3"
+dependencies = [
+ "chrono",
+ "clap",
+ "colored",
+ "dirs",
+ "eyre",
+ "glob",
+ "local",
+ "log",
+ "mcp-io",
+ "num_cpus",
+ "rayon",
+ "regex",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "unicode-display-width",
+ "walkdir",
+]
 
 [[package]]
 name = "rmcp"

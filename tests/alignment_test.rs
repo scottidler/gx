@@ -1,6 +1,6 @@
-use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 use local::git::{RemoteStatus, RepoStatus, StatusChanges};
 use local::repo::Repo;
+use remote::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 
 /// Test that exposes the alignment issue with different emoji widths
 #[test]
@@ -24,8 +24,8 @@ fn test_emoji_alignment_consistency() {
     let mut outputs = Vec::new();
     for repo in &test_repos {
         let emoji = repo.get_emoji(&opts);
-        let output = gx::output::pad_to_width(&emoji, widths.emoji_width);
-        let display_width = gx::output::calculate_display_width(&output);
+        let output = remote::output::pad_to_width(&emoji, widths.emoji_width);
+        let display_width = remote::output::calculate_display_width(&output);
         outputs.push((emoji.clone(), output.clone(), display_width));
         println!(
             "Emoji: '{}' -> Formatted: '{}' (display_width: {})",
@@ -85,7 +85,7 @@ fn test_emoji_display_width_calculation() {
     ];
 
     for (emoji, expected_width) in test_cases {
-        let calculated = gx::output::calculate_display_width(emoji);
+        let calculated = remote::output::calculate_display_width(emoji);
         println!(
             "Emoji '{}': calculated={}, expected={}",
             emoji, calculated, expected_width

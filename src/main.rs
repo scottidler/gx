@@ -4,31 +4,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-mod checkout;
-mod cleanup;
-mod cli;
-mod clone;
-mod confirm;
-mod crash;
-mod create;
-mod doctor;
-mod git;
-mod github;
-mod lock;
-mod output;
-mod persona;
-mod review;
-mod rollback;
-mod ssh;
-mod state;
-mod status;
-mod transaction;
-mod undo;
-
-use cli::{Cli, Commands};
 use local::config::{xdg_data_dir, Config};
+use remote::cli::{Cli, Commands};
 
-fn setup_logging(level: cli::LogLevel) -> Result<()> {
+fn setup_logging(level: remote::cli::LogLevel) -> Result<()> {
     // During tests, use a temp directory to avoid polluting production logs
     let log_file = if cfg!(test) {
         // Create a temp file for test logging
@@ -95,180 +74,6 @@ fn install_panic_hook() {
     }));
 }
 
-fn run_application(cli: &Cli, config: &Config) -> Result<()> {
-    info!("Starting gx with command: {:?}", cli.command);
-
-    match &cli.command {
-        Commands::Status {
-            detailed,
-            no_emoji,
-            no_color,
-            patterns,
-            fetch_first,
-            no_remote,
-        } => {
-            let options = status::StatusCommandOptions {
-                detailed: *detailed,
-                use_emoji: !no_emoji,
-                use_colors: !no_color,
-                patterns,
-                fetch_first: *fetch_first,
-                no_remote: *no_remote,
-            };
-            status::process_status_command(cli, config, options)
-        }
-        Commands::Checkout {
-            create_branch,
-            from_branch,
-            branch_name,
-            stash,
-            patterns,
-        } => checkout::process_checkout_command(
-            cli,
-            config,
-            *create_branch,
-            from_branch.as_deref(),
-            branch_name,
-            *stash,
-            patterns,
-        ),
-        Commands::Clone {
-            user_or_org,
-            include_archived,
-            patterns,
-        } => clone::process_clone_command(cli, config, user_or_org, *include_archived, patterns),
-        Commands::Create {
-            files,
-            change_id,
-            patterns,
-            commit,
-            pr,
-            draft,
-            yes,
-            report,
-            action,
-        } => match action {
-            None => create::show_matches(cli, config, files, patterns),
-            Some(action) => {
-                let propose_only =
-                    matches!(action, cli::CreateAction::Llm { propose, .. } if *propose);
-                let change = match action {
-                    cli::CreateAction::Add { path, content } => {
-                        create::Change::Add(path.clone(), content.clone())
-                    }
-                    cli::CreateAction::Delete => create::Change::Delete,
-                    cli::CreateAction::Sub {
-                        pattern,
-                        replacement,
-                    } => create::Change::Sub(pattern.clone(), replacement.clone()),
-                    cli::CreateAction::Regex {
-                        pattern,
-                        replacement,
-                    } => create::Change::Regex(pattern.clone(), replacement.clone()),
-                    cli::CreateAction::Llm { prompt, .. } => create::Change::Llm(prompt.clone()),
-                };
-                create::process_create_command(
-                    cli,
-                    config,
-                    files,
-                    change_id.clone(),
-                    patterns,
-                    commit.clone(),
-                    *pr,
-                    *draft,
-                    *yes,
-                    change,
-                    propose_only,
-                    report.as_deref(),
-                )
-            }
-        },
-        Commands::Apply {
-            change_id,
-            pr,
-            draft,
-            yes,
-        } => create::process_apply_command(cli, config, change_id, *pr, *draft, *yes),
-        Commands::Review {
-            org,
-            patterns,
-            action,
-        } => match action {
-            cli::ReviewAction::Ls { change_ids } => {
-                review::process_review_ls_command(cli, config, org.as_deref(), patterns, change_ids)
-            }
-            cli::ReviewAction::Clone { change_id, all } => review::process_review_clone_command(
-                cli,
-                config,
-                org.as_deref(),
-                patterns,
-                change_id,
-                *all,
-            ),
-            cli::ReviewAction::Approve {
-                change_id,
-                admin,
-                auto,
-                yes,
-            } => review::process_review_approve_command(
-                cli,
-                config,
-                org.as_deref(),
-                patterns,
-                change_id,
-                *admin,
-                *auto,
-                *yes,
-            ),
-            cli::ReviewAction::Delete { change_id, yes } => review::process_review_delete_command(
-                cli,
-                config,
-                org.as_deref(),
-                patterns,
-                change_id,
-                *yes,
-            ),
-            cli::ReviewAction::Sync { change_id } => review::process_review_sync_command(
-                cli,
-                config,
-                org.as_deref(),
-                patterns,
-                change_id,
-            ),
-            cli::ReviewAction::Purge { yes } => {
-                review::process_review_purge_command(cli, config, org.as_deref(), patterns, *yes)
-            }
-        },
-        Commands::Rollback { action } => rollback::handle_rollback(action.clone()),
-        Commands::Undo {
-            change_id,
-            org,
-            yes,
-        } => undo::process_undo_command(cli, config, change_id, org.as_deref(), *yes),
-        Commands::Cleanup {
-            change_id,
-            all,
-            list,
-            include_remote,
-            force,
-            yes,
-        } => cleanup::process_cleanup_command(
-            cli,
-            config,
-            change_id.as_deref(),
-            *all,
-            *list,
-            *include_remote,
-            *force,
-            *yes,
-        ),
-        Commands::Doctor { purge } => doctor::run_doctor(*purge),
-        // Intercepted in `run()` before `run_application` is ever called, so it
-        // never reaches this dispatch.
-        Commands::Mcp(_) => unreachable!("mcp is handled in run() before run_application"),
-    }
-}
-
 fn run() -> Result<()> {
     use clap::{CommandFactory, FromArgMatches};
 
@@ -276,7 +81,7 @@ fn run() -> Result<()> {
     // so --help never drifts and we don't spawn subprocesses during parsing ([A24]).
     let after_help = format!(
         "Logs are written to: {}\nRun `gx doctor` to check required tools.",
-        doctor::log_path().display()
+        remote::doctor::log_path().display()
     );
     let matches = Cli::command().after_help(after_help).get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
@@ -290,15 +95,15 @@ fn run() -> Result<()> {
 
     // The `mcp` arm hands off to mcp-io, which owns its OWN file logging, tokio
     // runtime, and stdio discipline, and never returns. It MUST intercept here,
-    // BEFORE gx's env_logger init (a second env_logger init would panic). Since
-    // Phase 1 (Track B0), `Config` lives in the `local` crate and is shared by
-    // both the bin (here) and the gx lib's mcp handler -- one type, not two.
+    // BEFORE gx's env_logger init (a second env_logger init would panic).
+    // `Config` lives in the `local` crate and is shared by both the bin (here)
+    // and `remote`'s mcp handler - one type, not two.
     if let Commands::Mcp(cmd) = &cli.command {
         let config = local::config::Config::load(cli.config.as_ref())
             .context("Failed to load configuration")?;
         let io = mcp_io::mcp_io!();
         std::process::exit(cmd.run(&io, || {
-            Ok::<_, std::convert::Infallible>(gx::mcp::server::GxMcpServer::new(config))
+            Ok::<_, std::convert::Infallible>(remote::mcp::server::GxMcpServer::new(config))
         }));
     }
 
@@ -325,7 +130,7 @@ fn run() -> Result<()> {
     info!("Starting with config from: {:?}", cli.config);
 
     // Run the main application logic
-    run_application(&cli, &config).context("Application failed")?;
+    remote::app::run_application(&cli, &config).context("Application failed")?;
 
     Ok(())
 }

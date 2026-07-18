@@ -8,7 +8,7 @@
 //! deterministic contention window: process A holds the lock for ~1s, process
 //! B is spawned ~200ms in and must fail immediately rather than queue.
 
-use gx::transaction::{Phase, RecoveryState, RollbackStep, StepEntry};
+use remote::transaction::{Phase, RecoveryState, RollbackStep, StepEntry};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};

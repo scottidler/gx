@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use gx::create::manifest::{
+use remote::create::manifest::{
     self, FileAction, FileEntry, ProposalManifest, ProposalOutcome, RepoProposal,
 };
-use gx::state::{ChangeState, RepoChangeStatus};
+use remote::state::{ChangeState, RepoChangeStatus};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 

@@ -239,3 +239,116 @@ remote-side caller reaches them through the crate dependency. Nothing needs to m
 ### Open questions
 - None. The three cross-repo/deferred bullets in this design (`remote` crate formation, bin shim, status flip
   to Implemented) belong to Phase 3 / the parent, not this phase.
+
+## Phase 3: form remote, finalize the bin
+
+### Design decisions
+- **Repo layout note.** The design doc's steps refer to `gx/Cargo.toml` and `gx/src/`, but in this repo the
+  `gx` package IS the workspace root (root `Cargo.toml` + root `src/`); there is no `gx/` subdirectory holding
+  the bin (a `gx/` dir exists but only holds an unrelated legacy doc, `gx/docs/remote-status-feature.md`).
+  Read the doc's intent (move the 21 lib modules out of the `gx` package into a new `remote` crate, thin the
+  `gx` bin) and executed it at the correct seam: `remote/` created as a new top-level workspace member
+  alongside `local/`, the 21 modules `git mv`'d from root `src/` into `remote/src/`, root `src/lib.rs` deleted
+  (gx has no lib now), root `src/main.rs` thinned.
+- **All 21 modules moved via `git mv`** (files + subdirs): `checkout`, `cleanup`, `cli`, `clone`, `confirm`,
+  `crash`, `create`, `doctor`, `git` (the REMOTE half, already split out in Phase 2), `github`, `lock`, `mcp`,
+  `output`, `persona`, `review`, `rollback`, `ssh`, `state`, `status`, `transaction`, `undo` -> `remote/src/`.
+  Internal `crate::` references between these modules were left untouched (they resolve inside `remote` now,
+  same as Phase 1's treatment of `local`'s internal refs).
+- **`run_application` moved into `remote::app`** (a new `remote/src/app.rs`, `pub mod app;` in
+  `remote/src/lib.rs`), per the design doc's stated preference for a genuinely thin bin over leaving the full
+  command-dispatch match in `main.rs` with `remote::` prefixes sprinkled through it. `main.rs` now does: parse
+  args (`remote::cli::{Cli, Commands}` + `clap`'s `CommandFactory`/`FromArgMatches` traits), `--cwd` chdir, the
+  `mcp` interception (`local::config::Config::load` + `mcp_io::mcp_io!()` + `remote::mcp::server::GxMcpServer`),
+  `setup_logging`/`install_panic_hook` (kept in `main.rs` - they are bin-lifecycle concerns, not command
+  dispatch), `Config::load` + `local::subprocess::init_subprocess_timeout`, then one call:
+  `remote::app::run_application(&cli, &config)`. `main.rs` dropped from 343 lines (21 `mod` decls + the full
+  match) to a genuinely thin shell; `run_application`'s body is otherwise byte-identical to before the move
+  (only `crate::` -> local `crate::` refs inside `remote::app`, since it now lives in `remote` and calls
+  sibling `remote` modules directly).
+- **`build.rs` (`GIT_DESCRIBE` for clap's `version = env!("GIT_DESCRIBE")`) moved with `cli.rs`.** `cargo:rustc-
+  env` only applies to the package whose build script sets it, not workspace-wide, so once `cli.rs` (the only
+  consumer of `env!("GIT_DESCRIBE")`) moved into `remote`, the build script had to move there too:
+  `git mv build.rs remote/build.rs`, `build = "build.rs"` added to `remote/Cargo.toml`. Its
+  `cargo:rerun-if-changed` paths were relative to the OLD manifest dir (repo root); rewritten to `../.git/HEAD`,
+  `../.git/refs/`, `../.git/packed-refs` since they are now resolved relative to `remote/`'s manifest dir. The
+  companion regression test (`tests/build_script_test.rs`, which reads `build.rs` via
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs")`) moved with it to `remote/tests/build_script_test.rs` (its
+  `CARGO_MANIFEST_DIR` is now `remote/`, matching where `build.rs` lives), and its three string assertions were
+  updated to expect the `../.git/...` paths.
+- **gx-tests `gx::` -> `remote::` rewire.** Five integration-test files under (root) `tests/` imported the
+  former `gx` lib directly: `alignment_test.rs`, `lock_contention_test.rs`, `unified_formatting_tests.rs`,
+  `mcp_tools_test.rs`, `ssh_integration_tests.rs`. Since `gx` has no `[lib]` anymore, every `gx::` path became
+  `remote::` (mechanical `sed -i 's/\bgx::/remote::/g'`); `cargo fmt` re-wrapped one resulting long line in
+  `unified_formatting_tests.rs`. The binary-spawning tests (`mcp_tools_test.rs`, `mcp_handshake_test.rs`, etc.)
+  kept `env!("CARGO_BIN_EXE_gx")` unchanged - the compiled bin's name and behavior are untouched.
+- **`gx`'s `[dev-dependencies]` gained `serde_json`, `serde_yaml`, `tempfile`, `remote = { path = "remote" }`.**
+  Before Phase 3 these were `gx`'s own `[dependencies]` (the lib used them); once the lib's code moved to
+  `remote`, the root package's ONLY remaining consumers of these three crates are its `tests/*.rs` integration
+  tests, so they moved to `[dev-dependencies]`. `remote = { path = "remote" }` (no feature flags - see
+  Tradeoffs) lets those same tests reach `remote::create::manifest`, `remote::state`, `remote::output`, etc.
+- **Root `Cargo.toml` dependency list reduced to what `main.rs` itself imports directly:** `clap` (trait
+  methods on the derived `Cli`), `env_logger` + `log` (bin-owned logging setup), `eyre` (error handling),
+  `local` (`Config`, `xdg_data_dir`, `subprocess::init_subprocess_timeout`), `mcp-io` (the `mcp_io!()` macro),
+  `remote` (everything else). Every other former root dependency (`chrono`, `colored`, `dirs`, `glob`,
+  `num_cpus`, `rayon`, `regex`, `rmcp`, `schemars`, `serde`, `serde_json`, `serde_yaml`, `similar`, `tempfile`,
+  `tokio`, `unicode-display-width`, `walkdir`) is now exclusively consumed by the moved modules and lives in
+  `remote/Cargo.toml` instead (built by compiling and letting the compiler name every missing one, then
+  `cargo add`-equivalent version-matching against the prior root `Cargo.toml`).
+- **`similar` dropped entirely from the workspace's non-`local` crates.** It was a root dependency before this
+  phase but no moved module (`remote/src/**`) references it directly; grepping confirmed zero remaining
+  `similar::` call sites outside `local` (which already depends on it from Phase 1). Not re-added to `remote`.
+
+### Deviations
+- **`tempfile` is a normal (non-optional) `[dependencies]` entry in `remote/Cargo.toml`, not dev-only.**
+  `remote/src/create/core/propose.rs`'s `tempfile::Builder::new().prefix("wt-").tempdir_in(tmp_root)` is
+  PRODUCTION code (the propose worktree's temp checkout dir), not test scaffolding - every other `tempfile::`
+  call site in the moved modules is inside a `#[cfg(test)] mod tests` (git.rs, cleanup.rs, github.rs, lock.rs,
+  state.rs, transaction.rs, and several `create`/`rollback`/`undo` test submodules), but this one production
+  call site forces `tempfile` to be a plain dependency of `remote`, matching how `local/Cargo.toml` already
+  handles it after Phase 2 (`file::atomic_write`'s analogous production use).
+- **Declared, then removed, an unused `testutil` feature on `remote`.** The design doc's step 1 said to add
+  `[features] testutil = []` "if any remote test helper must cross to the gx bin's tests." Checked: `remote`
+  has no `#[cfg(test)]`-gated pub exports that gx's `tests/*.rs` need (unlike `local::test_utils`, everything
+  the gx integration tests import from `remote` - `create::manifest`, `state`, `output`, `ssh`, `git::
+  {CheckoutAction, CheckoutResult}`, `transaction` - is ordinary production `pub`). Declared the feature and
+  the corresponding `features = ["testutil"]` on both dependency edges first, then removed both once the build
+  proved they gated nothing, per "config drives behavior or it doesn't exist" - an inert feature flag is dead
+  configuration.
+- **`main.rs`'s `install_panic_hook`/`setup_logging` stayed in the bin rather than moving to `remote::app`.**
+  The design doc's Phase 3 bullet lists `output`/`cli`/`mcp` etc. as moving, and separately says "keep
+  `setup_logging`/`install_panic_hook` + mcp interception" in the bin if `run_application` moves - matching
+  that explicit guidance; these two functions own the bin's own lifecycle (process-wide logger init, panic
+  hook), not command dispatch, so they are correctly bin-owned, not `remote`-owned.
+
+### Tradeoffs
+- **`remote = { path = "remote" }` in `gx`'s `[dev-dependencies]` carries no feature flags,** unlike `local`'s
+  `features = ["testutil"]` dev-dependency edge. This is intentional asymmetry, not an oversight: `local`
+  genuinely gates test-only code behind a feature (`test_utils`), `remote` does not, so adding an unused
+  feature flag to the `remote` edge would be cargo-cult symmetry with no effect. Chosen over "match `local`'s
+  shape for consistency" because the shapes are legitimately different for a concrete reason (see Deviations).
+- **Cargo.lock churned on this phase** (new `remote` package entry, transitive version bumps picked up by the
+  fresh resolve - e.g. `clap` 4.5.47 -> 4.6.2, `tempfile` 3.22 -> 3.27, `serde` 1.0.225 -> 1.0.228 - all within
+  each dependency's declared semver range in the various `Cargo.toml`s). Left as the resolver produced it
+  rather than pinning back to the exact prior lock, since `otto ci` is green with the new lock and the design
+  doc explicitly rules out any external/behavior change, not any exact dependency-version freeze.
+
+### Success criteria
+1. Workspace is `local` + `remote` + `gx` (bin), single flat version -- PASS. `cargo tree -p remote --depth 1`
+   shows `local` as its only workspace dependency; `cargo tree -p gx --depth 1` shows `local` + `remote`;
+   `grep -c "gx v0" <(cargo tree -p remote)` is 0 (no cycle back to `gx`). All three crates use
+   `version.workspace = true` against the single `[workspace.package] version = "0.6.3"`.
+2. `otto ci` GREEN -- PASS (exit 0; lint, `local-boundary`, check/clippy/fmt, full test suite - 92 `local`
+   tests + 252 `remote` tests + the root `gx` integration-test targets - all green).
+3. Full `gx --help` command matrix behaves identically -- PASS. Built `./target/debug/gx --help`: lists
+   status/checkout/clone/create/apply/review/rollback/undo/cleanup/doctor/mcp verbatim (plus `help`); `gx mcp
+   --help` lists serve/register/unregister/status/bundle (plus `help`). No behavior change - `run_application`'s
+   body is a verbatim move.
+4. `cargo tree -p remote` depends on `local`; `cargo tree -p gx` depends on `remote` -- PASS, shown above.
+
+### Open questions
+- None. All ambiguities in this phase (repo-layout mismatch between the doc's `gx/` paths and this repo's
+  root-package layout, the `GIT_DESCRIBE` build-script seam, the unused `testutil` feature) were resolved
+  during implementation per "open questions are the author's to close." This closes Track B0; Track B1 (the
+  intel catalog, `2026-07-17-gx-intel-catalog.md`) can now build its read-only tools against `local` only,
+  with the crate boundary enforced by the compiler and the biting CI guard from Phase 2.

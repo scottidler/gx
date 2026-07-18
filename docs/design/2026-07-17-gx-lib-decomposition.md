@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-07-17
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 1/5 self + review-panel (Architect + Staff, both rc=0); consensus loop: all 6 findings folded, no escalations
 **Track:** B0 of 2-in-B (lands after Track A `2026-07-17-gx-onto-mcp-io.md`; is a prerequisite for `2026-07-17-gx-intel-catalog.md`)
 
@@ -94,11 +94,11 @@ Internal only. No CLI/tool surface change. Public function paths change from `gx
 
 ## Acceptance Criteria
 
-- [ ] `local` has NO `remote` dependency and no `ssh`/`persona`/`github` dependency (`cargo tree -p local`).
-- [ ] A CI grep/lint over `local/src` fails on `crate::{ssh,github,persona}`, `Command::new("gh")`, or a remote git verb (`fetch`/`pull`/`push`/`ls-remote`/`clone`); planting a `git fetch` in a local module turns CI red (proven, per "tests must bite").
-- [ ] `otto ci` is green at every phase; no existing test changes except import paths (behavior unchanged).
-- [ ] `git.rs` is split: local status/branch ops + the new `get_repo_status_local` live in `local::git`, remote/credential ops in `remote::git`.
-- [ ] Workspace carries a single flat version across `local`, `remote`, `gx` (bin).
+- [x] `local` has NO `remote` dependency and no `ssh`/`persona`/`github` dependency (`cargo tree -p local`).
+- [x] A CI grep/lint over `local/src` fails on `crate::{ssh,github,persona}`, `Command::new("gh")`, or a remote git verb (`fetch`/`pull`/`push`/`ls-remote`/`clone`); planting a `git fetch` in a local module turns CI red (proven, per "tests must bite").
+- [x] `otto ci` is green at every phase; no existing test changes except import paths (behavior unchanged).
+- [x] `git.rs` is split: local status/branch ops + the new `get_repo_status_local` live in `local::git`, remote/credential ops in `remote::git`.
+- [x] Workspace carries a single flat version across `local`, `remote`, `gx` (bin).
 
 ## Resolved Decisions
 

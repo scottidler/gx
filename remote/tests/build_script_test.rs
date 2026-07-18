@@ -15,11 +15,11 @@ fn build_rs_watches_packed_refs() {
     let build_rs =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs")).unwrap();
     assert!(
-        build_rs.contains("cargo:rerun-if-changed=.git/packed-refs"),
+        build_rs.contains("cargo:rerun-if-changed=../.git/packed-refs"),
         "build.rs must rerun on .git/packed-refs changes, or a tag-only release \
          (bump --tag-only writing straight to packed-refs) embeds a stale GIT_DESCRIBE"
     );
     // The pre-existing triggers must survive alongside the new one.
-    assert!(build_rs.contains("cargo:rerun-if-changed=.git/HEAD"));
-    assert!(build_rs.contains("cargo:rerun-if-changed=.git/refs/"));
+    assert!(build_rs.contains("cargo:rerun-if-changed=../.git/HEAD"));
+    assert!(build_rs.contains("cargo:rerun-if-changed=../.git/refs/"));
 }
