@@ -41,6 +41,42 @@ pub fn xdg_data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".local").join("share"))
 }
 
+/// XDG cache dir, honoring `$XDG_CACHE_HOME` and falling back to `$HOME/.cache`.
+///
+/// Cache-dir sibling of `xdg_data_dir`/`xdg_config_dir`: rebuildable artifacts
+/// (the intel catalog's `catalog.db`, design doc `2026-07-17-gx-intel-catalog.md`)
+/// belong under `~/.cache`, not `~/.config` or `~/.local/share` (taste.md
+/// "cache in ~/.cache not ~/.config"). Same env-first, `$HOME`-fallback shape
+/// as the other two helpers, for the same cross-platform reason: `dirs::cache_dir()`
+/// ignores `$XDG_CACHE_HOME` on macOS.
+pub fn xdg_cache_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".cache"))
+}
+
+/// Expand a leading `~` (bare, or `~/...`) to `$HOME`. A path with no leading
+/// `~` passes through unchanged. When `$HOME` cannot be resolved, the literal
+/// path is returned unchanged rather than fabricating a `~`-prefixed path --
+/// the OS does not expand a literal `~`, so silently "falling back" would
+/// create a directory named `~` under the CWD instead (rust.md unwrap policy).
+fn expand_tilde(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -77,6 +113,10 @@ pub struct Config {
     /// `2026-07-12-gx-production-hardening.md`, Phase 3). Absent block =
     /// `DEFAULT_CONFIRM_THRESHOLD`.
     pub cleanup: Option<CleanupConfig>,
+    /// The read-only intel catalog (design doc `2026-07-17-gx-intel-catalog.md`,
+    /// Track B1): the subtree ceiling for the scope clamp and the staleness
+    /// window that triggers an auto-walk. Absent block = `CatalogConfig::default()`.
+    pub catalog: Option<CatalogConfig>,
 }
 
 /// The curated `gx-mcp` tool surface (design doc API Design > MCP tools). The
@@ -226,6 +266,38 @@ impl Default for CleanupConfig {
     }
 }
 
+/// Configuration for the read-only intel catalog (design doc
+/// `2026-07-12-gx-intel-catalog.md` -- filed 2026-07-17 -- Phase 1). `root` is
+/// the ceiling for the scope clamp: `query`/`search`/`read`/`deps` (Phase 3)
+/// reject any requested root that canonicalizes outside it. `staleness-secs`
+/// is how old a row can be before an MCP `query` (Phase 3) triggers a local
+/// walk of the scoped subtree.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CatalogConfig {
+    /// Ceiling for the scope clamp; `~` is expanded (see `Config::catalog_root`).
+    pub root: Option<PathBuf>,
+    /// A `query` row older than this triggers a local walk before answering.
+    pub staleness_secs: Option<u64>,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self {
+            root: Some(PathBuf::from(DEFAULT_CATALOG_ROOT)),
+            staleness_secs: Some(DEFAULT_CATALOG_STALENESS_SECS),
+        }
+    }
+}
+
+/// Default catalog root: `~` is expanded at read time by `Config::catalog_root`,
+/// never at parse time (so the raw config value round-trips through
+/// serialization unchanged).
+pub const DEFAULT_CATALOG_ROOT: &str = "~/repos";
+
+/// Default staleness window, in seconds, before an MCP `query` auto-walks.
+pub const DEFAULT_CATALOG_STALENESS_SECS: u64 = 3600;
+
 /// Configuration for the `gx create ... llm` change type (design doc
 /// `2026-07-12-llm-propose-apply-and-mcp-server.md`, Config additions): the
 /// agent command run per repo in a throwaway worktree, and the wall-clock
@@ -332,6 +404,7 @@ impl Default for Config {
             subprocess_timeout_secs: None,
             review: Some(ReviewConfig::default()),
             cleanup: Some(CleanupConfig::default()),
+            catalog: Some(CatalogConfig::default()),
         }
     }
 }
@@ -433,6 +506,26 @@ impl Config {
             .as_ref()
             .and_then(|c| c.confirm_threshold)
             .unwrap_or(DEFAULT_CONFIRM_THRESHOLD)
+    }
+
+    /// Effective catalog root, with `~` expanded to `$HOME`. This is the
+    /// ceiling for the intel tools' scope clamp (Phase 3): a requested `root`
+    /// that canonicalizes outside this path is rejected loudly.
+    pub fn catalog_root(&self) -> PathBuf {
+        let raw = self
+            .catalog
+            .as_ref()
+            .and_then(|c| c.root.clone())
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CATALOG_ROOT));
+        expand_tilde(&raw)
+    }
+
+    /// Effective catalog staleness window, in seconds.
+    pub fn catalog_staleness_secs(&self) -> u64 {
+        self.catalog
+            .as_ref()
+            .and_then(|c| c.staleness_secs)
+            .unwrap_or(DEFAULT_CATALOG_STALENESS_SECS)
     }
 
     /// Effective wall-clock timeout for every git/gh subprocess.

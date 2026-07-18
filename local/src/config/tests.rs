@@ -274,3 +274,100 @@ fn test_review_confirm_threshold_unknown_field_fails_loudly() {
         "error should name the unknown nested field, got: {err}"
     );
 }
+
+/// `xdg_cache_dir` mirrors `xdg_data_dir`/`xdg_config_dir`: honors
+/// `$XDG_CACHE_HOME` and falls back to `$HOME/.cache` (design doc
+/// `2026-07-17-gx-intel-catalog.md`, Phase 1). Platform-path testing rule:
+/// assert the env-honoring behavior and the fallback suffix, never a
+/// platform-specific path.
+#[test]
+fn test_xdg_cache_dir_honors_env_and_falls_back() {
+    let guard = env_lock();
+    let prior = std::env::var("XDG_CACHE_HOME").ok();
+
+    let dir = TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_CACHE_HOME", dir.path()) };
+    assert_eq!(xdg_cache_dir().as_deref(), Some(dir.path()));
+
+    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+    assert!(xdg_cache_dir().unwrap().ends_with(".cache"));
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+    }
+    drop(guard);
+}
+
+/// With no `catalog:` block, the effective root is `~/repos` expanded and the
+/// staleness window is the documented default.
+#[test]
+fn test_catalog_defaults() {
+    let guard = env_lock();
+    let prior = std::env::var("HOME").ok();
+
+    let home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("HOME", home.path()) };
+
+    let config = Config::default();
+    assert_eq!(config.catalog_root(), home.path().join("repos"));
+    assert_eq!(
+        config.catalog_staleness_secs(),
+        DEFAULT_CATALOG_STALENESS_SECS
+    );
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    drop(guard);
+}
+
+/// A `catalog:` block with a bare (non-`~`) root round-trips unchanged, and an
+/// explicit `staleness-secs` overrides the default.
+#[test]
+fn test_catalog_block_parses_and_overrides_defaults() {
+    let yaml = "catalog:\n  root: /srv/repos\n  staleness-secs: 60\n";
+    let config: Config = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.catalog_root(), PathBuf::from("/srv/repos"));
+    assert_eq!(config.catalog_staleness_secs(), 60);
+}
+
+/// A typo'd key under `catalog:` fails to parse loudly - `deny_unknown_fields`
+/// bites on `CatalogConfig` exactly as it does on every other config struct.
+#[test]
+fn test_catalog_unknown_field_fails_loudly() {
+    let yaml = "catalog:\n  roots: ~/repos\n"; // typo: root
+    let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("roots"),
+        "error should name the unknown catalog field, got: {err}"
+    );
+}
+
+/// `~` expansion: a bare `~` and a `~/...` path both resolve against `$HOME`;
+/// a path with no leading `~` passes through unchanged.
+#[test]
+fn test_expand_tilde() {
+    let guard = env_lock();
+    let prior = std::env::var("HOME").ok();
+
+    let home = TempDir::new().unwrap();
+    unsafe { std::env::set_var("HOME", home.path()) };
+
+    assert_eq!(
+        expand_tilde(Path::new("~/repos")),
+        home.path().join("repos")
+    );
+    assert_eq!(expand_tilde(Path::new("~")), home.path());
+    assert_eq!(
+        expand_tilde(Path::new("/srv/repos")),
+        PathBuf::from("/srv/repos")
+    );
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    drop(guard);
+}

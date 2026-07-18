@@ -1,0 +1,14 @@
+[package]
+name = "catalog"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+eyre = "0.6.12"
+local = { path = "../local" }
+log = "0.4.28"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+[dev-dependencies]
+local = { path = "../local", features = ["testutil"] }
+tempfile = "3.22"

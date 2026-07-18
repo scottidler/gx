@@ -3,8 +3,11 @@
 # the credential-free lib crate (Phase 1/2) and `remote` is the
 # credential-bound lib crate (Phase 3) that owns every command module and
 # depends on `local`. The MCP server is the `gx mcp` subcommand (embedded via
-# mcp-io, living in `remote::mcp`), not a separate `gx-mcp` crate.
-members = ["local", "remote"]
+# mcp-io, living in `remote::mcp`), not a separate `gx-mcp` crate. `catalog`
+# (Track B1, gx-intel-catalog design doc) is a THIRD lib crate depending on
+# `local` only -- never `remote` -- so the cross-org intel/operations boundary
+# is compiler-structural, not conventional.
+members = ["local", "remote", "catalog"]
 # `cargo run`/`cargo build`/`cargo install --path .` at the repo root build the
 # gx bin, which is what the default working set must stay pointed at.
 default-members = ["."]

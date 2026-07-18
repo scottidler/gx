@@ -73,6 +73,14 @@ github:
   #   by-org:
   #     some-org: GITHUB_PAT_SERVICE
 
+# Read-only intel catalog (design doc 2026-07-17-gx-intel-catalog.md): a local
+# SQLite catalog of every repo under `root`, plus (Phase 3) 4 MCP intel tools
+# (query/search/read/deps). `root` is the ceiling for the scope clamp -- a
+# requested root outside it is rejected loudly. Uncomment to override:
+# catalog:
+#   root: ~/repos          # ceiling for the scope clamp; catalog covers this subtree
+#   staleness-secs: 3600   # a query older than this triggers a local walk of the scoped subtree
+
 # `gx-mcp` MCP server: per-tool gating (design doc
 # 2026-07-12-llm-propose-apply-and-mcp-server.md). This block is optional; with
 # it absent, every tool takes its category default below. Read-only tools
