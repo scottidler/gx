@@ -39,6 +39,79 @@ pub struct RepoDiscoverRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NoArgs {}
 
+// ---- intel-catalog read-only tools (design doc 2026-07-17-gx-intel-catalog) --
+
+/// `query`: repo metadata rows under a clamped `root` (default = the server's
+/// CWD), filtered by the optional `where{}` fields. The `where{}` object is
+/// flattened to top-level optional args here: it keeps the MCP input schema
+/// flat and sidesteps the `where` Rust keyword, with identical filter semantics.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryRequest {
+    #[serde(default)]
+    #[schemars(
+        description = "Subtree root to scope to (default: server CWD); clamped to catalog.root"
+    )]
+    pub root: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Only repos with uncommitted changes (true) or clean (false)")]
+    pub dirty: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "Only repos on this branch")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Only repos in this org/user")]
+    pub org: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Only repos whose primary language guess is this")]
+    pub lang: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Only repos whose local behind-count exceeds this")]
+    pub behind_gt: Option<i64>,
+}
+
+/// `search`: live `rg` over the working trees under a clamped `root`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchRequest {
+    #[serde(default)]
+    #[schemars(
+        description = "Subtree root to scope to (default: server CWD); clamped to catalog.root"
+    )]
+    pub root: Option<String>,
+    #[schemars(description = "The rg pattern to search for")]
+    pub pattern: String,
+    #[serde(default)]
+    #[schemars(description = "An optional rg --glob to restrict matched files (e.g. '*.rs')")]
+    pub glob: Option<String>,
+}
+
+/// `read`: one file's contents inside the repo `slug`, path clamped to the repo.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadRequest {
+    #[schemars(description = "The repo slug (<org|user>/<name>) whose file to read")]
+    pub slug: String,
+    #[schemars(description = "Repo-relative file path (no .. / absolute / .git escapes)")]
+    pub path: String,
+    #[serde(default)]
+    #[schemars(
+        description = "1-based first line to return (with end_line, reads a bounded range)"
+    )]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "1-based last line to return (inclusive)")]
+    pub end_line: Option<usize>,
+}
+
+/// `deps`: pass exactly ONE of `dependency` (repos using it) or `slug` (its deps).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DepsRequest {
+    #[serde(default)]
+    #[schemars(description = "Find repos that depend on this dependency name")]
+    pub dependency: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Find the dependency list of this repo slug")]
+    pub slug: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChangeGetRequest {
     #[schemars(description = "The change id (e.g. GX-2026-07-12T...)")]

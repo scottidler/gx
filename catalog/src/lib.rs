@@ -9,4 +9,5 @@
 //! reappears.
 
 pub mod db;
+pub mod tools;
 pub mod walk;

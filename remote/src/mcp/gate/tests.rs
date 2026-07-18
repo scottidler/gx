@@ -33,7 +33,27 @@ fn test_all_covers_every_tool_exactly_once() {
             name(tool)
         );
     }
-    assert_eq!(ALL.len(), 10);
+    assert_eq!(ALL.len(), 14);
+}
+
+#[test]
+fn test_intel_tools_are_read_only_and_enabled_by_default() {
+    // The four intel-catalog tools are read-only (never mutating) and take the
+    // read-only category default (ENABLED) with no `mcp:` block.
+    let config = Config::default();
+    for tool in [
+        McpTool::Query,
+        McpTool::Search,
+        McpTool::Read,
+        McpTool::Deps,
+    ] {
+        assert!(!is_mutating(tool), "{} must be read-only", name(tool));
+        assert!(
+            tool_enabled(&config, tool),
+            "{} must default enabled",
+            name(tool)
+        );
+    }
 }
 
 #[test]

@@ -141,6 +141,12 @@ pub enum McpTool {
     ChangeGet,
     ReviewStatus,
     Doctor,
+    // Read-only intel-catalog tools (design doc `2026-07-17-gx-intel-catalog.md`,
+    // Track B1; also default ENABLED -- reads only, no persona/network path).
+    Query,
+    Search,
+    Read,
+    Deps,
     // Mutating tools (gx-mcp defaults these DISABLED; writes impossible by default).
     CreatePropose,
     CreateApply,

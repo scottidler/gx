@@ -14,6 +14,9 @@ use std::process::Command;
 
 const GIT_MIN_VERSION: &str = "2.20.0";
 const GH_MIN_VERSION: &str = "2.0.0";
+/// Minimum `rg` (ripgrep) version. `search` shells out to `rg` (design doc
+/// `2026-07-17-gx-intel-catalog.md`), so `gx doctor` flags a missing/old one.
+const RG_MIN_VERSION: &str = "13.0.0";
 /// Recovery state older than this (and not matching a live repo) is orphaned.
 const ARTIFACT_TTL_DAYS: i64 = 7;
 
@@ -69,7 +72,7 @@ pub struct DoctorReport {
 /// read core behind both `run_doctor` and the MCP `doctor` tool.
 pub fn collect_report() -> Result<DoctorReport> {
     debug!("collect_report: gathering doctor report");
-    let tools = [("git", GIT_MIN_VERSION), ("gh", GH_MIN_VERSION)]
+    let mut tools: Vec<ToolCheck> = [("git", GIT_MIN_VERSION), ("gh", GH_MIN_VERSION)]
         .into_iter()
         .map(|(tool, min)| {
             let status = check_tool_version(tool, min);
@@ -80,6 +83,9 @@ pub fn collect_report() -> Result<DoctorReport> {
             }
         })
         .collect();
+    // `rg` prints its version as the SECOND whitespace token (`ripgrep 14.1.1
+    // ...`), unlike git/gh (third token), so it uses a dedicated presence check.
+    tools.push(check_tool_presence("rg", RG_MIN_VERSION));
 
     let (failed_recovery, orphaned_artifacts) = gather_recovery()?;
     let orphaned_proposals = gather_proposal_orphans();
@@ -269,6 +275,40 @@ fn check_tool_version(tool: &str, min_version: &str) -> ToolStatus {
             ok: false,
         },
     }
+}
+
+/// Presence + version check for a tool whose `--version` prints the version as
+/// the SECOND whitespace token (`ripgrep 14.1.1 ...`), rather than the third as
+/// git/gh do. A missing tool -> version `"not found"`, `ok = false` (fail
+/// closed): `search` errors loudly on a missing `rg`, never empty-as-success.
+fn check_tool_presence(tool: &str, min_version: &str) -> ToolCheck {
+    match Command::new(tool).arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let version = extract_second_token_version(&text);
+            let ok = version_compare(version.trim_start_matches('v'), min_version);
+            ToolCheck {
+                name: tool.to_string(),
+                version,
+                ok,
+            }
+        }
+        _ => ToolCheck {
+            name: tool.to_string(),
+            version: "not found".to_string(),
+            ok: false,
+        },
+    }
+}
+
+/// The second whitespace token of the first line (`ripgrep 14.1.1` -> `14.1.1`).
+fn extract_second_token_version(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Extract a `x.y.z` version from `<tool> version x.y.z ...` output.

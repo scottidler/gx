@@ -97,6 +97,50 @@ fn test_version_compare_ordering() {
 }
 
 #[test]
+fn test_extract_second_token_version() {
+    assert_eq!(extract_second_token_version("ripgrep 14.1.1"), "14.1.1");
+    assert_eq!(
+        extract_second_token_version("ripgrep 13.0.0 (rev abc123)"),
+        "13.0.0"
+    );
+    assert_eq!(extract_second_token_version(""), "unknown");
+    assert_eq!(extract_second_token_version("ripgrep"), "unknown");
+}
+
+/// `gx doctor` must flag a MISSING `rg` (fail closed): a tool that cannot be
+/// spawned reports `not found`, `ok = false`. Uses a bogus binary name so it
+/// bites deterministically without mutating `$PATH` (which would race concurrent
+/// git-spawning tests).
+#[test]
+fn test_check_tool_presence_reports_missing() {
+    let check = check_tool_presence("gx-rg-definitely-not-installed-xyz", RG_MIN_VERSION);
+    assert_eq!(check.name, "gx-rg-definitely-not-installed-xyz");
+    assert!(!check.ok, "a missing tool must be reported not-ok");
+    assert_eq!(check.version, "not found");
+}
+
+/// The doctor report always includes an `rg` tool check (present or not).
+#[test]
+fn test_collect_report_includes_rg_check() {
+    let guard = local::test_utils::env_lock();
+    let prior = std::env::var("XDG_DATA_HOME").ok();
+    let dir = tempfile::TempDir::new().unwrap();
+    unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };
+
+    let report = collect_report().unwrap();
+    assert!(
+        report.tools.iter().any(|t| t.name == "rg"),
+        "collect_report must report the rg tool check"
+    );
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    drop(guard);
+}
+
+#[test]
 fn test_extract_version() {
     assert_eq!(extract_version("git version 2.34.1"), "2.34.1");
     assert_eq!(extract_version("gh version 2.40.1 (2023-12-13)"), "2.40.1");

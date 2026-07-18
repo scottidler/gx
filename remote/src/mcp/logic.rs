@@ -205,6 +205,86 @@ pub fn doctor() -> Result<crate::doctor::DoctorReport> {
     crate::doctor::collect_report()
 }
 
+// ---- intel-catalog read-only tools (design doc 2026-07-17-gx-intel-catalog) --
+//
+// Each opens its own catalog connection (cheap; per-call connections keep the
+// blocking tool bodies independent under `spawn_blocking`) and resolves the
+// scope ceiling from `catalog.root`. A requested `root` (default = the server's
+// CWD) is clamped inside that ceiling by the `catalog::tools` layer.
+
+pub fn query(config: &Config, req: QueryRequest) -> Result<catalog::tools::query::QueryResult> {
+    debug!("logic::query: root={:?}", req.root);
+    let conn = catalog::db::open_default()?;
+    let catalog_root = config.catalog_root();
+    let requested = req.root.map(std::path::PathBuf::from);
+    let filter = catalog::tools::query::QueryFilter {
+        dirty: req.dirty,
+        branch: req.branch,
+        org: req.org,
+        lang: req.lang,
+        behind_gt: req.behind_gt,
+    };
+    catalog::tools::query::query(
+        &conn,
+        &catalog_root,
+        requested.as_deref(),
+        &filter,
+        &catalog::tools::Bounds::default(),
+    )
+}
+
+pub fn search(config: &Config, req: SearchRequest) -> Result<catalog::tools::search::SearchResult> {
+    debug!("logic::search: root={:?} glob={:?}", req.root, req.glob);
+    let conn = catalog::db::open_default()?;
+    let catalog_root = config.catalog_root();
+    let requested = req.root.map(std::path::PathBuf::from);
+    catalog::tools::search::search(
+        &conn,
+        &catalog_root,
+        requested.as_deref(),
+        &req.pattern,
+        req.glob.as_deref(),
+        &catalog::tools::Bounds::default(),
+        local::subprocess::subprocess_timeout(),
+    )
+}
+
+pub fn read(config: &Config, req: ReadRequest) -> Result<catalog::tools::read::ReadResult> {
+    debug!("logic::read: slug={} path={}", req.slug, req.path);
+    let conn = catalog::db::open_default()?;
+    let catalog_root = config.catalog_root();
+    // A line range applies when either bound is given; the missing bound
+    // defaults (start -> 1, end -> EOF).
+    let line_range = match (req.start_line, req.end_line) {
+        (None, None) => None,
+        (start, end) => Some((start.unwrap_or(1), end.unwrap_or(usize::MAX))),
+    };
+    catalog::tools::read::read(
+        &conn,
+        &catalog_root,
+        &req.slug,
+        &req.path,
+        line_range,
+        &catalog::tools::Bounds::default(),
+    )
+}
+
+pub fn deps(config: &Config, req: DepsRequest) -> Result<catalog::tools::deps::DepsResult> {
+    debug!(
+        "logic::deps: dependency={:?} slug={:?}",
+        req.dependency, req.slug
+    );
+    let conn = catalog::db::open_default()?;
+    let catalog_root = config.catalog_root();
+    catalog::tools::deps::deps(
+        &conn,
+        &catalog_root,
+        req.dependency.as_deref(),
+        req.slug.as_deref(),
+        &catalog::tools::Bounds::default(),
+    )
+}
+
 // ------------------------------------------------------------------- mutating
 
 pub fn create_propose(config: &Config, prompt: &str, patterns: &[String]) -> Result<ProposeOut> {

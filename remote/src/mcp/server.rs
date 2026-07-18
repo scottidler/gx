@@ -35,8 +35,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use crate::mcp::gate;
 use crate::mcp::logic;
 use crate::mcp::schema::{
-    ChangeGetRequest, CreateApplyRequest, CreateProposeRequest, NoArgs, RepoDiscoverRequest,
-    StatusRequest, UndoExecuteRequest, UndoPlanRequest,
+    ChangeGetRequest, CreateApplyRequest, CreateProposeRequest, DepsRequest, NoArgs, QueryRequest,
+    ReadRequest, RepoDiscoverRequest, SearchRequest, StatusRequest, UndoExecuteRequest,
+    UndoPlanRequest,
 };
 
 /// gx-mcp's rmcp server handle. Cloned per connection by rmcp; cheap because
@@ -181,6 +182,48 @@ impl GxMcpServer {
     async fn doctor(&self, _params: Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
         info!("gx-mcp tool: doctor");
         run_blocking(logic::doctor).await
+    }
+
+    // ---- intel catalog, read-only (default enabled) ---------------------
+
+    #[tool(
+        name = "query",
+        description = "Query catalog repo metadata (dirty/branch/org/lang/behind) under a scoped root; surfaces staleness."
+    )]
+    async fn query(&self, params: Parameters<QueryRequest>) -> Result<CallToolResult, ErrorData> {
+        info!("gx-mcp tool: query");
+        let config = self.config.clone();
+        run_blocking(move || logic::query(&config, params.0)).await
+    }
+
+    #[tool(
+        name = "search",
+        description = "Live ripgrep across the working trees under a scoped root; returns {slug, path, line_no, line}."
+    )]
+    async fn search(&self, params: Parameters<SearchRequest>) -> Result<CallToolResult, ErrorData> {
+        info!("gx-mcp tool: search");
+        let config = self.config.clone();
+        run_blocking(move || logic::search(&config, params.0)).await
+    }
+
+    #[tool(
+        name = "read",
+        description = "Read a file inside a repo (path clamped to the repo); errors on non-utf8 or oversized without a line range."
+    )]
+    async fn read(&self, params: Parameters<ReadRequest>) -> Result<CallToolResult, ErrorData> {
+        info!("gx-mcp tool: read");
+        let config = self.config.clone();
+        run_blocking(move || logic::read(&config, params.0)).await
+    }
+
+    #[tool(
+        name = "deps",
+        description = "Dependency lookup: repos using a dependency, or a repo's dependency list (pass exactly one)."
+    )]
+    async fn deps(&self, params: Parameters<DepsRequest>) -> Result<CallToolResult, ErrorData> {
+        info!("gx-mcp tool: deps");
+        let config = self.config.clone();
+        run_blocking(move || logic::deps(&config, params.0)).await
     }
 
     // ---- mutating (default disabled) ------------------------------------

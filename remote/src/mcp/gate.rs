@@ -14,13 +14,17 @@ use local::config::{Config, McpTool};
 
 /// Every tool in the curated surface, read-only first (stable order for
 /// `get_info` / diagnostics).
-pub const ALL: [McpTool; 10] = [
+pub const ALL: [McpTool; 14] = [
     McpTool::Status,
     McpTool::RepoDiscover,
     McpTool::ChangeList,
     McpTool::ChangeGet,
     McpTool::ReviewStatus,
     McpTool::Doctor,
+    McpTool::Query,
+    McpTool::Search,
+    McpTool::Read,
+    McpTool::Deps,
     McpTool::CreatePropose,
     McpTool::CreateApply,
     McpTool::UndoPlan,
@@ -46,6 +50,10 @@ pub fn name(tool: McpTool) -> &'static str {
         McpTool::ChangeGet => "change-get",
         McpTool::ReviewStatus => "review-status",
         McpTool::Doctor => "doctor",
+        McpTool::Query => "query",
+        McpTool::Search => "search",
+        McpTool::Read => "read",
+        McpTool::Deps => "deps",
         McpTool::CreatePropose => "create-propose",
         McpTool::CreateApply => "create-apply",
         McpTool::UndoPlan => "undo-plan",

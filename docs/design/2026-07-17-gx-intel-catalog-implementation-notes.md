@@ -172,3 +172,117 @@ Design doc: `docs/design/2026-07-17-gx-intel-catalog.md`
   exists. A full `cargo clean` cleared it; direct per-crate builds never hit it
   because they used up-to-date incremental state. Worth a periodic `cargo clean`
   after big structural refactors (like B0). No production code involved.
+
+## Phase 3: read-only intel tools
+
+### Design decisions
+- The four tools live in a new `catalog::tools` module tree
+  (`catalog/src/tools.rs` + `tools/{query,search,read,deps}.rs`), depending on
+  `local` + `rusqlite` ONLY. The two cross-cutting invariants live ONCE in
+  `tools.rs`: `clamp_root` (the scope clamp) and `Bounds`/`bound_items` (the
+  output bounds). Every tool calls both, so neither can drift per-tool.
+- **Scope clamp** (`tools::clamp_root`): canonicalize the `catalog.root` ceiling
+  and the requested `root` (default = caller CWD), then require
+  `root == ceiling || root.starts_with(ceiling)`. `starts_with` compares whole
+  path COMPONENTS, so `/repos/foobar` is not "inside" `/repos/foo` (sibling-
+  prefix closed at the Rust layer). Because `canonicalize` resolves symlinks and
+  `..`, both escape classes resolve to a real path outside the ceiling and are
+  rejected; a non-existent root fails `canonicalize` outright. All four rejects
+  are fail-closed (loud `Err`, never widened/emptied). The SQL layer
+  (`tools::scope_sql`) then filters `path = :root OR path LIKE :root || '/%'` --
+  the trailing `/%` (not bare `%`) is the second sibling-prefix guard.
+- **Output bounds** (`tools::bound_items`): caps BOTH result count and total
+  serialized bytes, sets `truncated: true` when either trips, and always keeps
+  at least one item if the input is non-empty (a single oversized item returns
+  WITH `truncated`, never empty-as-success). Caps are module consts
+  (`DEFAULT_MAX_RESULTS = 500`, `DEFAULT_MAX_BYTES = 1 MiB`) -- see Deviations
+  re: no config field.
+- `query` (`tools/query.rs`): indexed SELECT over `repos`, dynamic `where{}`
+  filters bound via `params_from_iter` (`dirty`/`branch`/`org`/`lang`/
+  `behind_gt`; `behind > ?` naturally excludes NULL "no tracking ref"), every
+  row surfaces `last_walk`/`last_fetch`.
+- `search` (`tools/search.rs`): consults the `repos` table ONLY to enumerate the
+  in-scope repo paths (longest-path-first so a nested repo wins the prefix
+  match), then shells `rg` ONCE over those paths for LIVE content via
+  `local::subprocess::run_checked` (wall-clock timeout + process-group kill). rg
+  exit 1 (no matches) is success; exit 2 is a loud error; a spawn failure ("rg
+  not installed") is a loud error naming the fix, never empty-as-success. Each
+  hit's absolute path maps back to its slug via the scoped paths.
+- `read` (`tools/read.rs`): looks up the repo dir by slug (must be in the catalog
+  AND under `catalog.root`), clamps the file path with
+  `local::file::validate_new_file_path` (rejects absolute/`..`/`.git`/symlink
+  escapes), refuses an oversized whole-file read loudly unless a bounded line
+  range is given, and reads via `local::file::read_utf8_or_skip` -- a non-utf8
+  file is a loud "not valid UTF-8" error (`None` never treated as empty success).
+- `deps` (`tools/deps.rs`): a `serde`-tagged (`direction`) enum result. Exactly
+  one of `dependency` (JOIN repos<-deps, repos-using-it) or `slug` (that repo's
+  deps) must be given; both/neither is a loud error. Both directions are scope-
+  clamped to `catalog.root` and surface `last_walk`/`last_fetch`.
+- MCP wiring: 4 `#[tool]` methods (`query`/`search`/`read`/`deps`) on
+  `GxMcpServer` (`remote/src/mcp/server.rs`) call thin blocking bodies in
+  `mcp/logic.rs` under `run_blocking`; each opens its own `catalog::db` connection
+  and resolves the ceiling from `config.catalog_root()`. Request types added to
+  `mcp/schema.rs`. `Query`/`Search`/`Read`/`Deps` added to `McpTool`
+  (`local::config`), to `gate::ALL` (now 14) and `gate::name` (kebab-case),
+  `is_mutating = false` (read-only, default ENABLED).
+- `gx doctor`: added an `rg` presence check (`check_tool_presence` +
+  `extract_second_token_version`, since `rg --version` prints the version as the
+  SECOND token, unlike git/gh's third). A missing `rg` reports `not found`,
+  `ok = false` (fail closed).
+- CI guard: new `bin/check-catalog-boundary.sh` + a `catalog-boundary` otto task
+  wired into `ci.before`. Fails if `catalog/Cargo.toml` declares a `remote` dep
+  (deterministic grep) or if `cargo tree -p catalog` shows a `remote` node
+  (best-effort).
+
+### Deviations
+- Output caps are module consts, NOT a new `catalog.*` config field. The design's
+  `catalog:` block specifies only `root`/`staleness-secs`; adding cap config keys
+  would be unrequested scope. Same effect the doc intends (bounded MCP payloads);
+  a future tunable defaults to these consts. Recorded so it is not mistaken for
+  an oversight.
+- The MCP `query` request FLATTENS the doc's `where{ ... }` object to top-level
+  optional args (`dirty`/`branch`/`org`/`lang`/`behind_gt`). Same filter
+  semantics; keeps the MCP input schema flat and dodges the `where` Rust keyword.
+- **Auto-walk-on-stale is NOT implemented in Phase 3.** The doc's Edge Cases
+  mention an MCP `query` auto-walking a stale/empty subtree, but the Phase 3
+  bullet and its success criteria do not include it -- the phase specifies the 4
+  tools over the existing index plus staleness surfacing (`last_walk`/
+  `last_fetch`), which is what shipped. `gx catalog` (Phase 2) builds/refreshes
+  the index today. Flagged as an open question below rather than silently scoped
+  out.
+- Placed the tools at `catalog::tools::{query,search,read,deps}` (a module dir)
+  rather than a single `tools.rs`, matching the `db`/`walk` precedent. The doc
+  said "e.g. `catalog/src/tools.rs` or per-tool modules" -- chose per-tool
+  modules. Same effect, correct seam.
+
+### Tradeoffs
+- `search` resolves each hit's slug via the `repos` table (to enumerate scoped
+  paths and prefix-match), even though the doc says "search needs no table". The
+  table is used only to bound the search to scoped paths and to attach slugs to
+  hits; file CONTENT is still read LIVE by `rg`, never from the index. The
+  alternative (deriving slug from `<org>/<name>` path components) is fragile
+  across repo shapes, so the light read wins.
+- `deps` returns a `serde`-tagged enum (`ByDependency` | `BySlug`) rather than a
+  struct with optional halves, so a consumer can't get a malformed both-null /
+  both-populated payload -- the type encodes "exactly one direction".
+- `read`'s byte cap runs even on a line-range read: a range whose text still
+  exceeds the cap is truncated (`truncated: true`) rather than rejected, since
+  the range was the caller's explicit opt-in to a bounded read.
+
+### Open questions
+- Auto-walk-on-stale (doc Edge Cases): should an MCP `query`/`search` trigger a
+  local walk of the scoped subtree when rows are older than
+  `catalog.staleness-secs`, or is the explicit `gx catalog` refresh (Phase 2)
+  sufficient? Deferred out of Phase 3 per its success criteria; confirm whether a
+  follow-up phase should wire it (the walk already lives in `catalog`, so it is a
+  small addition when wanted).
+
+### Bite proofs (break-a-test-to-prove-it)
+- **Clamp**: changed `scope_sql`'s prefix from `{root}/%` to `{root}%`
+  (reintroducing the sibling-prefix bug) -> `test_query_returns_only_in_scope_rows`
+  FAILED ("only the repo under foo, not foobar", left==right: 2 != 1) because the
+  sibling `foobar` repo leaked into a `foo`-scoped query. Reverted; test green.
+- **Catalog boundary guard**: injected `remote = { path = "../remote" }` under
+  `[dependencies]` in `catalog/Cargo.toml` -> `bin/check-catalog-boundary.sh`
+  exited 1 ("catalog/Cargo.toml declares a 'remote' dependency"). Reverted;
+  guard exits 0 and `cargo tree -p catalog` shows `local` only, no `remote`.
