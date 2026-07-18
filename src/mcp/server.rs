@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use crate::config::Config;
+use local::config::Config;
 use log::{debug, info, warn};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;

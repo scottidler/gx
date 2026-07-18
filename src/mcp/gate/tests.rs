@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{Config, McpConfig, McpTool};
+use local::config::{Config, McpConfig, McpTool};
 use std::collections::BTreeMap;
 
 /// The kebab-case wire name from `gate::name` MUST equal serde's own

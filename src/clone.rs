@@ -3,11 +3,12 @@
 //! Clone repositories from GitHub user/org with streaming output.
 
 use crate::cli::Cli;
-use crate::config::Config;
 use crate::output::StatusOptions;
-use crate::utils::{get_jobs_from_config, get_nproc};
-use crate::{git, github, output, repo};
+use crate::{git, github, output};
 use eyre::{Context, Result};
+use local::config::Config;
+use local::repo;
+use local::utils::{get_jobs_from_config, get_nproc};
 use log::{debug, info};
 use rayon::prelude::*;
 use std::sync::Mutex;

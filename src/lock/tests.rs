@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::env_lock;
+use local::test_utils::env_lock;
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};

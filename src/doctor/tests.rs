@@ -46,7 +46,7 @@ fn test_stuck_proposals_is_empty_with_no_bare_proposals() {
 /// state, never the operator's.
 #[test]
 fn test_collect_report_surfaces_stuck_proposal_and_tools() {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     let dir = tempfile::TempDir::new().unwrap();
     unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };

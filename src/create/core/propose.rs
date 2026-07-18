@@ -24,12 +24,13 @@
 use super::manifest::{
     self, FileAction, FileEntry, ProposalManifest, ProposalOutcome, RepoProposal,
 };
-use crate::config::{xdg_data_dir, Config};
+use crate::git;
 use crate::lock::{ChangeLock, RepoLock};
-use crate::repo::Repo;
 use crate::state::{ChangeState, StateManager};
-use crate::{git, hash};
 use eyre::{Context, Result};
+use local::config::{xdg_data_dir, Config};
+use local::hash;
+use local::repo::Repo;
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::collections::BTreeMap;

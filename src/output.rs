@@ -1,13 +1,13 @@
-use crate::config::OutputVerbosity;
 use crate::create::{CreateAction, CreateResult};
 use crate::git::{
     CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus,
 };
-use crate::repo::Layout;
 use crate::review::{ReviewAction, ReviewResult};
-use crate::subprocess::{run_checked, subprocess_timeout};
 use colored::*;
 use eyre::{Context, Result};
+use local::config::OutputVerbosity;
+use local::repo::Layout;
+use local::subprocess::{run_checked, subprocess_timeout};
 use std::io::{self, Write};
 use std::path::Path;
 use unicode_display_width::width as unicode_width;
@@ -93,7 +93,7 @@ impl Default for StatusOptions {
 pub trait UnifiedDisplay {
     fn get_branch(&self) -> Option<&str>;
     fn get_commit_sha(&self) -> Option<&str>;
-    fn get_repo(&self) -> &crate::repo::Repo;
+    fn get_repo(&self) -> &local::repo::Repo;
     fn get_emoji(&self, opts: &StatusOptions) -> String;
     fn get_error(&self) -> Option<&str>;
 
@@ -118,7 +118,7 @@ impl UnifiedDisplay for RepoStatus {
         self.commit_sha.as_deref()
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -240,7 +240,7 @@ impl UnifiedDisplay for CheckoutResult {
         self.commit_sha.as_deref()
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -300,7 +300,7 @@ impl UnifiedDisplay for &RepoStatus {
         self.commit_sha.as_deref()
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -414,7 +414,7 @@ impl UnifiedDisplay for &CheckoutResult {
         self.commit_sha.as_deref()
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -474,7 +474,7 @@ impl UnifiedDisplay for CreateResult {
         None // Create results don't have commit SHA in the same way
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -542,7 +542,7 @@ impl UnifiedDisplay for &CreateResult {
         None
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -611,7 +611,7 @@ impl UnifiedDisplay for ReviewResult {
         None // We'll need a different approach due to lifetime issues
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -678,7 +678,7 @@ impl UnifiedDisplay for &ReviewResult {
         None
     }
 
-    fn get_repo(&self) -> &crate::repo::Repo {
+    fn get_repo(&self) -> &local::repo::Repo {
         &self.repo
     }
 
@@ -1116,7 +1116,7 @@ pub fn display_checkout_result_immediate(result: &CheckoutResult) -> Result<()> 
 }
 
 /// Get current branch name quickly (no network calls, no status parsing)
-fn get_current_branch_name_fast(repo: &crate::repo::Repo) -> String {
+fn get_current_branch_name_fast(repo: &local::repo::Repo) -> String {
     use std::process::Command;
 
     run_checked(
@@ -1139,7 +1139,7 @@ fn get_current_branch_name_fast(repo: &crate::repo::Repo) -> String {
 }
 
 /// Calculate alignment widths quickly using fast git commands (no expensive operations)
-pub fn calculate_alignment_widths_fast(repos: &[crate::repo::Repo]) -> AlignmentWidths {
+pub fn calculate_alignment_widths_fast(repos: &[local::repo::Repo]) -> AlignmentWidths {
     use rayon::prelude::*;
 
     // Branch width: Fast git command, no network calls
@@ -1248,7 +1248,7 @@ pub fn display_status_result_immediate(
 mod tests {
     use super::*;
     use crate::git::{RemoteStatus, RepoStatus, StatusChanges};
-    use crate::repo::{Layout, Repo};
+    use local::repo::{Layout, Repo};
     use std::path::PathBuf;
     use std::sync::Mutex;
 

@@ -1,6 +1,6 @@
-use crate::diff;
 use crate::git;
 use eyre::{Context, Result};
+use local::diff;
 
 use log::{debug, trace, warn};
 use std::fs;
@@ -221,7 +221,7 @@ pub fn apply_substitution_to_file(
     pattern: &str,
     replacement: &str,
     buffer: usize,
-) -> Result<crate::diff::SubstitutionResult> {
+) -> Result<local::diff::SubstitutionResult> {
     let Some(content) = read_utf8_or_skip(file_path)? else {
         return Ok(diff::SubstitutionResult::SkippedBinary);
     };
@@ -240,7 +240,7 @@ pub fn apply_regex_to_file(
     pattern: &str,
     replacement: &str,
     buffer: usize,
-) -> Result<crate::diff::SubstitutionResult> {
+) -> Result<local::diff::SubstitutionResult> {
     let Some(content) = read_utf8_or_skip(file_path)? else {
         return Ok(diff::SubstitutionResult::SkippedBinary);
     };

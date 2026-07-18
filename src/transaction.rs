@@ -995,7 +995,7 @@ fn recovery_file(transaction_id: &str) -> Result<PathBuf> {
 }
 
 fn gx_data_dir() -> Result<PathBuf> {
-    crate::config::xdg_data_dir()
+    local::config::xdg_data_dir()
         .map(|d| d.join("gx"))
         .ok_or_else(|| eyre::eyre!("Could not determine data dir (set HOME or XDG_DATA_HOME)"))
 }

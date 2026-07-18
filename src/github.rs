@@ -1,6 +1,6 @@
-use crate::config::Config;
-use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
+use local::config::Config;
+use local::subprocess::{run_checked, subprocess_timeout};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::process::Command;

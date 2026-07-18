@@ -16,11 +16,11 @@
 
 use super::manifest::{self, ProposalOutcome};
 use super::{execute_create, Change, CreateAction, CreateResult};
-use crate::config::Config;
 use crate::confirm::Confirmation;
-use crate::repo::Repo;
 use crate::state::{ChangeState, RepoChangeStatus, StateManager};
 use eyre::{Context, Result};
+use local::config::Config;
+use local::repo::Repo;
 use log::{debug, info, warn};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

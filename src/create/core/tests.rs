@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::RepoChangeStatus;
-use crate::test_utils::run_git_command;
+use local::test_utils::run_git_command;
 use std::fs;
 use tempfile::TempDir;
 
@@ -235,7 +235,7 @@ fn init_repo_with_bare_remote(repo: &Path, bare: &Path) -> String {
 /// Point `XDG_DATA_HOME` at `dir` for the duration of `f`, serialized
 /// behind the shared `ENV_LOCK` (env vars are process-global).
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", dir) };
     f();

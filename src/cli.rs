@@ -53,7 +53,7 @@ static DEPTH_HELP: LazyLock<String> = LazyLock::new(|| {
 /// Get the effective default max depth by loading config if available
 fn get_effective_max_depth_default() -> usize {
     // Try to load config to get the actual default that would be used
-    match crate::config::Config::load(None) {
+    match local::config::Config::load(None) {
         Ok(config) => {
             config
                 .repo_discovery

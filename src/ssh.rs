@@ -1,5 +1,5 @@
-use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
+use local::subprocess::{run_checked, subprocess_timeout};
 use log::debug;
 use std::process::Command;
 

@@ -1,4 +1,4 @@
-use gx::config::{Config, RemoteStatusConfig};
+use local::config::{Config, RemoteStatusConfig};
 
 /// Test RemoteStatusConfig default values
 #[test]

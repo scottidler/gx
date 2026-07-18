@@ -4,12 +4,12 @@
 //! after PRs have been merged.
 
 use crate::cli::Cli;
-use crate::config::Config;
 use crate::confirm::{confirm_destructive, DestructiveOp};
 use crate::git;
 use crate::lock::{ChangeLock, RepoLock};
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus, StateManager};
 use eyre::{Context, Result};
+use local::config::Config;
 use log::{debug, info, warn};
 
 /// Count the local branches a cleanup pass would actually `git branch -D` for
@@ -319,7 +319,7 @@ fn cleanup_change(
                 let path = std::path::PathBuf::from(&path);
                 // Layout-aware: accept a flat repo (`.git` dir), a linked
                 // worktree (`.git` pointer file), or a bare container.
-                if crate::bare::is_git_path(&path) {
+                if local::bare::is_git_path(&path) {
                     path
                 } else {
                     warn!(
@@ -477,7 +477,7 @@ fn find_repo_locally(repo_slug: &str) -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
     use crate::state::{ChangeState, RepoChangeStatus};
-    use crate::test_utils::run_git_command;
+    use local::test_utils::run_git_command;
     use tempfile::TempDir;
 
     #[test]
@@ -678,7 +678,7 @@ mod tests {
         run_git_command(&["config", "user.email", "t@e.com"], &work);
         run_git_command(&["config", "user.name", "T"], &work);
         run_git_command(&["config", "commit.gpgsign", "false"], &work);
-        let base_branch = crate::test_utils::get_current_branch(&work);
+        let base_branch = local::test_utils::get_current_branch(&work);
 
         // gx's own create flow: a feature branch with exactly ONE commit.
         run_git_command(&["checkout", "--quiet", "-b", "GX-squash"], &work);
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn test_cleanup_all_fails_closed_and_deletes_nothing() {
         use clap::Parser;
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
         let data_home = TempDir::new().unwrap();
         unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
@@ -784,7 +784,7 @@ mod tests {
 
         let cli = Cli::parse_from(["gx", "cleanup", "--all"]);
         let config = Config {
-            cleanup: Some(crate::config::CleanupConfig {
+            cleanup: Some(local::config::CleanupConfig {
                 confirm_threshold: Some(1),
             }),
             ..Config::default()

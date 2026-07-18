@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::env_lock;
+use local::test_utils::env_lock;
 
 /// The hook is inert when the env var is unset, and inert when it names a
 /// DIFFERENT point. (The abort path is exercised out-of-process by the

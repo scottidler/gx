@@ -12,12 +12,12 @@ pub mod core;
 pub use core::{OutcomeKind, UndoAction, UndoOutcome, UndoPlan};
 
 use crate::cli::Cli;
-use crate::config::Config;
 use crate::output::{display_review_results, StatusOptions};
-use crate::repo::Repo;
 use crate::review::{ReviewAction, ReviewResult};
 use crate::state::RepoChangeStatus;
 use eyre::{Context, Result};
+use local::config::Config;
+use local::repo::Repo;
 use log::debug;
 
 /// Human label for a plan entry's reconciled state column.
@@ -132,9 +132,9 @@ fn render_results(outcomes: &[UndoOutcome], cli: &Cli) {
 
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -198,7 +198,7 @@ pub fn process_undo_command(
 
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // The wrapper already confirmed (TTY prompt above, or --yes); the core

@@ -4,41 +4,30 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-mod bare;
 mod checkout;
 mod cleanup;
 mod cli;
 mod clone;
-mod config;
 mod confirm;
 mod crash;
 mod create;
-mod diff;
 mod doctor;
 mod file;
 mod git;
 mod github;
-mod hash;
 mod lock;
 mod output;
 mod persona;
-mod repo;
 mod review;
 mod rollback;
 mod ssh;
 mod state;
 mod status;
-mod subprocess;
 mod transaction;
 mod undo;
-mod user_org;
-mod utils;
-
-#[cfg(test)]
-pub mod test_utils;
 
 use cli::{Cli, Commands};
-use config::{xdg_data_dir, Config};
+use local::config::{xdg_data_dir, Config};
 
 fn setup_logging(level: cli::LogLevel) -> Result<()> {
     // During tests, use a temp directory to avoid polluting production logs
@@ -302,12 +291,11 @@ fn run() -> Result<()> {
 
     // The `mcp` arm hands off to mcp-io, which owns its OWN file logging, tokio
     // runtime, and stdio discipline, and never returns. It MUST intercept here,
-    // BEFORE gx's env_logger init (a second env_logger init would panic). It
-    // uses the gx *library* Config/handler types: main.rs's own `config` module
-    // is a separate compilation unit whose `Config` is a distinct type, so the
-    // handler (which holds `gx::config::Config`) must be fed the library one.
+    // BEFORE gx's env_logger init (a second env_logger init would panic). Since
+    // Phase 1 (Track B0), `Config` lives in the `local` crate and is shared by
+    // both the bin (here) and the gx lib's mcp handler -- one type, not two.
     if let Commands::Mcp(cmd) = &cli.command {
-        let config = gx::config::Config::load(cli.config.as_ref())
+        let config = local::config::Config::load(cli.config.as_ref())
             .context("Failed to load configuration")?;
         let io = mcp_io::mcp_io!();
         std::process::exit(cmd.run(&io, || {
@@ -333,7 +321,7 @@ fn run() -> Result<()> {
     // Install the configured git/gh subprocess timeout before any command spins
     // up a rayon pool: the deep git/gh call sites read it via
     // `subprocess::subprocess_timeout()` (Phase 2).
-    subprocess::init_subprocess_timeout(config.subprocess_timeout());
+    local::subprocess::init_subprocess_timeout(config.subprocess_timeout());
 
     info!("Starting with config from: {:?}", cli.config);
 

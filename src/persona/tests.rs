@@ -1,6 +1,6 @@
 use super::*;
-use crate::config::Config;
-use crate::test_utils::env_lock;
+use local::config::Config;
+use local::test_utils::env_lock;
 
 /// Build a `Config` carrying a `github.token-env` block from YAML, matching the
 /// parse-based construction pattern in `src/config/tests.rs`.

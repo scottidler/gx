@@ -570,7 +570,7 @@ fn is_cleanup_candidate(state: &ChangeState, cutoff: DateTime<Utc>) -> bool {
 /// Get the state directory path (`$XDG_DATA_HOME/gx/changes`), migrating from
 /// the legacy `~/.gx/changes` on first use ([A22], design Q4).
 fn get_state_dir() -> Result<PathBuf> {
-    let new_dir = crate::config::xdg_data_dir()
+    let new_dir = local::config::xdg_data_dir()
         .ok_or_else(|| eyre::eyre!("Could not determine data dir (set HOME or XDG_DATA_HOME)"))?
         .join("gx")
         .join("changes");
@@ -1185,7 +1185,7 @@ mod tests {
     /// `ChangeLock`, which resolves its lock dir from `xdg_data_dir()`; without
     /// this it would write lock files into the real `$HOME/.local/share`.
     fn with_xdg_data_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior = std::env::var("XDG_DATA_HOME").ok();
         let tmp = TempDir::new().unwrap();
         unsafe { std::env::set_var("XDG_DATA_HOME", tmp.path()) };

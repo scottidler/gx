@@ -18,13 +18,13 @@ pub use core::{generate_change_id, Change, CreateAction, CreateResult};
 pub use core::manifest;
 
 use crate::cli::Cli;
-use crate::config::Config;
 use crate::confirm::Confirmation;
 use crate::file;
 use crate::output::{display_unified_results, StatusOptions};
-use crate::repo::{discover_repos, filter_repos, Repo};
 use colored::Colorize;
 use eyre::{Context, Result};
+use local::config::Config;
+use local::repo::{discover_repos, filter_repos, Repo};
 use log::debug;
 use serde::Serialize;
 use std::path::Path;
@@ -190,7 +190,7 @@ pub fn process_create_command(
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // Change-level lock (Phase 7 [F6]): the wrapper OWNS it for a committing run
@@ -229,9 +229,9 @@ pub fn process_create_command(
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -370,7 +370,7 @@ fn run_llm(
 
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     let summary =
@@ -465,7 +465,7 @@ pub fn process_apply_command(
 
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // The token recomputed above (from the on-disk manifest.json we just
@@ -553,7 +553,7 @@ fn present_diffs(repos: &[core::manifest::RepoProposal], proposal_dir: &Path) {
 /// Colorize a unified diff for terminal display: `+`/`-` content lines
 /// green/red, `+++`/`---` file headers bold (not colored as content), hunk
 /// headers (`@@`) cyan, everything else unstyled. Same visual language as
-/// `crate::diff::generate_diff` uses for `sub`/`regex` changes.
+/// `local::diff::generate_diff` uses for `sub`/`regex` changes.
 fn colorize_patch(patch: &str) -> String {
     let mut out = String::new();
     for line in patch.lines() {
@@ -608,9 +608,9 @@ fn confirm_apply(proposed_count: usize, yes: bool) -> Result<bool> {
 fn render_apply_report(cli: &Cli, report: &core::apply::ApplyReport) {
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,

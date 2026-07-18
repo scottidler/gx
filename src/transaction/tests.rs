@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::{env_lock, run_git_command};
+use local::test_utils::{env_lock, run_git_command};
 use tempfile::TempDir;
 
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {

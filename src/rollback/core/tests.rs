@@ -6,7 +6,7 @@ use tempfile::TempDir;
 /// Point `XDG_DATA_HOME` at `dir` for the duration of `f`, serialized behind
 /// the shared `ENV_LOCK` (env vars are process-global).
 fn with_data_home<F: FnOnce()>(dir: &Path, f: F) {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     unsafe { std::env::set_var("XDG_DATA_HOME", dir) };
     f();
@@ -101,7 +101,7 @@ fn test_validate_recovery_state_flags_missing_repo_path() {
 #[test]
 fn test_validate_recovery_state_passes_for_real_git_repo() {
     let repo = TempDir::new().unwrap();
-    crate::test_utils::run_git_command(&["init", "--quiet"], repo.path());
+    local::test_utils::run_git_command(&["init", "--quiet"], repo.path());
 
     let state = RecoveryState {
         version: 1,

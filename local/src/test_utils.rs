@@ -9,12 +9,10 @@ use tempfile::TempDir;
 /// independent per-module locks over the same variable do NOT serialize each
 /// other and raced under load (a concurrent test flipped `XDG_DATA_HOME` out
 /// from under another, stranding its recovery fixtures).
-#[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquire the env lock, recovering from a poisoned mutex so one panicking
 /// test cannot cascade PoisonError failures across the suite.
-#[cfg(test)]
 pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::hash::sha256_hex;
+use local::hash::sha256_hex;
 use tempfile::TempDir;
 
 fn sample_manifest() -> ProposalManifest {

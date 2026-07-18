@@ -1,7 +1,7 @@
 use super::*;
-use crate::config::{Config, CreateConfig, LlmConfig};
 use crate::state::{RepoChangeStatus, StateManager};
-use crate::test_utils::run_git_command;
+use local::config::{Config, CreateConfig, LlmConfig};
+use local::test_utils::run_git_command;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -56,7 +56,7 @@ fn llm_config(agent_command: &str, timeout: u64) -> Config {
 /// Run `f` with `XDG_DATA_HOME` pointed at a fresh temp dir (env is global; the
 /// lock/state/proposal dirs all resolve from it).
 fn with_data_home<F: FnOnce()>(f: F) {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     let tmp = TempDir::new().unwrap();
     unsafe { std::env::set_var("XDG_DATA_HOME", tmp.path()) };
@@ -151,7 +151,7 @@ fn test_happy_path_proposes_persists_and_leaves_worktree_identical() {
         assert_eq!(blob_bytes, b"hello proposed\n");
         assert_eq!(
             entry.sha256.as_deref().unwrap(),
-            crate::hash::sha256_hex(&blob_bytes),
+            local::hash::sha256_hex(&blob_bytes),
             "manifest hash must verify against the persisted blob"
         );
         assert_eq!(entry.size, blob_bytes.len() as u64);
@@ -334,7 +334,7 @@ fn test_binary_file_roundtrips() {
         assert_eq!(blob, vec![0x00, 0xff, 0x01], "binary blob must round-trip");
         assert_eq!(
             entry.sha256.as_deref().unwrap(),
-            crate::hash::sha256_hex(&blob)
+            local::hash::sha256_hex(&blob)
         );
     });
 }

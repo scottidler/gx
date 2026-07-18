@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::run_git_command;
+use local::test_utils::run_git_command;
 use std::fs;
 use tempfile::TempDir;
 
@@ -172,13 +172,13 @@ fn test_apply_substitution_skips_binary() {
     let result = apply_substitution_to_file(&file_path, "x", "y", 1).unwrap();
     assert!(matches!(
         result,
-        crate::diff::SubstitutionResult::SkippedBinary
+        local::diff::SubstitutionResult::SkippedBinary
     ));
 
     let regex_result = apply_regex_to_file(&file_path, "x", "y", 1).unwrap();
     assert!(matches!(
         regex_result,
-        crate::diff::SubstitutionResult::SkippedBinary
+        local::diff::SubstitutionResult::SkippedBinary
     ));
 }
 
@@ -189,7 +189,7 @@ fn test_match_count_multi_match() {
     fs::write(&file_path, "foo foo foo\nbar foo").unwrap();
 
     let result = apply_substitution_to_file(&file_path, "foo", "qux", 1).unwrap();
-    if let crate::diff::SubstitutionResult::Changed { matches, .. } = result {
+    if let local::diff::SubstitutionResult::Changed { matches, .. } = result {
         assert_eq!(matches, 4);
     } else {
         panic!("expected Changed");
@@ -244,7 +244,7 @@ fn test_atomic_write_new_file_mode_under_restrictive_umask() {
 
     // umask is process-global state; serialize with every other test that
     // mutates shared environment/process state.
-    let _guard = crate::test_utils::env_lock();
+    let _guard = local::test_utils::env_lock();
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("new.txt");
@@ -312,7 +312,7 @@ fn test_apply_substitution_to_file() {
     fs::write(&file_path, "Hello world\nThis is a test\nHello again").unwrap();
 
     let result = apply_substitution_to_file(&file_path, "Hello", "Hi", 1).unwrap();
-    if let crate::diff::SubstitutionResult::Changed {
+    if let local::diff::SubstitutionResult::Changed {
         content, matches, ..
     } = result
     {
@@ -331,7 +331,7 @@ fn test_apply_regex_to_file() {
 
     let result =
         apply_regex_to_file(&file_path, r"version \d+\.\d+\.\d+", "version X.X.X", 1).unwrap();
-    if let crate::diff::SubstitutionResult::Changed {
+    if let local::diff::SubstitutionResult::Changed {
         content, matches, ..
     } = result
     {

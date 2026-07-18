@@ -10,7 +10,7 @@
 //! tools default DISABLED. A tool absent from `mcp.tools` takes its category
 //! default, so writes are impossible by default even with no `mcp:` block.
 
-use crate::config::{Config, McpTool};
+use local::config::{Config, McpTool};
 
 /// Every tool in the curated surface, read-only first (stable order for
 /// `get_info` / diagnostics).

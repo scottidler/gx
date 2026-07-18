@@ -6,8 +6,8 @@
 //! the NAME resolution only -- it never reads a token value (design doc
 //! `2026-07-12-persona-aware-github-auth.md`, Phase 2).
 
-use crate::config::Config;
 use eyre::{bail, Result};
+use local::config::Config;
 use log::debug;
 
 #[cfg(test)]

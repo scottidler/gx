@@ -1,8 +1,8 @@
 use super::*;
-use crate::config::Config;
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus};
-use crate::test_utils::run_git_command;
 use crate::transaction::{Phase, RecoveryState, RollbackStep, StepEntry};
+use local::config::Config;
+use local::test_utils::run_git_command;
 use std::fs;
 use tempfile::TempDir;
 
@@ -287,7 +287,7 @@ fn undo_one_unverified_offline_touches_no_remote_and_reports() {
     // loudly proves no remote call is made.
     use std::os::unix::fs::PermissionsExt;
 
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
     let prior_path = std::env::var("PATH").ok();
 
@@ -511,7 +511,7 @@ fn undo_one_drains_mutating_recovery_stash_before_deleting_branch() {
     // recovery file in the campaign is DRAINED (its stash restored via the SAME
     // rollback interpreter) BEFORE the repo's branch is deleted. Without the
     // drain, the WIP would be stranded in an un-recorded stash.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
 
     let data_home = TempDir::new().unwrap();
@@ -614,7 +614,7 @@ fn undo_one_treats_never_pushed_remote_branch_as_no_op() {
     // if invoked at all: the probe must skip it entirely.
     use std::os::unix::fs::PermissionsExt;
 
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
     let prior_path = std::env::var("PATH").ok();
 
@@ -711,7 +711,7 @@ fn undo_one_recovery_only_pushed_deletes_remote_and_local() {
     // branch survives and the `!branch_on_bare` assertion fails.
     use std::os::unix::fs::PermissionsExt;
 
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
     let prior_path = std::env::var("PATH").ok();
     let prior_remotes = std::env::var("GX_TEST_REMOTES").ok();
@@ -964,7 +964,7 @@ fn revert_squash_merge_opens_inverse_revert_pr() {
     // revert PR whose diff is the INVERSE of the original. The single squash
     // commit changed "old value" -> "new value"; the revert branch must restore
     // "old value", and the parent-count dispatch must pick a plain `git revert`.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
 
     let workspace = TempDir::new().unwrap();
     let remotes = TempDir::new().unwrap();
@@ -1028,7 +1028,7 @@ fn revert_true_merge_uses_dash_m_one() {
     // A plain `git revert` on a merge commit fails ("is a merge but no -m option
     // given"), so a successful revert here PROVES the parent-count dispatch chose
     // `-m 1`. The revert restores the base's pre-merge state ("old value").
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
 
     let workspace = TempDir::new().unwrap();
     let remotes = TempDir::new().unwrap();
@@ -1094,7 +1094,7 @@ fn revert_collision_existing_branch_fails_and_touches_nothing() {
     // Success criterion: a pre-existing `revert/<change-id>` branch FAILS that
     // repo with a message naming the branch, and touches nothing (no reuse, no
     // force). No revert branch is pushed to the remote.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
 
     let workspace = TempDir::new().unwrap();
     let remotes = TempDir::new().unwrap();
@@ -1214,7 +1214,7 @@ fn undo_bare_proposal_is_local_only_with_zero_remote_invocations() {
     // Success criterion: `gx undo` on a bare (unapplied) proposal removes the
     // artifacts + state LOCALLY with ZERO gh/git-remote invocations. Proven by
     // `gh` and `git` PATH spies whose sentinel files must never appear.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
 
     let data_home = TempDir::new().unwrap();
     let spies = TempDir::new().unwrap();
@@ -1339,7 +1339,7 @@ fn execute_undo_fails_fast_while_change_lock_is_held() {
     // fast rather than interleaving the artifact/state RMW. Bite check: remove
     // the top-of-execute_undo `ChangeLock::acquire` and undo completes Ok while
     // the lock is held (interleaving), so this test's expected error vanishes.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
     let data_home = TempDir::new().unwrap();
     unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };

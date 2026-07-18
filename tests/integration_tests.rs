@@ -1,4 +1,4 @@
-use gx::test_utils::*;
+use local::test_utils::*;
 
 #[test]
 fn test_main_help_output() {

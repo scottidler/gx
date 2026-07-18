@@ -12,17 +12,17 @@ pub mod apply;
 pub mod manifest;
 pub mod propose;
 
-use crate::config::Config;
 use crate::confirm::Confirmation;
-use crate::diff;
 use crate::file;
 use crate::git;
 use crate::github;
-use crate::repo::Repo;
 use crate::state::{ChangeState, StateManager};
 use crate::transaction::{RollbackStep, Transaction};
 use chrono::Local;
 use eyre::{Context, Result};
+use local::config::Config;
+use local::diff;
+use local::repo::Repo;
 use log::{debug, info, warn};
 use manifest::{FileAction, ProposalManifest, ProposalOutcome};
 use rayon::prelude::*;
@@ -892,7 +892,7 @@ fn apply_add_change(
     diff_parts.push(format!(
         "  A {}\n{}",
         file_path,
-        crate::utils::indent(&diff, 4)
+        local::utils::indent(&diff, 4)
     ));
 
     Ok(())
@@ -938,7 +938,7 @@ fn apply_delete_change(
         diff_parts.push(format!(
             "  D {}\n{}",
             file_path.display(),
-            crate::utils::indent(&diff, 4)
+            local::utils::indent(&diff, 4)
         ));
     }
 
@@ -991,7 +991,7 @@ fn apply_substitution_change(
                 diff_parts.push(format!(
                     "  M {}\n{}",
                     file_path.display(),
-                    crate::utils::indent(&diff, 4)
+                    local::utils::indent(&diff, 4)
                 ));
 
                 stats.files_changed += 1;
@@ -1069,7 +1069,7 @@ fn apply_regex_change(
                 diff_parts.push(format!(
                     "  M {}\n{}",
                     file_path.display(),
-                    crate::utils::indent(&diff, 4)
+                    local::utils::indent(&diff, 4)
                 ));
 
                 stats.files_changed += 1;
@@ -1190,7 +1190,7 @@ fn apply_patchset_change(
                 let blob = manifest::blob_path(proposal_dir, slug, &entry.path);
                 let bytes = std::fs::read(&blob)
                     .with_context(|| format!("Failed to read proposal blob: {}", blob.display()))?;
-                let got = crate::hash::sha256_hex(&bytes);
+                let got = local::hash::sha256_hex(&bytes);
                 if got != want {
                     return Err(eyre::eyre!(
                         "blob hash mismatch for {} (manifest {want}, on-disk {got}); refusing to apply a tampered proposal",

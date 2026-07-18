@@ -6,6 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Product name used for the config file path (`$XDG_CONFIG_HOME/gx/gx.yml`).
+/// This is deliberately a fixed literal, NOT `env!("CARGO_PKG_NAME")`: since
+/// Phase 1 (Track B0) this module lives in the `local` crate, whose package
+/// name is `local`, but the shipped product is still `gx` -- the config path
+/// is a product-level contract (users have `~/.config/gx/gx.yml` today), not
+/// a crate-level one.
+const GX_PROJECT_NAME: &str = "gx";
+
 /// XDG config dir, honoring `$XDG_CONFIG_HOME` and falling back to `$HOME/.config`.
 fn xdg_config_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
@@ -468,10 +476,9 @@ impl Config {
         // could otherwise reconfigure the tool (e.g. override a token-env
         // mapping) ([A23]).
         if let Some(config_dir) = xdg_config_dir() {
-            let project_name = env!("CARGO_PKG_NAME");
             let primary_config = config_dir
-                .join(project_name)
-                .join(format!("{project_name}.yml"));
+                .join(GX_PROJECT_NAME)
+                .join(format!("{GX_PROJECT_NAME}.yml"));
             if primary_config.exists() {
                 // A file that exists but fails to parse (a typo'd key under
                 // `deny_unknown_fields`, bad YAML, ...) must fail loudly, not

@@ -13,13 +13,13 @@
 //!   reconciled plan and `undo_execute` recomputes it and refuses on mismatch
 //!   (state changed between plan and execute).
 
-use crate::config::Config;
 use crate::confirm::Confirmation;
 use crate::create::manifest::{FileAction, ProposalManifest, ProposalOutcome};
 use crate::git::RemoteStatus;
 use crate::state::StateManager;
 use crate::undo::core::UndoPlanSet;
 use eyre::{bail, Result};
+use local::config::Config;
 use log::debug;
 use std::env;
 use std::path::Path;
@@ -28,22 +28,22 @@ use crate::mcp::schema::*;
 
 /// Effective parallel job count (config `jobs`, else nproc, else 4).
 fn jobs(config: &Config) -> usize {
-    crate::utils::get_jobs_from_config(config)
-        .or_else(crate::utils::get_nproc)
+    local::utils::get_jobs_from_config(config)
+        .or_else(local::utils::get_nproc)
         .unwrap_or(4)
 }
 
 /// Effective repo-discovery max depth (config, else 2 as `gx status` uses).
 fn max_depth(config: &Config) -> usize {
-    crate::utils::get_max_depth_from_config(config).unwrap_or(2)
+    local::utils::get_max_depth_from_config(config).unwrap_or(2)
 }
 
 /// Discover + filter the fleet under the server's CWD by the given patterns.
-fn discover(config: &Config, patterns: &[String]) -> Result<Vec<crate::repo::Repo>> {
+fn discover(config: &Config, patterns: &[String]) -> Result<Vec<local::repo::Repo>> {
     let start_dir = env::current_dir()?;
     let repos =
-        crate::repo::discover_repos(&start_dir, max_depth(config), &config.ignore_patterns())?;
-    Ok(crate::repo::filter_repos(repos, patterns))
+        local::repo::discover_repos(&start_dir, max_depth(config), &config.ignore_patterns())?;
+    Ok(local::repo::filter_repos(repos, patterns))
 }
 
 /// Short human string for a repo's remote-tracking state.
@@ -313,7 +313,7 @@ pub fn undo_plan_token(plan: &UndoPlanSet) -> String {
             e.slug, e.status, e.action, e.pr_number
         ));
     }
-    let hex = crate::hash::sha256_hex(canon.as_bytes());
+    let hex = local::hash::sha256_hex(canon.as_bytes());
     hex.chars()
         .take(crate::create::manifest::TOKEN_HEX_LEN)
         .collect()

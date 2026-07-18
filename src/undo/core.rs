@@ -13,7 +13,6 @@
 //! shared history.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use crate::config::Config;
 use crate::confirm::Confirmation;
 use crate::git;
 use crate::github;
@@ -21,6 +20,7 @@ use crate::lock::RepoLock;
 use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus, StateManager};
 use crate::transaction::{Phase, RecoveryState, Transaction};
 use eyre::{Context, Result};
+use local::config::Config;
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::collections::BTreeSet;
@@ -278,7 +278,7 @@ fn build_plan(
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let slug = crate::repo::Repo::new(rec.repo_path.clone())
+        let slug = local::repo::Repo::new(rec.repo_path.clone())
             .map(|r| r.slug)
             .unwrap_or(leaf);
         plans.push(UndoPlan {
@@ -393,7 +393,7 @@ fn remove_remote_branch(plan: &UndoPlan, config: &Config) -> Result<(), String> 
         .ok_or_else(|| "no branch recorded".to_string())?;
 
     let exists_remotely = match &plan.repo_path {
-        Some(path) if crate::bare::is_git_path(path) => {
+        Some(path) if local::bare::is_git_path(path) => {
             git::remote_branch_exists_probe(path, branch)
                 .map_err(|e| format!("cannot verify remote branch {branch} (offline?): {e}"))?
         }
@@ -423,7 +423,7 @@ fn remove_local_branch(plan: &UndoPlan) -> Result<(), String> {
         .ok_or_else(|| "no branch recorded".to_string())?;
 
     match &plan.repo_path {
-        Some(path) if crate::bare::is_git_path(path) => {
+        Some(path) if local::bare::is_git_path(path) => {
             match git::branch_exists_locally(path, branch) {
                 Ok(true) => git::delete_local_branch(path, branch)
                     .map_err(|e| format!("failed to delete local branch {branch}: {e}"))?,
@@ -554,7 +554,7 @@ fn undo_one(plan: &UndoPlan, change_id: &str, config: &Config) -> UndoOutcome {
 /// is left mid-revert for manual resolution; undo never force-resolves.
 fn revert_merged(plan: &UndoPlan, change_id: &str, config: &Config) -> OutcomeKind {
     let repo_path = match &plan.repo_path {
-        Some(p) if crate::bare::is_git_path(p) => p.clone(),
+        Some(p) if local::bare::is_git_path(p) => p.clone(),
         Some(p) => {
             return OutcomeKind::Failed(format!("recorded local path missing: {}", p.display()))
         }

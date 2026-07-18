@@ -2,8 +2,8 @@
 //! bare container. A container must count as ONE logical repo (its default
 //! worktree), never fan out over its N worktrees.
 
-use gx::repo::{discover_repos, Layout};
-use gx::test_utils::{create_bare_container, create_minimal_test_repo};
+use local::repo::{discover_repos, Layout};
+use local::test_utils::{create_bare_container, create_minimal_test_repo};
 use tempfile::TempDir;
 
 #[test]
@@ -76,7 +76,7 @@ fn test_bare_container_repo_points_at_default_worktree() {
     assert_eq!(repo.layout, Layout::Bare);
 
     // git actually runs at that path (the container root would fail here).
-    let output = gx::test_utils::run_git_command(&["status", "--porcelain"], &repo.path);
+    let output = local::test_utils::run_git_command(&["status", "--porcelain"], &repo.path);
     assert!(
         output.status.success(),
         "git status must succeed in the default worktree"

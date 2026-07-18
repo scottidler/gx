@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_already_confirmed_defaults_to_already_confirmed() {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("GX_TEST_CONFIRM_TOKEN").ok();
     unsafe { std::env::remove_var("GX_TEST_CONFIRM_TOKEN") };
 
@@ -20,7 +20,7 @@ fn test_already_confirmed_honors_test_token_hook() {
     // GX_TEST_LOCK_DELAY_MS): a real test can prove a Token threads through a
     // wrapper into its core unchanged by setting it and inspecting what the
     // core received.
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("GX_TEST_CONFIRM_TOKEN").ok();
     unsafe { std::env::set_var("GX_TEST_CONFIRM_TOKEN", "deadbeef") };
 

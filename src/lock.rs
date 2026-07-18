@@ -35,8 +35,8 @@
 //! Advisory locks are unreliable on network filesystems; `$XDG_DATA_HOME` is
 //! local, so this is a non-issue here.
 
-use crate::config::xdg_data_dir;
 use eyre::{Context, Result};
+use local::config::xdg_data_dir;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};

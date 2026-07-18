@@ -25,10 +25,10 @@
 //! ([`crate::state::ChangeState`]): serde default (snake_case), `version` field
 //! + `deny_unknown_fields` so an older gx reading a newer manifest fails loudly.
 
-use crate::config::xdg_data_dir;
-use crate::hash::sha256_hex;
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result};
+use local::config::xdg_data_dir;
+use local::hash::sha256_hex;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

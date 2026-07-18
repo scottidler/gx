@@ -1,4 +1,4 @@
-use gx::test_utils::*;
+use local::test_utils::*;
 use std::process::Command;
 
 #[test]

@@ -1,5 +1,5 @@
 use eyre::Result;
-use gx::repo::discover_repos;
+use local::repo::discover_repos;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

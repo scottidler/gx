@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_utils::env_lock;
+use local::test_utils::env_lock;
 
 /// `read_token` resolves the persona env var NAME then reads that var's
 /// VALUE, and fails loudly (naming both var and org) when it is unset.
@@ -428,7 +428,7 @@ fn test_search_query_uses_variables() {
 
 #[test]
 fn test_pr_body_template_substitution() {
-    let config = crate::config::Config::default();
+    let config = local::config::Config::default();
     let body = config
         .pr_body_template()
         .replace("{commit_message}", "my commit");
@@ -481,7 +481,7 @@ fn test_approve_and_merge_pr_non_admin_failed_approve_makes_zero_merge_calls() {
     let log_path = shim_dir.path().join("approve.log");
     unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", &log_path) };
 
-    let config = crate::config::Config::default();
+    let config = local::config::Config::default();
     let result = approve_and_merge_pr("scottidler/gx", 42, false, false, &config);
 
     assert!(
@@ -540,7 +540,7 @@ fn test_approve_and_merge_pr_admin_override_skips_approve_and_merges_with_admin(
     let log_path = shim_dir.path().join("approve.log");
     unsafe { std::env::set_var("GX_TEST_APPROVE_LOG", &log_path) };
 
-    let config = crate::config::Config::default();
+    let config = local::config::Config::default();
     let result = approve_and_merge_pr("scottidler/gx", 42, true, false, &config);
 
     assert!(

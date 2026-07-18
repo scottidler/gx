@@ -6,12 +6,12 @@
 //! repo stayed `Proposed` with its error recorded.
 
 use super::*;
-use crate::config::{Config, CreateConfig, LlmConfig};
 use crate::confirm::Confirmation;
 use crate::create::core::propose::execute_propose;
-use crate::repo::Repo;
 use crate::state::{RepoChangeStatus, StateManager};
-use crate::test_utils::run_git_command;
+use local::config::{Config, CreateConfig, LlmConfig};
+use local::repo::Repo;
+use local::test_utils::run_git_command;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::TempDir;
@@ -61,7 +61,7 @@ fn llm_config(agent_command: &str) -> Config {
 }
 
 fn with_data_home<F: FnOnce()>(f: F) {
-    let guard = crate::test_utils::env_lock();
+    let guard = local::test_utils::env_lock();
     let prior = std::env::var("XDG_DATA_HOME").ok();
     let tmp = TempDir::new().unwrap();
     unsafe { std::env::set_var("XDG_DATA_HOME", tmp.path()) };
@@ -371,7 +371,7 @@ fn test_apply_refuses_escaping_path_and_writes_nothing() {
             path: ".git/hooks/pre-commit".to_string(),
             action: manifest::FileAction::Add,
             mode: "100755".to_string(),
-            sha256: Some(crate::hash::sha256_hex(evil)),
+            sha256: Some(local::hash::sha256_hex(evil)),
             size: evil.len() as u64,
         };
         let rp = manifest::RepoProposal {

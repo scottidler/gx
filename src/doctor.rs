@@ -2,11 +2,11 @@
 //! recovery/backup artifacts left under `$XDG_DATA_HOME/gx` by interrupted runs
 //! or deleted repos ([A2], [A24]).
 
-use crate::config::xdg_data_dir;
 use crate::state::{ChangeStatus, StateManager};
 use crate::transaction::Transaction;
 use chrono::{DateTime, Utc};
 use eyre::Result;
+use local::config::xdg_data_dir;
 use log::{debug, warn};
 use serde::Serialize;
 use std::path::PathBuf;

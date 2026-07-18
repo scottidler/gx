@@ -1,6 +1,6 @@
 use gx::git::{RemoteStatus, RepoStatus, StatusChanges};
 use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
-use gx::repo::Repo;
+use local::repo::Repo;
 
 /// Test that exposes the alignment issue with different emoji widths
 #[test]

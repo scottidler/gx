@@ -1,7 +1,7 @@
-use gx::config::OutputVerbosity;
 use gx::git::{CheckoutAction, CheckoutResult, RepoStatus};
 use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
-use gx::repo::Repo;
+use local::config::OutputVerbosity;
+use local::repo::Repo;
 
 #[test]
 fn test_unified_display_trait_for_repo_status() {

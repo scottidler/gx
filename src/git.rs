@@ -1,7 +1,7 @@
-use crate::repo::Repo;
 use crate::ssh::{SshCommandDetector, SshUrlBuilder};
-use crate::subprocess::{run_checked, subprocess_timeout};
 use eyre::{Context, Result};
+use local::repo::Repo;
+use local::subprocess::{run_checked, subprocess_timeout};
 use log::{debug, warn};
 use std::process::Command;
 
@@ -830,8 +830,8 @@ fn clone_repo(repo_slug: &str, target_dir: &std::path::Path, _token: &str) -> Cl
 /// itself. `get_remote_origin` resolves fine at a container root, but the update
 /// path must be routed to the worktree - mirroring what discovery already does.
 fn resolve_update_work_tree(target_dir: &std::path::Path) -> Result<std::path::PathBuf> {
-    if crate::bare::is_bare_container(target_dir) {
-        crate::bare::default_worktree(target_dir)
+    if local::bare::is_bare_container(target_dir) {
+        local::bare::default_worktree(target_dir)
     } else {
         Ok(target_dir.to_path_buf())
     }
@@ -2252,10 +2252,10 @@ mod tests {
         // worktree, NOT the container root - the root is not a work tree, so
         // git status/checkout/pull there fail with exit 128 (the shipped bug).
         let container =
-            crate::test_utils::create_bare_container(temp.path(), "gx", "scottidler/gx");
+            local::test_utils::create_bare_container(temp.path(), "gx", "scottidler/gx");
 
         // Document the bug this guards against: git status at the ROOT fails.
-        let at_root = crate::test_utils::run_git_command(&["status", "--porcelain"], &container);
+        let at_root = local::test_utils::run_git_command(&["status", "--porcelain"], &container);
         assert!(
             !at_root.status.success(),
             "container root is not a work tree - proves why the update path must resolve the worktree"
@@ -2267,14 +2267,14 @@ mod tests {
             "bare container must resolve to its default worktree, got {resolved:?}"
         );
         // And git status SUCCEEDS in the resolved worktree (the fix).
-        let at_worktree = crate::test_utils::run_git_command(&["status", "--porcelain"], &resolved);
+        let at_worktree = local::test_utils::run_git_command(&["status", "--porcelain"], &resolved);
         assert!(
             at_worktree.status.success(),
             "git status must succeed in the resolved default worktree"
         );
 
         // A flat checkout resolves to itself.
-        let flat = crate::test_utils::create_minimal_test_repo(temp.path(), "flat");
+        let flat = local::test_utils::create_minimal_test_repo(temp.path(), "flat");
         assert_eq!(resolve_update_work_tree(&flat).unwrap(), flat);
     }
 
@@ -2287,9 +2287,9 @@ mod tests {
         // + lines, so without the success-exit gate the empty stdout of a
         // fatal cherry would read as "merged" and cleanup would delete an
         // unverified branch. If this returned Ok, that hole would be open.
-        use crate::test_utils::run_git_command;
+        use local::test_utils::run_git_command;
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = crate::test_utils::create_minimal_test_repo(temp.path(), "gx");
+        let repo = local::test_utils::create_minimal_test_repo(temp.path(), "gx");
 
         // A real feature branch with one commit, so the BRANCH ref resolves;
         // only the BASE ref is bad -- isolating the fatal-cherry path.
@@ -2351,7 +2351,7 @@ mod tests {
     #[test]
     fn test_get_current_branch_name_empty_on_detached_head() {
         // The detached-HEAD guard ([A30]) keys off an empty branch name.
-        use crate::test_utils::run_git_command;
+        use local::test_utils::run_git_command;
         let temp = tempfile::TempDir::new().unwrap();
         let p = temp.path();
         run_git_command(&["init", "--quiet"], p);
@@ -2372,7 +2372,7 @@ mod tests {
 
     #[test]
     fn test_add_files_literal_pathspec() {
-        use crate::test_utils::run_git_command;
+        use local::test_utils::run_git_command;
         let temp = tempfile::TempDir::new().unwrap();
         let p = temp.path();
         run_git_command(&["init", "--quiet"], p);
@@ -2400,7 +2400,7 @@ mod tests {
         // F13: an already-absent remote branch is a no-op (explicit
         // `ls-remote --exit-code` probe), not something the caller has to
         // sniff an error string for.
-        use crate::test_utils::run_git_command;
+        use local::test_utils::run_git_command;
         let bare_dir = tempfile::TempDir::new().unwrap();
         let bare = bare_dir.path();
         run_git_command(&["init", "--quiet", "--bare"], bare);
@@ -2423,7 +2423,7 @@ mod tests {
 
     #[test]
     fn test_delete_remote_branch_deletes_when_present() {
-        use crate::test_utils::run_git_command;
+        use local::test_utils::run_git_command;
         let bare_dir = tempfile::TempDir::new().unwrap();
         let bare = bare_dir.path();
         run_git_command(&["init", "--quiet", "--bare"], bare);

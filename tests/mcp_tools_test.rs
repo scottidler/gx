@@ -221,7 +221,7 @@ fn write_proposal(
             path: path.to_string(),
             action: *action,
             mode: "100644".to_string(),
-            sha256: (*action != FileAction::Delete).then(|| gx::hash::sha256_hex(bytes)),
+            sha256: (*action != FileAction::Delete).then(|| local::hash::sha256_hex(bytes)),
             size: bytes.len() as u64,
         });
     }

@@ -111,10 +111,12 @@ fn test_load_at_default_location_fails_loudly_on_typo() {
 
     let dir = TempDir::new().unwrap();
     unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
-    let project_dir = dir.path().join(env!("CARGO_PKG_NAME"));
+    // The config path is the `gx` product path, NOT this crate's package name
+    // (`local`) -- see `GX_PROJECT_NAME` in config.rs.
+    let project_dir = dir.path().join("gx");
     fs::create_dir_all(&project_dir).unwrap();
     fs::write(
-        project_dir.join(format!("{}.yml", env!("CARGO_PKG_NAME"))),
+        project_dir.join("gx.yml"),
         "jobs: \"2\"\nlogging-level: debug\n",
     )
     .unwrap();

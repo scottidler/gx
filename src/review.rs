@@ -1,14 +1,14 @@
 use crate::cli::Cli;
-use crate::config::Config;
 use crate::confirm::{confirm_destructive, DestructiveOp};
 use crate::git;
 use crate::github::{self, PrInfo};
 use crate::output::{display_review_results, StatusOptions};
-use crate::repo::{discover_repos, filter_repos, Repo};
 use crate::ssh::SshUrlBuilder;
 use crate::state::StateManager;
-use crate::user_org::UserOrgContext;
 use eyre::{Context, Result};
+use local::config::Config;
+use local::repo::{discover_repos, filter_repos, Repo};
+use local::user_org::UserOrgContext;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use std::path::Path;
@@ -83,12 +83,12 @@ pub fn process_review_ls_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+    let repos = local::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
     let user_org_contexts =
-        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+        local::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     if user_org_contexts.is_empty() {
         eprintln!("Error: No organization detected. Use --org <org> to specify one.");
@@ -171,9 +171,9 @@ pub fn process_review_ls_command(
     // Display unified results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -204,12 +204,12 @@ pub fn process_review_clone_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+    let repos = local::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     // Determine user/org(s) with precedence
     let user_org_contexts =
-        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+        local::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     info!(
         "Using {} org(s): {}",
@@ -260,7 +260,7 @@ pub fn process_review_clone_command(
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // Set up thread pool
@@ -293,9 +293,9 @@ pub fn process_review_clone_command(
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -426,11 +426,11 @@ pub fn process_review_approve_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+    let repos = local::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     let user_org_contexts =
-        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+        local::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     if user_org_contexts.is_empty() {
         eprintln!("Error: No organization detected. Use --org <org> to specify one.");
@@ -511,7 +511,7 @@ pub fn process_review_approve_command(
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // Set up thread pool
@@ -536,9 +536,9 @@ pub fn process_review_approve_command(
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -570,11 +570,11 @@ pub fn process_review_delete_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+    let repos = local::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     let user_org_contexts =
-        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+        local::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     if user_org_contexts.is_empty() {
         eprintln!("Error: No organization detected. Use --org <org> to specify one.");
@@ -622,7 +622,7 @@ pub fn process_review_delete_command(
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     // Set up thread pool
@@ -662,9 +662,9 @@ pub fn process_review_delete_command(
     // Display results
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -698,11 +698,11 @@ pub fn process_review_sync_command(
         .or_else(|| config.repo_discovery.as_ref().and_then(|rd| rd.max_depth))
         .unwrap_or(3);
 
-    let repos = crate::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
+    let repos = local::repo::discover_repos(start_dir, max_depth, &config.ignore_patterns())
         .context("Failed to discover repositories")?;
 
     let user_org_contexts =
-        crate::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
+        local::user_org::determine_user_orgs(org, cli.user_org.as_deref(), &repos, config)?;
 
     if user_org_contexts.is_empty() {
         eprintln!("Error: No organization detected. Use --org <org> to specify one.");
@@ -820,7 +820,7 @@ pub fn process_review_purge_command(
     // Determine parallelism
     let parallel_jobs = cli
         .parallel
-        .or_else(|| crate::utils::get_jobs_from_config(config))
+        .or_else(|| local::utils::get_jobs_from_config(config))
         .unwrap_or_else(num_cpus::get);
 
     let pool = rayon::ThreadPoolBuilder::new()
@@ -876,9 +876,9 @@ pub fn process_review_purge_command(
 
     let opts = StatusOptions {
         verbosity: if cli.verbose {
-            crate::config::OutputVerbosity::Detailed
+            local::config::OutputVerbosity::Detailed
         } else {
-            crate::config::OutputVerbosity::Summary
+            local::config::OutputVerbosity::Summary
         },
         use_emoji: true,
         use_colors: true,
@@ -1274,8 +1274,8 @@ impl ReviewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::state::{ChangeState, ChangeStatus, RepoChangeStatus};
+    use local::config::Config;
     use tempfile::TempDir;
 
     #[test]
@@ -1335,7 +1335,7 @@ exit 0
         // Merged after `review sync`. Exercises the REAL
         // github::list_prs_by_change_id (hitting a PATH-shimmed `gh`) piped
         // into `sync_change_state` - the exact path `gx review sync` runs.
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
 
@@ -1411,7 +1411,7 @@ exit 0
         // fails fast -- it never reads-mutates-saves while someone else holds
         // the lock, so there is no window where one save can race and clobber
         // the other's update.
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_data_home = std::env::var("XDG_DATA_HOME").ok();
 
         let data_home = TempDir::new().unwrap();
@@ -1520,7 +1520,7 @@ exit 0
     /// fails.
     #[test]
     fn test_discover_all_prs_aborts_whole_batch_when_one_org_errors() {
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
 
@@ -1537,11 +1537,11 @@ exit 0
         let contexts = vec![
             UserOrgContext {
                 user_or_org: "goodorg".to_string(),
-                detection_method: crate::user_org::DetectionMethod::Explicit,
+                detection_method: local::user_org::DetectionMethod::Explicit,
             },
             UserOrgContext {
                 user_or_org: "badorg".to_string(),
-                detection_method: crate::user_org::DetectionMethod::Explicit,
+                detection_method: local::user_org::DetectionMethod::Explicit,
             },
         ];
         let config = Config::default();
@@ -1600,7 +1600,7 @@ exit 0
     #[test]
     fn test_review_approve_fails_closed_and_makes_zero_mutations() {
         use clap::Parser;
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
         let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
@@ -1625,7 +1625,7 @@ exit 0
         let cli = Cli::parse_from(["gx", "--cwd", &cwd, "review", "approve", "GX-approve-shim"]);
         // Threshold 1 so a single open PR trips the gate deterministically.
         let config = Config {
-            review: Some(crate::config::ReviewConfig {
+            review: Some(local::config::ReviewConfig {
                 confirm_threshold: Some(1),
             }),
             ..Config::default()
@@ -1709,7 +1709,7 @@ exit 0
     fn test_review_approve_skips_non_mergeable_pr_and_records_skipped() {
         use crate::state::RepoChangeStatus;
         use clap::Parser;
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
         let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
@@ -1836,7 +1836,7 @@ exit 0
     #[test]
     fn test_review_delete_fails_closed_and_makes_zero_mutations() {
         use clap::Parser;
-        let guard = crate::test_utils::env_lock();
+        let guard = local::test_utils::env_lock();
         let prior_path = std::env::var("PATH").ok();
         let prior_tok = std::env::var("GITHUB_PAT_HOME").ok();
         let prior_mut = std::env::var("GX_TEST_MUTATION_LOG").ok();
@@ -1861,7 +1861,7 @@ exit 0
         let cli = Cli::parse_from(["gx", "--cwd", &cwd, "review", "delete", "GX-delete-shim"]);
         // Threshold 1 so a single open PR trips the gate deterministically.
         let config = Config {
-            review: Some(crate::config::ReviewConfig {
+            review: Some(local::config::ReviewConfig {
                 confirm_threshold: Some(1),
             }),
             ..Config::default()
