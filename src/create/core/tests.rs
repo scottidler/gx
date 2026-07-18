@@ -226,7 +226,7 @@ fn init_repo_with_bare_remote(repo: &Path, bare: &Path) -> String {
     fs::write(repo.join("README.md"), "# repo\n").unwrap();
     init_git_repo(repo);
     run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
-    let branch = crate::git::get_current_branch_name(repo).unwrap();
+    let branch = local::git::get_current_branch_name(repo).unwrap();
     run_git_command(&["push", "--quiet", "-u", "origin", &branch], repo);
     run_git_command(&["remote", "set-head", "origin", &branch], repo);
     branch

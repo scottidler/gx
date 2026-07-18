@@ -389,8 +389,8 @@ fn cleanup_change(
         // Delete local branch. Existence is checked explicitly FIRST (F13) so
         // an already-deleted branch is a no-op rather than the caller sniffing
         // the delete error's text for "not found"/"does not exist".
-        match git::branch_exists_locally(&local_path, &branch_name) {
-            Ok(true) => match git::delete_local_branch(&local_path, &branch_name) {
+        match local::git::branch_exists_locally(&local_path, &branch_name) {
+            Ok(true) => match local::git::delete_local_branch(&local_path, &branch_name) {
                 Ok(()) => {
                     info!("🧹 Deleted local branch {} in {}", branch_name, repo_slug);
                     cleaned += 1;
@@ -500,7 +500,7 @@ mod tests {
         run_git_command(&["add", "-A"], p);
         run_git_command(&["commit", "--quiet", "-m", "init"], p);
         run_git_command(&["branch", "GX-cleanup"], p);
-        assert!(crate::git::branch_exists_locally(p, "GX-cleanup").unwrap());
+        assert!(local::git::branch_exists_locally(p, "GX-cleanup").unwrap());
 
         let mut state = ChangeState::new("GX-cleanup".to_string(), None);
         state.add_repository("org/repo".to_string(), "GX-cleanup".to_string());
@@ -513,7 +513,7 @@ mod tests {
         // force=true so it cleans even though we didn't go through a real merge.
         let result = cleanup_change(&mut state, false, true).unwrap();
         assert_eq!(result.repos_cleaned, 1);
-        assert!(!crate::git::branch_exists_locally(p, "GX-cleanup").unwrap());
+        assert!(!local::git::branch_exists_locally(p, "GX-cleanup").unwrap());
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod tests {
         std::fs::write(work.join("extra.txt"), "unmerged work").unwrap();
         run_git_command(&["add", "-A"], &work);
         run_git_command(&["commit", "--quiet", "-m", "unmerged commit"], &work);
-        assert!(crate::git::branch_exists_locally(&work, "GX-unmerged").unwrap());
+        assert!(local::git::branch_exists_locally(&work, "GX-unmerged").unwrap());
 
         // Recorded as PrMerged (the fast-path signal) - the ancestry check must
         // STILL veto the delete because the commit isn't in the base.
@@ -633,7 +633,7 @@ mod tests {
         );
         assert_eq!(result.repos_skipped, 1, "the unmerged branch is skipped");
         assert!(
-            crate::git::branch_exists_locally(&work, "GX-unmerged").unwrap(),
+            local::git::branch_exists_locally(&work, "GX-unmerged").unwrap(),
             "the unmerged branch must survive a non-force cleanup"
         );
     }
@@ -685,7 +685,7 @@ mod tests {
         std::fs::write(work.join("feature.txt"), "feature change").unwrap();
         run_git_command(&["add", "-A"], &work);
         run_git_command(&["commit", "--quiet", "-m", "feature commit"], &work);
-        assert!(crate::git::branch_exists_locally(&work, "GX-squash").unwrap());
+        assert!(local::git::branch_exists_locally(&work, "GX-squash").unwrap());
 
         // Push the branch to upstream, as `gx create` does, so upstream has a
         // ref it can squash-merge (the PR).
@@ -740,7 +740,7 @@ mod tests {
             "a squash-merged branch must be cleaned WITHOUT --force"
         );
         assert!(
-            !crate::git::branch_exists_locally(&work, "GX-squash").unwrap(),
+            !local::git::branch_exists_locally(&work, "GX-squash").unwrap(),
             "the squash-merged branch must be deleted"
         );
     }
@@ -771,7 +771,7 @@ mod tests {
         run_git_command(&["add", "-A"], p);
         run_git_command(&["commit", "--quiet", "-m", "init"], p);
         run_git_command(&["branch", "GX-cleanup-gate"], p);
-        assert!(crate::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap());
+        assert!(local::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap());
 
         let manager = StateManager::new().unwrap();
         let mut state = ChangeState::new("GX-cleanup-gate".to_string(), None);
@@ -800,7 +800,7 @@ mod tests {
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("--yes"), "error must name --yes: {msg}");
         assert!(
-            crate::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap(),
+            local::git::branch_exists_locally(p, "GX-cleanup-gate").unwrap(),
             "the branch must survive a fail-closed cleanup (ZERO deletions)"
         );
 

@@ -1,4 +1,5 @@
-//! `local`: credential-free gx logic (repo/config/subprocess/hash/utils/bare/diff/user_org).
+//! `local`: credential-free gx logic (repo/config/subprocess/hash/utils/bare/
+//! diff/user_org/file and the LOCAL half of git).
 //!
 //! This crate MUST NOT depend on `ssh`/`persona`/`github` or any remote-git
 //! function. That boundary is what makes the intel-catalog cross-org non-goal
@@ -8,6 +9,8 @@
 pub mod bare;
 pub mod config;
 pub mod diff;
+pub mod file;
+pub mod git;
 pub mod hash;
 pub mod repo;
 pub mod subprocess;

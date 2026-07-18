@@ -12,7 +12,6 @@ mod confirm;
 mod crash;
 mod create;
 mod doctor;
-mod file;
 mod git;
 mod github;
 mod lock;

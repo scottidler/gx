@@ -404,7 +404,7 @@ impl StateManager {
         let file_path = self.state_dir.join(format!("{}.json", state.change_id));
         let json =
             serde_json::to_string_pretty(state).context("Failed to serialize change state")?;
-        crate::file::atomic_write(&file_path, json.as_bytes())
+        local::file::atomic_write(&file_path, json.as_bytes())
             .context("Failed to write change state file")?;
         debug!("Saved change state to {}", file_path.display());
         Ok(())

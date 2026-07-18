@@ -155,3 +155,87 @@ remote-side caller reaches them through the crate dependency. Nothing needs to m
 - None. All ambiguities (test_utils cfg-gating, the `CARGO_PKG_NAME` seam bug) were resolved during this
   phase per the "open questions are the author's to close" rule; nothing here needs Scott's confirmation
   before Phase 2 starts.
+
+## Phase 2: split git.rs into local + remote
+
+### Design decisions
+- **The split follows the Phase-0 authoritative table verbatim.** `src/git.rs` (2592 lines) was
+  `git mv`'d to `local/src/git.rs` (history-preserving on the larger LOCAL half) and rewritten to contain
+  ONLY the 44 LOCAL functions/helpers + the 4 status types (`RepoStatus`/`StatusChanges`/`RemoteStatus`/
+  `BranchTrackingInfo`) + the NEW `get_repo_status_local`. A fresh `src/git.rs` (gx) holds the 16 REMOTE
+  functions + the 4 remote result types (`CheckoutResult`/`CheckoutAction`/`CloneResult`/`CloneAction`),
+  importing the LOCAL helpers/types it needs from `local::git`. `pub mod git;` added to `local/src/lib.rs`.
+- **`get_repo_status_local` (`local/src/git.rs`)** built exactly to the Phase-0 sketch: `get_current_branch`
+  + `get_current_commit_sha` + `get_remote_status_native` (zero-fetch, local tracking ref) +
+  `get_status_changes(..).is_empty()` -> `RepoStatus`. Its call graph never reaches
+  `get_remote_status_with_fetch`/`fetch_origin`; the boundary grep enforces this structurally. It is unused
+  by production code today (it is B1's entry point) but is legitimate public API of a lib crate, so
+  `dead_code` does not fire.
+- **`file` moved into `local`** (`git mv src/file.rs local/src/file.rs` + `src/file/` -> `local/src/file/`);
+  `pub mod file;` added to `local/src/lib.rs`. Inside `local`, `file.rs`'s `use local::diff;` became
+  `use crate::diff;` and its `use crate::git;` (for `git::list_index_files`, a LOCAL fn) resolves cleanly to
+  the new `local::git`; `file/tests.rs`'s `local::{diff,test_utils}::` became `crate::{diff,test_utils}::`.
+- **Boundary guard `bin/check-local-boundary.sh`** greps `local/src/**/*.rs` and exits non-zero on
+  (a) `Command::new("gh")` or a `\b(ssh|github|persona)::` path (all files), and (b) a quoted network verb
+  `"fetch"|"pull"|"ls-remote"|"clone"|"push"`. Wired into `.otto.yml` as task `local-boundary` in `ci`'s
+  `before:` list, so it runs on every `otto ci`. Design: `cargo tree` misses source-level shell-outs, so the
+  guard is a source grep per the doc's Resolved Decision on the two-part boundary.
+- **Function visibility:** nine helpers that were private in the monolith and are now called by the REMOTE
+  half across the crate boundary were promoted to `pub` in `local::git`: `get_current_branch`,
+  `get_current_commit_sha`, `get_remote_status_native`, `get_status_changes`, `get_status_changes_for_path`,
+  `get_remote_origin`, `is_same_repo`, `resolve_update_work_tree`, and `branch_changes_in_base`. Helpers used
+  only within `local` stayed private (`get_detached_head_info`, `run_status_porcelain`,
+  `parse_branch_tracking_info`, `bytes_to_path`).
+
+### Deviations
+- **`branch_changes_in_base` promoted from private `fn` to `pub fn` (same seam, wider visibility).** It is a
+  purely local `git cherry` patch-identity proof (LOCAL per the Phase-0 corrections), but its only caller,
+  the REMOTE `branch_merged_into_base` (which fetches `origin` first), now lives in a different crate. Making
+  it `pub` in `local::git` is the minimal change that keeps the local primitive local while letting the
+  fetch-owning remote caller reach it. Its fail-closed test moved to `local::git`'s test module unchanged.
+- **Guard excludes `test_utils.rs` from the network-verb check.** `local/src/test_utils.rs`
+  (`create_bare_container`) runs a LOCAL `git clone --bare <temp-source> <temp-bare>` from a temp path -- no
+  network -- across a multi-line args array, so a line-level exclusion could not target it the way the
+  `stash push` line is excluded by matching `stash`. `test_utils` is test-only scaffolding gated behind
+  `cfg(any(test, feature = "testutil"))` and is never part of the credential-free runtime surface B1 depends
+  on, so excluding it from the verb check does not weaken the production boundary. The credential-import
+  check (ssh/github/persona/gh) still applies to `test_utils.rs`.
+- **Rewiring style is mixed by necessity, not uniform.** Files whose git references are ALL local
+  (`create/core/propose.rs`) just repointed `use crate::git;` -> `use local::git;`. Files with BOTH halves
+  (`checkout`, `cleanup`, `create/core`, `status`, `transaction`, `undo/core`, `output`, plus their test
+  modules and the `tests/*` integration tests) kept `use crate::git;` for the remote refs and
+  fully-qualified each LOCAL ref to `local::git::<name>` (types `RepoStatus`/`RemoteStatus`/`StatusChanges`
+  -> `local::git`, remote result types stay `crate::git`). `file` importers (`create`, `create/core`,
+  `create/core/manifest`, `state`, `transaction`, and test modules) repointed to `local::file`. 23 importer
+  files rewired; the compiler + `-D warnings` (unused-import) confirmed no stale `use crate::git;` remained.
+
+### Bite proof (required)
+- Planted `let _planted = std::process::Command::new("git").args(["fetch", "origin"]);` at the top of
+  `local::git::get_repo_status_local` (a production local module). `bash bin/check-local-boundary.sh` printed
+  `BOUNDARY VIOLATION -- remote git network verb in local/src: .../local/src/git.rs:68: ... ["fetch",
+  "origin"]` and exited **1** (RED). Reverted the line; the guard returned to `local/src is clean` and exit
+  **0**. The `local-boundary` task sits in `ci.before`, so this same RED would fail `otto ci`.
+
+### Tradeoffs
+- **`tempfile` is now a plain `[dependencies]` entry of `local`, not optional.** `file::atomic_write` uses
+  `tempfile::NamedTempFile` in PRODUCTION, so once `file` moved into `local`, `tempfile` had to be a normal
+  dependency. `local/Cargo.toml` dropped the `optional = true` marker and the redundant `[dev-dependencies]
+  tempfile` line, and simplified `[features]` to `testutil = []` (test_utils stays gated by
+  `#[cfg(any(test, feature = "testutil"))]` but no longer needs `dep:tempfile`, since tempfile is always
+  present now). Chosen over keeping the optional/dev double-listing, which no longer models reality.
+- **Kept the git.rs inline `#[cfg(test)] mod tests` style in both halves** rather than extracting to
+  `git/tests.rs` per the rust.md test-placement rule. This is a pure move refactor with a "no behavior
+  change / no test changes except paths" acceptance criterion; extracting the test module is an orthogonal
+  cleanup that would enlarge the diff and risk the split. Left as-is deliberately.
+
+### Success criteria
+1. `local::git` compiles credential-free (no `ssh`/`github`/`persona`, no network verb) -- PASS (guard clean
+   + workspace builds).
+2. Boundary guard BITES -- PASS (planted `git fetch` -> guard exit 1, reverted, proof above).
+3. `otto ci` GREEN, all existing git tests pass -- PASS (`otto ci` exit 0; 21 `git::tests::*` cases run
+   green under `local`, remote git tests green under `gx`).
+4. `file` lives in `local`; `local::git::get_repo_status_local` exists and is zero-fetch -- PASS.
+
+### Open questions
+- None. The three cross-repo/deferred bullets in this design (`remote` crate formation, bin shim, status flip
+  to Implemented) belong to Phase 3 / the parent, not this phase.

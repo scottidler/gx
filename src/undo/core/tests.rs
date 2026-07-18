@@ -342,7 +342,7 @@ fn undo_one_unverified_offline_touches_no_remote_and_reports() {
         outcome.kind
     );
     assert!(
-        crate::git::branch_exists_locally(repo, "GX-unverified").unwrap(),
+        local::git::branch_exists_locally(repo, "GX-unverified").unwrap(),
         "the local branch must NOT be deleted when merge state is unverified"
     );
 
@@ -533,7 +533,7 @@ fn undo_one_drains_mutating_recovery_stash_before_deleting_branch() {
     // to HEAD, so the WIP file is gone until recovery restores it.
     fs::write(repo.join("wip.txt"), "precious work in progress").unwrap();
     let stash_sha =
-        crate::git::stash_save_with_untracked(repo, "GX auto-stash for GX-drain").unwrap();
+        local::git::stash_save_with_untracked(repo, "GX auto-stash for GX-drain").unwrap();
     assert!(
         !repo.join("wip.txt").exists(),
         "stash should have removed the WIP from the worktree"
@@ -590,7 +590,7 @@ fn undo_one_drains_mutating_recovery_stash_before_deleting_branch() {
     );
     // The GX branch was deleted by the campaign action.
     assert!(
-        !crate::git::branch_exists_locally(repo, "GX-drain").unwrap(),
+        !local::git::branch_exists_locally(repo, "GX-drain").unwrap(),
         "the local GX branch should be deleted"
     );
 
@@ -681,7 +681,7 @@ fn undo_one_treats_never_pushed_remote_branch_as_no_op() {
         outcome.kind
     );
     assert!(
-        !crate::git::branch_exists_locally(repo, "GX-neverpushed").unwrap(),
+        !local::git::branch_exists_locally(repo, "GX-neverpushed").unwrap(),
         "the local branch should still be deleted"
     );
 
@@ -824,7 +824,7 @@ exit 1
         "the REMOTE GX branch must be deleted (not stranded)"
     );
     assert!(
-        !crate::git::branch_exists_locally(repo, "GX-recovery-only").unwrap(),
+        !local::git::branch_exists_locally(repo, "GX-recovery-only").unwrap(),
         "the local GX branch must be deleted"
     );
     assert!(
@@ -983,7 +983,7 @@ fn revert_squash_merge_opens_inverse_revert_pr() {
 
     // Sanity: the merge commit really has one parent (dispatch input).
     assert_eq!(
-        crate::git::commit_parent_count(&repo, &oid).unwrap(),
+        local::git::commit_parent_count(&repo, &oid).unwrap(),
         1,
         "squash commit must have exactly one parent"
     );
@@ -1060,7 +1060,7 @@ fn revert_true_merge_uses_dash_m_one() {
     run_git_command(&["push", "--quiet", "origin", "main"], &repo);
 
     assert_eq!(
-        crate::git::commit_parent_count(&repo, &oid).unwrap(),
+        local::git::commit_parent_count(&repo, &oid).unwrap(),
         2,
         "true merge commit must have two parents"
     );

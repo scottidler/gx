@@ -16,9 +16,9 @@
 //! phase and NEVER mutates a remote - after a push the work is kept and reversed
 //! only by `gx undo`.
 
-use crate::file::atomic_write;
 use crate::git;
 use eyre::{Context, Result};
+use local::file::atomic_write;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
@@ -461,15 +461,15 @@ impl Transaction {
         let mut outcome = FinalizeOutcome::default();
 
         if let Some(branch) = &self.original_branch {
-            git::switch_branch(&self.repo_path, branch)
+            local::git::switch_branch(&self.repo_path, branch)
                 .with_context(|| format!("Failed to switch back to original branch {branch}"))?;
         }
 
         if let Some(sha) = &self.stash_sha {
-            match git::stash_apply_sha(&self.repo_path, sha) {
+            match local::git::stash_apply_sha(&self.repo_path, sha) {
                 Ok(()) => {
                     // Apply succeeded: drop the stash. A drop failure is not fatal.
-                    if let Err(e) = git::stash_drop_by_sha(&self.repo_path, sha) {
+                    if let Err(e) = local::git::stash_drop_by_sha(&self.repo_path, sha) {
                         warn!("Applied stash {sha} but failed to drop it: {e}");
                     }
                     outcome.stash_restored = true;
@@ -640,9 +640,9 @@ pub fn execute_step(step: &RollbackStep) -> Result<()> {
     debug!("execute_step: {step:?}");
     match step {
         RollbackStep::PopStash { repo, stash_sha } => {
-            git::stash_apply_sha(repo, stash_sha)?;
+            local::git::stash_apply_sha(repo, stash_sha)?;
             // Best-effort drop after a clean apply.
-            if let Err(e) = git::stash_drop_by_sha(repo, stash_sha) {
+            if let Err(e) = local::git::stash_drop_by_sha(repo, stash_sha) {
                 warn!("Applied stash {stash_sha} but failed to drop it: {e}");
             }
             Ok(())
@@ -650,15 +650,15 @@ pub fn execute_step(step: &RollbackStep) -> Result<()> {
         RollbackStep::PopStashByMessage { repo, message } => {
             // Resolve the message to a SHA; no match means the stash was never
             // created (or already popped) - a harmless no-op.
-            if let Some(sha) = git::stash_sha_by_message(repo, message)? {
-                git::stash_apply_sha(repo, &sha)?;
-                if let Err(e) = git::stash_drop_by_sha(repo, &sha) {
+            if let Some(sha) = local::git::stash_sha_by_message(repo, message)? {
+                local::git::stash_apply_sha(repo, &sha)?;
+                if let Err(e) = local::git::stash_drop_by_sha(repo, &sha) {
                     warn!("Applied stash {sha} but failed to drop it: {e}");
                 }
             }
             Ok(())
         }
-        RollbackStep::SwitchBranch { repo, branch } => git::switch_branch(repo, branch),
+        RollbackStep::SwitchBranch { repo, branch } => local::git::switch_branch(repo, branch),
         RollbackStep::DeleteLocalBranch {
             repo,
             branch,
@@ -670,16 +670,16 @@ pub fn execute_step(step: &RollbackStep) -> Result<()> {
             }
             // If we're currently on the branch, get off it first (force, to
             // tolerate any uncommitted state) before deleting.
-            if let Ok(current) = git::get_current_branch_name(repo) {
+            if let Ok(current) = local::git::get_current_branch_name(repo) {
                 if current == *branch {
                     let head = git::get_head_branch(repo).unwrap_or_else(|_| "main".to_string());
-                    if let Err(e) = git::force_switch_branch(repo, &head) {
+                    if let Err(e) = local::git::force_switch_branch(repo, &head) {
                         warn!("Failed to switch off {branch} before delete: {e}");
                     }
                 }
             }
             // Idempotent: deleting an absent branch is fine.
-            match git::delete_local_branch(repo, branch) {
+            match local::git::delete_local_branch(repo, branch) {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     debug!("delete_local_branch({branch}) returned: {e} (treating as done)");
@@ -694,13 +694,13 @@ pub fn execute_step(step: &RollbackStep) -> Result<()> {
             Ok(())
         }
         RollbackStep::ResetCommit { repo, expected_sha } => {
-            git::reset_hard_to_sha(repo, expected_sha)
+            local::git::reset_hard_to_sha(repo, expected_sha)
         }
         RollbackStep::RestoreBackup {
             backup,
             original,
             mode,
-        } => crate::file::restore_backup(backup, original, *mode),
+        } => local::file::restore_backup(backup, original, *mode),
         RollbackStep::RemoveCreatedFile { path } => {
             if path.exists() {
                 std::fs::remove_file(path).with_context(|| {
@@ -874,7 +874,7 @@ fn run_recovery_journaled(
             RollbackStep::PopStash { repo, stash_sha } => {
                 // Beat 1 (apply): skipped when the journal already says Applied.
                 if state.steps[i].status != StepStatus::Applied {
-                    if let Err(e) = git::stash_apply_sha(repo, stash_sha) {
+                    if let Err(e) = local::git::stash_apply_sha(repo, stash_sha) {
                         error!("Recovery step failed: {step:?} - {e}");
                         set_status(state, i, StepStatus::Failed, Some(e.to_string()), persist);
                         failed += 1;
@@ -884,7 +884,7 @@ fn run_recovery_journaled(
                 }
                 // Beat 2 (drop): best-effort. A stash already gone (dropped by a
                 // prior run) still converges to Done.
-                if let Err(e) = git::stash_drop_by_sha(repo, stash_sha) {
+                if let Err(e) = local::git::stash_drop_by_sha(repo, stash_sha) {
                     warn!("Applied stash {stash_sha} but failed to drop it: {e}");
                 }
                 set_status(state, i, StepStatus::Done, None, persist);
@@ -895,9 +895,9 @@ fn run_recovery_journaled(
                 // the stash was never created (crash before it existed) or was
                 // already popped -> converge to Done.
                 if state.steps[i].status != StepStatus::Applied {
-                    match git::stash_sha_by_message(repo, message) {
+                    match local::git::stash_sha_by_message(repo, message) {
                         Ok(Some(sha)) => {
-                            if let Err(e) = git::stash_apply_sha(repo, &sha) {
+                            if let Err(e) = local::git::stash_apply_sha(repo, &sha) {
                                 error!("Recovery step failed: {step:?} - {e}");
                                 set_status(
                                     state,
@@ -926,9 +926,9 @@ fn run_recovery_journaled(
                     }
                 }
                 // Beat 2 (drop): re-resolve (apply leaves the stash in place).
-                match git::stash_sha_by_message(repo, message) {
+                match local::git::stash_sha_by_message(repo, message) {
                     Ok(Some(sha)) => {
-                        if let Err(e) = git::stash_drop_by_sha(repo, &sha) {
+                        if let Err(e) = local::git::stash_drop_by_sha(repo, &sha) {
                             warn!("Applied stash {sha} but failed to drop it: {e}");
                         }
                     }

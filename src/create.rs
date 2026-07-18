@@ -19,11 +19,11 @@ pub use core::manifest;
 
 use crate::cli::Cli;
 use crate::confirm::Confirmation;
-use crate::file;
 use crate::output::{display_unified_results, StatusOptions};
 use colored::Colorize;
 use eyre::{Context, Result};
 use local::config::Config;
+use local::file;
 use local::repo::{discover_repos, filter_repos, Repo};
 use log::debug;
 use serde::Serialize;

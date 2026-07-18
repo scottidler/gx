@@ -8,7 +8,6 @@ pub mod confirm;
 pub mod crash;
 pub mod create;
 pub mod doctor;
-pub mod file;
 pub mod git;
 pub mod github;
 pub mod lock;

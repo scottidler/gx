@@ -1,6 +1,7 @@
-use gx::git::{CheckoutAction, CheckoutResult, RepoStatus};
+use gx::git::{CheckoutAction, CheckoutResult};
 use gx::output::{AlignmentWidths, StatusOptions, UnifiedDisplay};
 use local::config::OutputVerbosity;
+use local::git::RepoStatus;
 use local::repo::Repo;
 
 #[test]
@@ -12,8 +13,8 @@ fn test_unified_display_trait_for_repo_status() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: None,
     };
 
@@ -59,8 +60,8 @@ fn test_alignment_widths_calculation() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: None,
     };
 
@@ -69,8 +70,8 @@ fn test_alignment_widths_calculation() {
         branch: Some("feature-branch-with-long-name".to_string()),
         commit_sha: Some("def5678".to_string()),
         is_clean: false,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: None,
     };
 
@@ -95,8 +96,8 @@ fn test_unified_format_consistency() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: None,
     };
 
@@ -138,8 +139,8 @@ fn test_error_handling_in_unified_display() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: false,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: Some("Git command failed".to_string()),
     };
 
@@ -171,8 +172,8 @@ fn test_no_emoji_mode() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate,
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate,
         error: None,
     };
 
@@ -205,8 +206,8 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         branch: Some("main".to_string()),
         commit_sha: Some("abc1234".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::UpToDate, // 🟢 (2 chars)
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::UpToDate, // 🟢 (2 chars)
         error: None,
     };
 
@@ -215,8 +216,8 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         branch: Some("feature".to_string()),
         commit_sha: Some("def5678".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::Ahead(15), // ↑15 (3 width)
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::Ahead(15), // ↑15 (3 width)
         error: None,
     };
 
@@ -225,8 +226,8 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         branch: Some("develop".to_string()),
         commit_sha: Some("ghi9012".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::Diverged(5, 3), // 🔀5↑3↓ (6 chars)
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::Diverged(5, 3), // 🔀5↑3↓ (6 chars)
         error: None,
     };
 
@@ -235,8 +236,8 @@ fn test_emoji_width_calculation_with_complex_combinations() {
         branch: Some("bugfix".to_string()),
         commit_sha: Some("jkl3456".to_string()),
         is_clean: true,
-        changes: gx::git::StatusChanges::default(),
-        remote_status: gx::git::RemoteStatus::Error("timeout".to_string()), // 🚨 tim (6 width)
+        changes: local::git::StatusChanges::default(),
+        remote_status: local::git::RemoteStatus::Error("timeout".to_string()), // 🚨 tim (6 width)
         error: None,
     };
 

@@ -24,11 +24,11 @@
 use super::manifest::{
     self, FileAction, FileEntry, ProposalManifest, ProposalOutcome, RepoProposal,
 };
-use crate::git;
 use crate::lock::{ChangeLock, RepoLock};
 use crate::state::{ChangeState, StateManager};
 use eyre::{Context, Result};
 use local::config::{xdg_data_dir, Config};
+use local::git;
 use local::hash;
 use local::repo::Repo;
 use log::{debug, info, warn};

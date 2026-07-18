@@ -471,7 +471,7 @@ fn test_checkout_help_shows_new_syntax() {
 
 #[test]
 fn test_resolve_branch_name_unit_test() {
-    use gx::git::resolve_branch_name;
+    use local::git::resolve_branch_name;
     use local::repo::Repo;
 
     // Create a test repo struct

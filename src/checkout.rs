@@ -73,7 +73,7 @@ pub fn process_checkout_command(
 
     filtered_repos.par_iter().for_each(|repo| {
         // Resolve branch name per repo (handle 'default' keyword)
-        let resolved_branch = match git::resolve_branch_name(repo, branch_name) {
+        let resolved_branch = match local::git::resolve_branch_name(repo, branch_name) {
             Ok(branch) => branch,
             Err(e) => {
                 // Handle resolution error
@@ -101,7 +101,7 @@ pub fn process_checkout_command(
 
         // Resolve from_branch if provided and it's 'default'
         let resolved_from_branch = if let Some(from) = from_branch {
-            match git::resolve_branch_name(repo, from) {
+            match local::git::resolve_branch_name(repo, from) {
                 Ok(branch) => Some(branch),
                 Err(e) => {
                     // Handle from_branch resolution error

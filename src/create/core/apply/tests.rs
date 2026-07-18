@@ -31,7 +31,7 @@ fn repo_with_remote(dir: &Path) -> (std::path::PathBuf, String) {
     run_git_command(&["add", "-A"], &repo);
     run_git_command(&["commit", "--quiet", "-m", "init"], &repo);
     run_git_command(&["remote", "add", "origin", bare.to_str().unwrap()], &repo);
-    let branch = crate::git::get_current_branch_name(&repo).unwrap();
+    let branch = local::git::get_current_branch_name(&repo).unwrap();
     run_git_command(&["push", "--quiet", "-u", "origin", &branch], &repo);
     run_git_command(&["remote", "set-head", "origin", &branch], &repo);
     (repo, branch)
@@ -74,7 +74,7 @@ fn with_data_home<F: FnOnce()>(f: F) {
 }
 
 fn local_branch_exists(repo: &Path, branch: &str) -> bool {
-    crate::git::branch_exists_locally(repo, branch).unwrap_or(false)
+    local::git::branch_exists_locally(repo, branch).unwrap_or(false)
 }
 
 fn on_branch_file(repo: &Path, branch: &str, path: &str) -> String {
@@ -362,7 +362,7 @@ fn test_apply_refuses_escaping_path_and_writes_nothing() {
         let (repo_path, _branch) = repo_with_remote(ws.path());
         let repo = Repo::new(repo_path.clone()).unwrap();
         let slug = repo.slug.clone();
-        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+        let base_sha = local::git::get_head_sha(&repo_path).unwrap();
         let change_id = "GX-apply-escape";
 
         // Hand-craft a proposal whose only file targets `.git/hooks/pre-commit`.

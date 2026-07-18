@@ -471,7 +471,7 @@ fn test_process_single_repo_rejects_llm_change() {
             &["remote", "add", "origin", bare.to_str().unwrap()],
             &repo_path,
         );
-        let branch = crate::git::get_current_branch_name(&repo_path).unwrap();
+        let branch = local::git::get_current_branch_name(&repo_path).unwrap();
         run_git_command(&["push", "--quiet", "-u", "origin", &branch], &repo_path);
         run_git_command(&["remote", "set-head", "origin", &branch], &repo_path);
         let repo = Repo::new(repo_path).unwrap();
@@ -511,7 +511,7 @@ fn test_propose_prunes_leftover_worktree_from_a_crashed_prior_run() {
         let scripts = TempDir::new().unwrap();
         let repo_path = ws.path().join("org").join("crashed");
         init_repo(&repo_path, &[("README.md", b"# repo\n")]);
-        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+        let base_sha = local::git::get_head_sha(&repo_path).unwrap();
 
         // Simulate a crashed prior run: a worktree registered under the
         // gx-owned tmp root that was never cleaned up (the process died
@@ -520,7 +520,7 @@ fn test_propose_prunes_leftover_worktree_from_a_crashed_prior_run() {
         let leftover = tmp_root.join("wt-crashed-run");
         let leftover_wt = leftover.join("wt");
         std::fs::create_dir_all(&leftover).unwrap();
-        git::worktree_add_detached(&repo_path, &leftover_wt, &base_sha).unwrap();
+        local::git::worktree_add_detached(&repo_path, &leftover_wt, &base_sha).unwrap();
         assert!(leftover_wt.exists(), "sanity: leftover worktree exists");
         let list_before = run_git_command(&["worktree", "list"], &repo_path);
         assert!(
@@ -566,12 +566,12 @@ fn test_propose_does_not_touch_a_non_gx_worktree() {
         let scripts = TempDir::new().unwrap();
         let repo_path = ws.path().join("org").join("liveworktree");
         init_repo(&repo_path, &[("README.md", b"# repo\n")]);
-        let base_sha = crate::git::get_head_sha(&repo_path).unwrap();
+        let base_sha = local::git::get_head_sha(&repo_path).unwrap();
 
         // A worktree OUTSIDE the gx tmp root - not ours to touch.
         let elsewhere = TempDir::new().unwrap();
         let other_wt = elsewhere.path().join("someone-elses-worktree");
-        git::worktree_add_detached(&repo_path, &other_wt, &base_sha).unwrap();
+        local::git::worktree_add_detached(&repo_path, &other_wt, &base_sha).unwrap();
         assert!(other_wt.exists());
 
         let repo = Repo::new(repo_path.clone()).unwrap();

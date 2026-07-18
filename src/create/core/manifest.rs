@@ -173,7 +173,7 @@ pub fn write_blob(proposal_dir: &Path, slug: &str, rel_path: &str, bytes: &[u8])
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create blob dir: {}", parent.display()))?;
     }
-    crate::file::atomic_write(&path, bytes)
+    local::file::atomic_write(&path, bytes)
         .with_context(|| format!("Failed to write blob: {}", path.display()))?;
     debug!(
         "write_blob: slug={slug} path={rel_path} bytes={}",
@@ -189,7 +189,7 @@ pub fn write_patch(proposal_dir: &Path, slug: &str, patch: &str) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create patch dir: {}", parent.display()))?;
     }
-    crate::file::atomic_write(&path, patch.as_bytes())
+    local::file::atomic_write(&path, patch.as_bytes())
         .with_context(|| format!("Failed to write patch: {}", path.display()))?;
     debug!("write_patch: slug={slug} bytes={}", patch.len());
     Ok(())
@@ -212,7 +212,7 @@ pub fn write_manifest(
         .with_context(|| format!("Failed to create proposal dir: {}", proposal_dir.display()))?;
     let bytes = serde_json::to_vec_pretty(manifest).context("Failed to serialize manifest")?;
     let path = proposal_dir.join("manifest.json");
-    crate::file::atomic_write(&path, &bytes)
+    local::file::atomic_write(&path, &bytes)
         .with_context(|| format!("Failed to write manifest: {}", path.display()))?;
     let token = compute_token(&bytes);
     Ok((path, token))

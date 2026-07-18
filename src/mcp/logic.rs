@@ -15,11 +15,11 @@
 
 use crate::confirm::Confirmation;
 use crate::create::manifest::{FileAction, ProposalManifest, ProposalOutcome};
-use crate::git::RemoteStatus;
 use crate::state::StateManager;
 use crate::undo::core::UndoPlanSet;
 use eyre::{bail, Result};
 use local::config::Config;
+use local::git::RemoteStatus;
 use log::debug;
 use std::env;
 use std::path::Path;

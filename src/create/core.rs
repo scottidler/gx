@@ -13,7 +13,6 @@ pub mod manifest;
 pub mod propose;
 
 use crate::confirm::Confirmation;
-use crate::file;
 use crate::git;
 use crate::github;
 use crate::state::{ChangeState, StateManager};
@@ -22,6 +21,7 @@ use chrono::Local;
 use eyre::{Context, Result};
 use local::config::Config;
 use local::diff;
+use local::file;
 use local::repo::Repo;
 use log::{debug, info, warn};
 use manifest::{FileAction, ProposalManifest, ProposalOutcome};
@@ -361,7 +361,7 @@ fn process_single_repo(
     let mut files_affected = Vec::new();
 
     // 1. Determine the original branch; guard against detached HEAD ([A30]).
-    let original_branch = match git::get_current_branch_name(repo_path) {
+    let original_branch = match local::git::get_current_branch_name(repo_path) {
         Ok(branch) if branch.is_empty() => {
             return dry_run_error(
                 repo,
@@ -385,7 +385,7 @@ fn process_single_repo(
     // 2. Stash uncommitted work (including untracked, -u) so the worktree is a
     //    pristine checkout of HEAD during mutation. status --porcelain counts
     //    untracked (??) entries, so the dirty predicate already includes them.
-    match git::has_uncommitted_changes(repo_path) {
+    match local::git::has_uncommitted_changes(repo_path) {
         Ok(true) => {
             let message = format!("GX auto-stash for {change_id}");
             // Write-ahead (F5): register the stash-restore step keyed by message
@@ -405,7 +405,7 @@ fn process_single_repo(
                     &diff_parts,
                 );
             }
-            match git::stash_save_with_untracked(repo_path, &message) {
+            match local::git::stash_save_with_untracked(repo_path, &message) {
                 Ok(sha) => {
                     transaction.set_stash_sha(sha.clone());
                     // Swap the placeholder for the SHA-keyed step now that the
@@ -490,7 +490,7 @@ fn process_single_repo(
         );
     }
     if head != original_branch {
-        if let Err(e) = git::switch_branch(repo_path, &head) {
+        if let Err(e) = local::git::switch_branch(repo_path, &head) {
             transaction.rollback();
             return dry_run_error(
                 repo,
@@ -1148,7 +1148,7 @@ fn apply_patchset_change(
 
     // (1) Post-pull drift refusal: touches NOTHING (no blob written yet; the
     //     caller rolls the stash/switch back to a byte-identical worktree).
-    let head = git::get_head_sha(repo_path)?;
+    let head = local::git::get_head_sha(repo_path)?;
     if head != rp.base_sha {
         return Err(eyre::eyre!(
             "repo drifted since proposal; re-propose (proposal base {} != current head {head})",
@@ -1282,7 +1282,7 @@ fn commit_changes_with_rollback(
     use crate::transaction::Phase;
 
     // Whether the branch pre-existed gx's run (so rollback won't delete it).
-    let branch_existed = git::branch_exists_locally(repo_path, change_id).unwrap_or(false);
+    let branch_existed = local::git::branch_exists_locally(repo_path, change_id).unwrap_or(false);
 
     // Record the GX branch name so recovery (phase reporting, the `pushing`
     // probe, `gx undo`) need not re-derive it.
@@ -1294,7 +1294,7 @@ fn commit_changes_with_rollback(
         branch: change_id.to_string(),
         branch_existed,
     })?;
-    git::create_branch(repo_path, change_id)
+    local::git::create_branch(repo_path, change_id)
         .with_context(|| format!("Failed to create or switch to branch: {change_id}"))?;
     // Crash hook (Phase 8): the GX branch exists and its delete step is
     // persisted (phase `mutating`); recovery full-reverses, remote branch absent.
@@ -1302,15 +1302,15 @@ fn commit_changes_with_rollback(
 
     // Record the pre-commit HEAD so rollback resets to a known target, and
     // register the reset write-ahead before committing.
-    let expected_sha = git::get_head_sha(repo_path)?;
+    let expected_sha = local::git::get_head_sha(repo_path)?;
     transaction.push_step(RollbackStep::ResetCommit {
         repo: repo_path.to_path_buf(),
         expected_sha: expected_sha.clone(),
     })?;
 
     // Stage only the specific files we modified - never "git add .".
-    git::add_files(repo_path, files_affected).context("Failed to stage files")?;
-    git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
+    local::git::add_files(repo_path, files_affected).context("Failed to stage files")?;
+    local::git::commit_changes(repo_path, commit_message).context("Failed to commit changes")?;
     // Crash hook (Phase 8): the commit is on the GX branch and the reset step is
     // persisted (phase `mutating`); recovery full-reverses, remote branch absent.
     crate::crash::maybe_crash("after-commit");

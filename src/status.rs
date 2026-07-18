@@ -148,7 +148,7 @@ pub fn process_status_command(
 }
 
 /// Categorize status results into clean/dirty/error counts
-fn categorize_status_results(results: &[git::RepoStatus]) -> (usize, usize, usize) {
+fn categorize_status_results(results: &[local::git::RepoStatus]) -> (usize, usize, usize) {
     let mut clean_count = 0;
     let mut dirty_count = 0;
     let mut error_count = 0;

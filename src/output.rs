@@ -1,11 +1,10 @@
 use crate::create::{CreateAction, CreateResult};
-use crate::git::{
-    CheckoutAction, CheckoutResult, CloneAction, CloneResult, RemoteStatus, RepoStatus,
-};
+use crate::git::{CheckoutAction, CheckoutResult, CloneAction, CloneResult};
 use crate::review::{ReviewAction, ReviewResult};
 use colored::*;
 use eyre::{Context, Result};
 use local::config::OutputVerbosity;
+use local::git::{RemoteStatus, RepoStatus};
 use local::repo::Layout;
 use local::subprocess::{run_checked, subprocess_timeout};
 use std::io::{self, Write};
@@ -1221,7 +1220,7 @@ fn calculate_max_possible_emoji_width() -> usize {
 
 /// Display a single status result immediately with pre-calculated alignment
 pub fn display_status_result_immediate(
-    result: &crate::git::RepoStatus,
+    result: &local::git::RepoStatus,
     opts: &StatusOptions,
     widths: &AlignmentWidths,
 ) -> Result<()> {
@@ -1247,7 +1246,7 @@ pub fn display_status_result_immediate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::{RemoteStatus, RepoStatus, StatusChanges};
+    use local::git::{RemoteStatus, RepoStatus, StatusChanges};
     use local::repo::{Layout, Repo};
     use std::path::PathBuf;
     use std::sync::Mutex;

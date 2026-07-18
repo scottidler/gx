@@ -40,7 +40,7 @@ fn init_repo_with_bare_remote(repo: &Path, bare: &Path) -> String {
     );
     init_repo(repo);
     git(&["remote", "add", "origin", bare.to_str().unwrap()], repo);
-    let branch = crate::git::get_current_branch_name(repo).unwrap();
+    let branch = local::git::get_current_branch_name(repo).unwrap();
     git(&["push", "--quiet", "-u", "origin", &branch], repo);
     git(&["remote", "set-head", "origin", &branch], repo);
     branch
@@ -157,7 +157,7 @@ fn test_execute_step_restore_backup() {
     let original = temp.path().join("file.txt");
     let backup = temp.path().join("bk").join("file.txt");
     std::fs::write(&original, "ORIGINAL").unwrap();
-    let mode = crate::file::create_backup(&original, &backup).unwrap();
+    let mode = local::file::create_backup(&original, &backup).unwrap();
     std::fs::write(&original, "MODIFIED").unwrap();
 
     execute_step(&RollbackStep::RestoreBackup {
@@ -174,19 +174,19 @@ fn test_execute_step_reset_commit() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
     init_repo(repo);
-    let sha_a = crate::git::get_head_sha(repo).unwrap();
+    let sha_a = local::git::get_head_sha(repo).unwrap();
 
     std::fs::write(repo.join("b.txt"), "b").unwrap();
     git(&["add", "-A"], repo);
     git(&["commit", "--quiet", "-m", "b"], repo);
-    assert_ne!(crate::git::get_head_sha(repo).unwrap(), sha_a);
+    assert_ne!(local::git::get_head_sha(repo).unwrap(), sha_a);
 
     execute_step(&RollbackStep::ResetCommit {
         repo: repo.to_path_buf(),
         expected_sha: sha_a.clone(),
     })
     .unwrap();
-    assert_eq!(crate::git::get_head_sha(repo).unwrap(), sha_a);
+    assert_eq!(local::git::get_head_sha(repo).unwrap(), sha_a);
     assert!(!repo.join("b.txt").exists(), "hard reset removes b.txt");
 }
 
@@ -204,7 +204,7 @@ fn test_execute_step_delete_local_branch_respects_existed() {
         branch_existed: true,
     })
     .unwrap();
-    assert!(crate::git::branch_exists_locally(repo, "keep").unwrap());
+    assert!(local::git::branch_exists_locally(repo, "keep").unwrap());
 
     // branch_existed=false: delete it, even while checked out.
     git(&["checkout", "-q", "-b", "GX-x"], repo);
@@ -214,7 +214,7 @@ fn test_execute_step_delete_local_branch_respects_existed() {
         branch_existed: false,
     })
     .unwrap();
-    assert!(!crate::git::branch_exists_locally(repo, "GX-x").unwrap());
+    assert!(!local::git::branch_exists_locally(repo, "GX-x").unwrap());
 }
 
 #[test]
@@ -227,14 +227,14 @@ fn test_kill9_recovery_restores_branch_and_file() {
 
     with_data_home(data.path(), || {
         // Forward ops: create a GX branch, commit a mutated file on it.
-        let sha_before = crate::git::get_head_sha(repo.path()).unwrap();
+        let sha_before = local::git::get_head_sha(repo.path()).unwrap();
         let backup = data
             .path()
             .join("gx")
             .join("backups")
             .join("tx-test")
             .join("README.md");
-        let mode = crate::file::create_backup(&repo.path().join("README.md"), &backup).unwrap();
+        let mode = local::file::create_backup(&repo.path().join("README.md"), &backup).unwrap();
         git(&["checkout", "-q", "-b", "GX-kill"], repo.path());
         std::fs::write(repo.path().join("README.md"), "MUTATED\n").unwrap();
         git(&["add", "-A"], repo.path());
@@ -278,7 +278,7 @@ fn test_kill9_recovery_restores_branch_and_file() {
         Transaction::execute_recovery("tx-test").unwrap();
 
         // The GX branch is gone and the recovery file is cleaned up.
-        assert!(!crate::git::branch_exists_locally(repo.path(), "GX-kill").unwrap());
+        assert!(!local::git::branch_exists_locally(repo.path(), "GX-kill").unwrap());
         assert!(Transaction::load_recovery_state("tx-test").is_err());
     });
 }
@@ -290,11 +290,11 @@ fn test_finalize_restores_branch_and_stash() {
     init_repo(repo.path());
 
     with_data_home(data.path(), || {
-        let original = crate::git::get_current_branch_name(repo.path()).unwrap();
+        let original = local::git::get_current_branch_name(repo.path()).unwrap();
 
         // Create WIP and stash it (-u), capturing the SHA.
         std::fs::write(repo.path().join("wip.txt"), "work in progress").unwrap();
-        let sha = crate::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
+        let sha = local::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
         assert!(!repo.path().join("wip.txt").exists(), "stash hid the WIP");
 
         // Move to another branch to prove finalize switches back.
@@ -307,7 +307,7 @@ fn test_finalize_restores_branch_and_stash() {
         let outcome = tx.finalize().unwrap();
         assert!(outcome.stash_restored, "stash should be re-applied");
         assert_eq!(
-            crate::git::get_current_branch_name(repo.path()).unwrap(),
+            local::git::get_current_branch_name(repo.path()).unwrap(),
             original
         );
         assert_eq!(
@@ -333,10 +333,10 @@ fn test_finalize_retaining_recovery_keeps_recovery_file() {
     init_repo(repo.path());
 
     with_data_home(data.path(), || {
-        let original = crate::git::get_current_branch_name(repo.path()).unwrap();
+        let original = local::git::get_current_branch_name(repo.path()).unwrap();
 
         std::fs::write(repo.path().join("wip.txt"), "work in progress").unwrap();
-        let sha = crate::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
+        let sha = local::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
         git(&["checkout", "-q", "-b", "GX-retain"], repo.path());
 
         let mut tx = Transaction::new(repo.path().to_path_buf(), "GX-retain".to_string(), true);
@@ -362,7 +362,7 @@ fn test_finalize_retaining_recovery_keeps_recovery_file() {
 
         // Environment restored: back on the original branch with WIP re-applied.
         assert_eq!(
-            crate::git::get_current_branch_name(repo.path()).unwrap(),
+            local::git::get_current_branch_name(repo.path()).unwrap(),
             original
         );
         assert_eq!(
@@ -513,8 +513,8 @@ fn test_popstash_applied_state_skips_reapply() {
         // Create WIP, stash it (-u), then apply it back to simulate the first
         // beat of a two-beat PopStash having completed (journal at `Applied`).
         std::fs::write(repo.path().join("wip.txt"), "v1").unwrap();
-        let sha = crate::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
-        crate::git::stash_apply_sha(repo.path(), &sha).unwrap();
+        let sha = local::git::stash_save_with_untracked(repo.path(), "wip").unwrap();
+        local::git::stash_apply_sha(repo.path(), &sha).unwrap();
         // Mutate the applied file: a re-apply of the -u stash would now fail
         // (untracked file already exists), so an Ok result proves apply was
         // skipped.
@@ -643,7 +643,7 @@ fn test_popstash_by_message_restores_stash() {
         // swapped in). Recovery must resolve the message and restore the WIP.
         std::fs::write(repo.path().join("wip.txt"), "work").unwrap();
         let message = "GX auto-stash for GX-msg";
-        crate::git::stash_save_with_untracked(repo.path(), message).unwrap();
+        local::git::stash_save_with_untracked(repo.path(), message).unwrap();
         assert!(!repo.path().join("wip.txt").exists(), "stash hid the WIP");
 
         let tx_id = "tx-msg";
@@ -721,12 +721,12 @@ fn test_execute_finalizing_phase_keeps_pushed_branch() {
 
     with_data_home(data.path(), || {
         let base = init_repo_with_bare_remote(&repo, &bare);
-        let sha_before = crate::git::get_head_sha(&repo).unwrap();
+        let sha_before = local::git::get_head_sha(&repo).unwrap();
 
         // WIP stashed on the base branch.
         std::fs::write(repo.join("wip.txt"), "work").unwrap();
         let stash_sha =
-            crate::git::stash_save_with_untracked(&repo, "GX auto-stash for GX-fin").unwrap();
+            local::git::stash_save_with_untracked(&repo, "GX auto-stash for GX-fin").unwrap();
         assert!(!repo.join("wip.txt").exists());
 
         // Create the GX branch, commit a change, push it. The "crash" happened
@@ -782,7 +782,7 @@ fn test_execute_finalizing_phase_keeps_pushed_branch() {
         );
 
         // Environment restored: back on the base branch, WIP re-applied.
-        assert_eq!(crate::git::get_current_branch_name(&repo).unwrap(), base);
+        assert_eq!(local::git::get_current_branch_name(&repo).unwrap(), base);
         assert_eq!(
             std::fs::read_to_string(repo.join("wip.txt")).unwrap(),
             "work"
@@ -793,7 +793,7 @@ fn test_execute_finalizing_phase_keeps_pushed_branch() {
             crate::git::remote_branch_exists_probe(&repo, "GX-fin").unwrap(),
             "keep-work must retain the pushed remote branch"
         );
-        assert!(crate::git::branch_exists_locally(&repo, "GX-fin").unwrap());
+        assert!(local::git::branch_exists_locally(&repo, "GX-fin").unwrap());
 
         // Keep-work mandate complete -> artifacts cleaned up.
         assert!(!recovery_file(tx_id).unwrap().exists());
@@ -812,7 +812,7 @@ fn test_execute_pushing_phase_no_remote_full_reverse() {
 
     with_data_home(data.path(), || {
         let base = init_repo_with_bare_remote(&repo, &bare);
-        let sha_before = crate::git::get_head_sha(&repo).unwrap();
+        let sha_before = local::git::get_head_sha(&repo).unwrap();
 
         // Create the GX branch and commit, but DO NOT push (the kill landed after
         // the `pushing` stamp but before the push reached the remote).
@@ -853,8 +853,8 @@ fn test_execute_pushing_phase_no_remote_full_reverse() {
         assert_eq!(outcome, RecoveryOutcome::FullReverse);
 
         // Full reverse: the GX branch is gone locally and never appeared remotely.
-        assert!(!crate::git::branch_exists_locally(&repo, "GX-push").unwrap());
-        assert_eq!(crate::git::get_current_branch_name(&repo).unwrap(), base);
+        assert!(!local::git::branch_exists_locally(&repo, "GX-push").unwrap());
+        assert_eq!(local::git::get_current_branch_name(&repo).unwrap(), base);
         assert!(!crate::git::remote_branch_exists_probe(&repo, "GX-push").unwrap());
         assert!(!recovery_file(tx_id).unwrap().exists());
     });
@@ -872,7 +872,7 @@ fn test_execute_pushing_phase_with_remote_keeps_work() {
 
     with_data_home(data.path(), || {
         let base = init_repo_with_bare_remote(&repo, &bare);
-        let sha_before = crate::git::get_head_sha(&repo).unwrap();
+        let sha_before = local::git::get_head_sha(&repo).unwrap();
 
         // Create the GX branch, commit, and push it: the push completed before
         // the crash, so the branch is present on the remote.
@@ -919,8 +919,8 @@ fn test_execute_pushing_phase_with_remote_keeps_work() {
         );
 
         // Environment restored, but the pushed work is retained (local + remote).
-        assert_eq!(crate::git::get_current_branch_name(&repo).unwrap(), base);
-        assert!(crate::git::branch_exists_locally(&repo, "GX-push").unwrap());
+        assert_eq!(local::git::get_current_branch_name(&repo).unwrap(), base);
+        assert!(local::git::branch_exists_locally(&repo, "GX-push").unwrap());
         assert!(crate::git::remote_branch_exists_probe(&repo, "GX-push").unwrap());
         assert!(!recovery_file(tx_id).unwrap().exists());
     });
@@ -940,8 +940,8 @@ fn test_execute_recovery_against_real_interrupted_run_file() {
     init_repo(repo.path());
 
     with_data_home(data.path(), || {
-        let base = crate::git::get_current_branch_name(repo.path()).unwrap();
-        let sha_before = crate::git::get_head_sha(repo.path()).unwrap();
+        let base = local::git::get_current_branch_name(repo.path()).unwrap();
+        let sha_before = local::git::get_head_sha(repo.path()).unwrap();
 
         let mut tx = Transaction::new(repo.path().to_path_buf(), "GX-int".to_string(), true);
         let tx_id = tx.transaction_id.clone();
@@ -964,7 +964,7 @@ fn test_execute_recovery_against_real_interrupted_run_file() {
         std::fs::write(repo.path().join("README.md"), "MUTATED\n").unwrap();
         git(&["add", "-A"], repo.path());
         git(&["commit", "--quiet", "-m", "gx change"], repo.path());
-        assert_ne!(crate::git::get_head_sha(repo.path()).unwrap(), sha_before);
+        assert_ne!(local::git::get_head_sha(repo.path()).unwrap(), sha_before);
 
         // "Crash": drop the transaction without finalizing. The recovery file the
         // transaction persisted survives on disk.
@@ -980,11 +980,11 @@ fn test_execute_recovery_against_real_interrupted_run_file() {
         // Worktree is back at the pre-run safe point: on base, GX branch gone,
         // README restored, artifacts cleaned up.
         assert_eq!(
-            crate::git::get_current_branch_name(repo.path()).unwrap(),
+            local::git::get_current_branch_name(repo.path()).unwrap(),
             base
         );
-        assert!(!crate::git::branch_exists_locally(repo.path(), "GX-int").unwrap());
-        assert_eq!(crate::git::get_head_sha(repo.path()).unwrap(), sha_before);
+        assert!(!local::git::branch_exists_locally(repo.path(), "GX-int").unwrap());
+        assert_eq!(local::git::get_head_sha(repo.path()).unwrap(), sha_before);
         assert_eq!(
             std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
             "# repo\n"
@@ -1010,11 +1010,11 @@ fn test_finalize_stash_conflict_surfaces_stash_error() {
         git(&["add", "-A"], repo.path());
         git(&["commit", "--quiet", "-m", "init"], repo.path());
 
-        let base = crate::git::get_current_branch_name(repo.path()).unwrap();
+        let base = local::git::get_current_branch_name(repo.path()).unwrap();
 
         // WIP: modify the tracked file, stash it (base -> wip), tree back to base.
         std::fs::write(repo.path().join("data.txt"), "wip\n").unwrap();
-        let sha = crate::git::stash_save_with_untracked(repo.path(), "GX auto-stash").unwrap();
+        let sha = local::git::stash_save_with_untracked(repo.path(), "GX auto-stash").unwrap();
         assert_eq!(
             std::fs::read_to_string(repo.path().join("data.txt")).unwrap(),
             "base\n"
@@ -1077,7 +1077,7 @@ fn test_legacy_delete_remote_branch_file_executes_as_skipped_legacy() {
                 ]
             }}"#,
             repo = repo.path(),
-            base = crate::git::get_current_branch_name(repo.path()).unwrap(),
+            base = local::git::get_current_branch_name(repo.path()).unwrap(),
         );
         std::fs::write(recovery_dir.join(format!("{tx_id}.json")), json).unwrap();
 

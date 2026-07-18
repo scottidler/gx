@@ -424,8 +424,8 @@ fn remove_local_branch(plan: &UndoPlan) -> Result<(), String> {
 
     match &plan.repo_path {
         Some(path) if local::bare::is_git_path(path) => {
-            match git::branch_exists_locally(path, branch) {
-                Ok(true) => git::delete_local_branch(path, branch)
+            match local::git::branch_exists_locally(path, branch) {
+                Ok(true) => local::git::delete_local_branch(path, branch)
                     .map_err(|e| format!("failed to delete local branch {branch}: {e}"))?,
                 Ok(false) => {
                     debug!("local branch {branch} already gone in {}", path.display())
@@ -595,7 +595,7 @@ fn revert_merged(plan: &UndoPlan, change_id: &str, config: &Config) -> OutcomeKi
 
     // Collision: refuse if the revert branch already exists (local OR remote).
     // No reuse, no force; touch nothing.
-    match git::branch_exists_locally(&repo_path, &revert_branch) {
+    match local::git::branch_exists_locally(&repo_path, &revert_branch) {
         Ok(true) => {
             return OutcomeKind::Failed(format!(
                 "revert branch {revert_branch} already exists locally; refusing to reuse or force (delete it and re-run)"
@@ -628,7 +628,7 @@ fn revert_merged(plan: &UndoPlan, change_id: &str, config: &Config) -> OutcomeKi
         return OutcomeKind::Failed(format!("failed to fetch origin before revert: {e}"));
     }
     let start_point = format!("origin/{base}");
-    if let Err(e) = git::create_branch_at(&repo_path, &revert_branch, &start_point) {
+    if let Err(e) = local::git::create_branch_at(&repo_path, &revert_branch, &start_point) {
         return OutcomeKind::Failed(format!(
             "failed to create revert branch {revert_branch} from {start_point}: {e}"
         ));
@@ -637,13 +637,13 @@ fn revert_merged(plan: &UndoPlan, change_id: &str, config: &Config) -> OutcomeKi
     // Parent-count dispatch: 2 parents -> true merge (`-m 1`); otherwise a
     // single-parent squash/rebase commit (plain revert). Never inferred from the
     // PR's merge method.
-    let parents = match git::commit_parent_count(&repo_path, &oid) {
+    let parents = match local::git::commit_parent_count(&repo_path, &oid) {
         Ok(n) => n,
         Err(e) => return OutcomeKind::Failed(format!("failed to count parents of {oid}: {e}")),
     };
     let mainline = if parents >= 2 { Some(1) } else { None };
 
-    if let Err(e) = git::revert_commit(&repo_path, &oid, mainline) {
+    if let Err(e) = local::git::revert_commit(&repo_path, &oid, mainline) {
         // Conflict (or any failure): leave the branch in place for manual
         // resolution; never force-resolve.
         return OutcomeKind::Failed(format!(
