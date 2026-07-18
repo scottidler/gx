@@ -1004,6 +1004,7 @@ dependencies = [
  "rayon",
  "regex",
  "rmcp",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

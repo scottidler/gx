@@ -286,3 +286,95 @@ Design doc: `docs/design/2026-07-17-gx-intel-catalog.md`
   `[dependencies]` in `catalog/Cargo.toml` -> `bin/check-catalog-boundary.sh`
   exited 1 ("catalog/Cargo.toml declares a 'remote' dependency"). Reverted;
   guard exits 0 and `cargo tree -p catalog` shows `local` only, no `remote`.
+
+## Phase 4: fetch refresh (+ auto-walk-on-stale)
+
+### Design decisions
+- **Real `gx catalog --fetch`** replaces the Phase-2 `bail!` stub. The handler
+  (`remote::catalog::process_catalog_command`) now branches on `fetch`; the
+  network path is a new testable core, `remote::catalog::fetch_refresh`
+  (`remote/src/catalog.rs`). It `discover_repos` under `catalog.root`, calls
+  `remote::git::fetch_origin(&repo.path)` per repo (path-only, unchanged; auth
+  rides each repo's `origin` URL + `~/.ssh/config`), then does ONE full
+  `catalog::walk::walk` of the subtree afterward so every repo's FETCH_HEAD mtime
+  (`last_fetch`) and refreshed remote-tracking ref (ahead/behind) land in the
+  catalog. Chose the "fetch-all-then-one-walk" shape over per-repo re-walk: same
+  effect, one write pass through the single SQLite connection.
+- **Fail-loud-skip isolation** (`fetch_refresh`): a per-repo `fetch_origin` error
+  is a `warn!` PLUS an `eprintln!` and a `fetch_failed` increment, never a
+  `return`/`bail!` -- the loop continues, so one repo's auth/network failure can
+  never abort the fleet refresh. `FetchSummary { fetched, fetch_failed, walk }`
+  carries the counts so the CLI prints a truthful one-liner.
+- **Auto-walk-on-stale** = new `catalog::walk::ensure_fresh(conn, catalog_root,
+  requested_root, max_depth, ignore_patterns, staleness_secs) -> Result<bool>`
+  (`catalog/src/walk.rs`). It clamps the requested root through the SAME
+  `catalog::tools::clamp_root` the read tools use (so the freshness check and the
+  query it precedes agree on scope), reads `SELECT COUNT(*), MIN(last_walk)` over
+  the scoped rows, and walks when the scope is empty/unbuilt (`count == 0`) OR
+  `now - MIN(last_walk) > staleness_secs`. It reuses `walk`, which is LOCAL-only
+  and issues zero network calls, so the boundary and the no-fetch guarantee hold.
+  Returns whether it walked (drives the tests). Wired into the MCP `query` and
+  `search` handlers (`remote::mcp::logic`) as the first step before serving, so
+  an unbuilt catalog is never served empty-as-success. `--fetch` remains the ONLY
+  network path and stays CLI-only.
+- `remote` gained a direct `rusqlite` dependency (`features = ["bundled"]`, same
+  version as `catalog`) so the `fetch_refresh` core can name `Connection` and its
+  tests can assert catalog rows. This does NOT touch the boundary: the rule is
+  `catalog` must never depend on `remote`; `remote -> rusqlite` is fine and
+  `remote` already reaches `rusqlite` transitively via `catalog`.
+
+### Deviations
+- **Auto-walk-on-stale folded into Phase 4** (disclosed). The design's
+  Architecture ("MCP query may trigger a local walk when rows are stale") and
+  Edge Cases ("Empty or fully-stale catalog on an MCP query") were never pinned
+  to a phase bullet, and `catalog.staleness_secs` was otherwise inert. Phase 3's
+  open question flagged this. Implemented here per the Phase-4 task instructions;
+  recorded in the design doc's Phase 4 plan bullet + acceptance criteria.
+- The staleness gate lives in `catalog::walk::ensure_fresh` (a catalog function
+  called by the MCP `query`/`search` handlers), rather than being inlined into
+  `catalog::tools::query`/`search` themselves. The design's suggestion was "e.g.
+  `catalog::query`/`search` take the config + root and walk-if-stale before
+  serving"; keeping the SELECT-only tools pure (`&Connection`) and putting the
+  `&mut Connection` walk gate in one shared `ensure_fresh` avoids threading walk
+  params + a `&mut` borrow through all four tools. Same effect (query/search walk
+  first when stale), correct seam, testable in the `catalog` crate.
+
+### Tradeoffs
+- Staleness uses `MIN(last_walk)` (the OLDEST in-scope row) as the age, so a
+  single stale row triggers a whole-subtree re-walk. Simpler and safer than a
+  per-row refresh; the walk is cheap and idempotent, and a partial-freshness
+  index is the exact thing the gate exists to avoid.
+- `--fetch` re-walks the ENTIRE `catalog.root` subtree once after fetching,
+  rather than re-walking only the repos that fetched. A full walk is idempotent
+  and also refreshes local-only state (dirty flags, new commits) for free; the
+  cost is re-reading unchanged repos, which the parallel walk already does fast.
+- Test fetches use LOCAL bare repos as `origin` (a `git clone` of a bare
+  fixture), so a real `git fetch origin` succeeds fully OFFLINE. The fail path
+  points `origin` at a NON-EXISTENT local path, which fails INSTANTLY (no
+  network, no hang) -- deliberately chosen over an unreachable host, since the
+  subprocess timeout default is 300s and a real dead host could stall the test.
+
+### Fetch fail-isolation proof
+- `test_fetch_failure_is_isolated_and_run_continues` (`remote/src/catalog/tests.rs`):
+  two repos across two orgs cloned from a shared local bare origin; one has its
+  `origin` repointed at a non-existent path. `fetch_refresh` returns
+  `fetch_failed == 1`, `fetched == 1`, `walk.repos_indexed == 2`. The good repo
+  refreshed (`last_fetch` set, `behind == Some(1)` after the origin advanced),
+  while the broken repo's failed fetch left its tracking ref UNrefreshed
+  (`behind == Some(0)`) -- proving the failure was isolated and the run
+  continued. The `warn!`+`eprintln!` fired (captured in test stdout).
+
+### Auto-walk-on-stale proof
+- `test_ensure_fresh_walks_unbuilt_catalog` (`catalog/src/walk/tests.rs`): an
+  EMPTY DB -> `ensure_fresh` returns `true` (walked) and `repo_row_count == 2`
+  (real rows, never empty-as-success).
+- `test_ensure_fresh_never_fetches`: repos with an unreachable `origin`; after
+  `ensure_fresh`, `last_fetch IS NULL` for every row and NO `FETCH_HEAD` file
+  exists -- the auto-walk path writes zero FETCH_HEAD (LOCAL only, no fetch).
+- `test_ensure_fresh_skips_when_fresh` (fresh rows -> returns `false`, no walk)
+  and `test_ensure_fresh_walks_when_stale` (backdated `last_walk = 1` ->
+  returns `true`, re-walk refreshes the stamp) pin the TTL boundary both ways.
+
+### Open questions
+- None. (Phase 3's auto-walk-on-stale open question is now closed: implemented
+  here.)

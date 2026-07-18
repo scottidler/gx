@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-07-17
-**Status:** Draft
+**Status:** Implemented
 **Review Passes Completed:** 5/5 self + review-panel (Architect + Staff, both rc=0, reviewed as the combined doc 2026-07-17); all findings folded
 **Track:** B1 (feature) (companions: `2026-07-17-gx-onto-mcp-io.md` Track A, and `2026-07-17-gx-lib-decomposition.md` Track B0, which BOTH land first)
 **Gated on:** Track B0 (gx lib decomposition) landing. The intel tools live in a new `catalog` crate depending on `local` only; that crate cannot exist until B0 splits the lib. No open questions remain.
@@ -137,14 +137,17 @@ Depends on Track A landed (the migrated `gx mcp` handler) AND Track B0 landed (`
 #### Phase 4: fetch refresh
 **Model:** opus
 - `gx catalog --fetch`: iterate repos calling `git::fetch_origin(path)` (unchanged; auth rides each repo's `origin` remote), then re-walk each. A per-repo fetch failure is reported and skipped, not fatal.
-- **Success criteria:** (1) fetch updates `last_fetch` + ahead/behind for a reachable repo; (2) fetch succeeds for a repo in each of two orgs via their existing `origin` remotes; (3) a repo whose fetch fails is reported loudly and does NOT abort the run; (4) the boundary enforcement confirms the fetch path is unreachable from the intel tools.
+- **Auto-walk-on-stale (folded into Phase 4):** the Architecture "an MCP `query` may trigger a local walk when rows are stale" + Edge-Cases "Empty or fully-stale catalog on an MCP query" behavior was not pinned to an earlier phase bullet (`staleness_secs` was otherwise inert), so it lands here. Implemented as `catalog::walk::ensure_fresh` (LOCAL only, never a fetch), invoked by the MCP `query`/`search` handlers before serving: an empty/unbuilt scope or a scope whose oldest row exceeds `staleness_secs` is walked first, so a query never returns empty-as-success on an unbuilt catalog. `--fetch` remains the only network path and stays CLI-only.
+- **Success criteria:** (1) fetch updates `last_fetch` + ahead/behind for a reachable repo; (2) fetch succeeds for a repo in each of two orgs via their existing `origin` remotes; (3) a repo whose fetch fails is reported loudly and does NOT abort the run; (4) the boundary enforcement confirms the fetch path is unreachable from the intel tools; (5) an unbuilt catalog on an MCP `query`/`search` auto-walks first and returns real rows, and stale rows trigger a LOCAL walk that writes no FETCH_HEAD.
 
 ## Acceptance Criteria
 
-- [ ] `gx catalog` populates the SQLite catalog with zero `git fetch` calls (network asserted absent); re-run is idempotent, and removing a repo prunes both its `repos` and `deps` rows.
-- [ ] `query` returns only rows under a canonicalized, clamped root; sibling-prefix, `..`, and symlink-escape roots are rejected loudly (fail-closed test bites).
-- [ ] All 4 tools cap output and return `truncated: true` past the cap; `read` on a non-utf8 file errors clearly.
-- [ ] `catalog` depends on `local` only (`cargo tree -p catalog` shows no `remote`); the CI guard bites when a `remote` dep is added; cross-org reads succeed.
+- [x] `gx catalog` populates the SQLite catalog with zero `git fetch` calls (network asserted absent); re-run is idempotent, and removing a repo prunes both its `repos` and `deps` rows.
+- [x] `query` returns only rows under a canonicalized, clamped root; sibling-prefix, `..`, and symlink-escape roots are rejected loudly (fail-closed test bites).
+- [x] All 4 tools cap output and return `truncated: true` past the cap; `read` on a non-utf8 file errors clearly.
+- [x] `catalog` depends on `local` only (`cargo tree -p catalog` shows no `remote`); the CI guard bites when a `remote` dep is added; cross-org reads succeed.
+- [x] `gx catalog --fetch` refreshes `last_fetch` + ahead/behind per reachable repo across two orgs via their `origin` remotes; a per-repo fetch failure is reported loudly and skipped (run continues); `--fetch` stays CLI-only and unreachable from the intel tools.
+- [x] Auto-walk-on-stale: an MCP `query`/`search` on an empty/unbuilt catalog walks the scoped subtree LOCALLY first (never empty-as-success), and stale rows trigger a LOCAL walk with no fetch (no FETCH_HEAD written by the auto-walk).
 
 ## Resolved Decisions
 

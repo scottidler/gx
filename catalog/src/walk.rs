@@ -124,6 +124,78 @@ pub fn walk(
     Ok(summary)
 }
 
+/// Auto-walk-on-stale gate for the MCP read tools (design doc Architecture
+/// "an MCP `query` may trigger only a local walk when rows are stale" +
+/// Edge Cases "Empty or fully-stale catalog on an MCP query"). Walks the scoped
+/// subtree LOCALLY -- never a fetch -- when the catalog has NO rows under the
+/// clamped `requested_root` (empty/unbuilt) OR its OLDEST in-scope row is older
+/// than `staleness_secs`. Returns whether a walk was performed.
+///
+/// LOCAL only: it reuses [`walk`], which issues zero network calls, so the
+/// cross-org boundary and the no-fetch guarantee both hold. `--fetch` remains
+/// the ONLY network path and stays CLI-only; this gate never fetches. It never
+/// returns empty-as-success on an unbuilt catalog -- a missing/empty catalog is
+/// built on the first query.
+pub fn ensure_fresh(
+    conn: &mut Connection,
+    catalog_root: &Path,
+    requested_root: Option<&Path>,
+    max_depth: usize,
+    ignore_patterns: &[String],
+    staleness_secs: u64,
+) -> Result<bool> {
+    debug!(
+        "ensure_fresh: catalog_root={} requested_root={:?} max_depth={} staleness_secs={}",
+        catalog_root.display(),
+        requested_root.map(|p| p.display().to_string()),
+        max_depth,
+        staleness_secs
+    );
+
+    // Clamp the requested root inside the ceiling exactly as the tools do (same
+    // fail-closed semantics), so the freshness check and the query it precedes
+    // agree on the scope.
+    let root = crate::tools::clamp_root(catalog_root, requested_root)
+        .context("failed to clamp root for the staleness check")?;
+    let (root_str, prefix) = crate::tools::scope_sql(&root);
+
+    // COUNT(*) always returns one row; MIN(last_walk) is NULL when the scope is
+    // empty (count == 0), which we treat as "unbuilt -> walk".
+    let (count, min_last_walk): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), MIN(last_walk) FROM repos WHERE (path = ?1 OR path LIKE ?2)",
+            params![root_str, prefix],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("failed to read catalog freshness")?;
+
+    let now = now_unix();
+    let stale = match (count, min_last_walk) {
+        // Empty/unbuilt scope: never serve empty-as-success, walk first.
+        (0, _) | (_, None) => {
+            debug!(
+                "ensure_fresh: catalog empty/unbuilt under {} (count={count}); walking",
+                root.display()
+            );
+            true
+        }
+        (_, Some(oldest)) => {
+            let age = now.saturating_sub(oldest);
+            let stale = age > staleness_secs as i64;
+            debug!(
+                "ensure_fresh: root={} count={count} oldest_age={age}s staleness={staleness_secs}s stale={stale}",
+                root.display()
+            );
+            stale
+        }
+    };
+
+    if stale {
+        walk(conn, &root, max_depth, ignore_patterns).context("auto-walk-on-stale failed")?;
+    }
+    Ok(stale)
+}
+
 /// Build the catalog record for one repo: LOCAL status, last-commit, last-fetch
 /// mtime, and manifest-derived lang + deps. No DB, no network -- safe under
 /// rayon.

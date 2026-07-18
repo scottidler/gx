@@ -324,6 +324,126 @@ fn test_split_slug() {
     );
 }
 
+/// (Phase 4, auto-walk-on-stale, criterion 5) An UNBUILT catalog on an MCP
+/// `query`/`search` path walks first and returns real rows -- never
+/// empty-as-success. `ensure_fresh` on an empty DB reports it walked, and the
+/// rows are present afterward.
+#[test]
+fn test_ensure_fresh_walks_unbuilt_catalog() {
+    let root = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let mut conn = temp_db(&db_dir);
+
+    create_minimal_test_repo(root.path(), "alpha");
+    create_minimal_test_repo(root.path(), "beta");
+
+    // Empty DB: nothing indexed yet.
+    assert_eq!(repo_row_count(&conn), 0);
+
+    let walked = ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap();
+    assert!(walked, "an unbuilt catalog must trigger a walk");
+    assert_eq!(
+        repo_row_count(&conn),
+        2,
+        "auto-walk populated real rows, not empty-as-success"
+    );
+}
+
+/// (Phase 4, criterion 5) The auto-walk is LOCAL only: it must NOT fetch. Proof:
+/// repos point `origin` at an unreachable host (a fetch would fail/hang), yet
+/// `ensure_fresh` indexes them and NO FETCH_HEAD is written -> `last_fetch` NULL
+/// for every row.
+#[test]
+fn test_ensure_fresh_never_fetches() {
+    let root = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let mut conn = temp_db(&db_dir);
+
+    for name in ["one", "two"] {
+        let path = create_minimal_test_repo(root.path(), name);
+        run_git(
+            &["remote", "set-url", "origin", "https://192.0.2.1/nope.git"],
+            &path,
+        );
+        // A repo that was never fetched has no FETCH_HEAD.
+        assert!(
+            !path.join(".git").join("FETCH_HEAD").exists(),
+            "precondition: FETCH_HEAD absent before any walk"
+        );
+    }
+
+    let walked = ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap();
+    assert!(walked);
+
+    // The auto-walk path writes zero FETCH_HEAD files, so last_fetch stays NULL.
+    let null_fetches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM repos WHERE last_fetch IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        null_fetches, 2,
+        "auto-walk is local-only: no FETCH_HEAD, so last_fetch is NULL"
+    );
+    for name in ["one", "two"] {
+        assert!(
+            !root
+                .path()
+                .join(name)
+                .join(".git")
+                .join("FETCH_HEAD")
+                .exists(),
+            "auto-walk must not create FETCH_HEAD for {name}"
+        );
+    }
+}
+
+/// (Phase 4, criterion 5) FRESH rows do NOT trigger a re-walk: a second
+/// `ensure_fresh` inside the staleness window is a no-op (returns `false`).
+#[test]
+fn test_ensure_fresh_skips_when_fresh() {
+    let root = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let mut conn = temp_db(&db_dir);
+
+    create_minimal_test_repo(root.path(), "svc");
+
+    // First call builds the catalog.
+    assert!(ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap());
+    // Second call, well inside a 1h window: rows are fresh, no walk.
+    let walked = ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap();
+    assert!(!walked, "fresh rows must not trigger a walk");
+}
+
+/// (Phase 4, criterion 5) STALE rows DO trigger a LOCAL re-walk: age the oldest
+/// row past the staleness window and confirm `ensure_fresh` walks again.
+#[test]
+fn test_ensure_fresh_walks_when_stale() {
+    let root = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let mut conn = temp_db(&db_dir);
+
+    create_minimal_test_repo(root.path(), "svc");
+    assert!(ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap());
+
+    // Backdate the walk stamp far into the past so it exceeds any small window.
+    conn.execute("UPDATE repos SET last_walk = 1", []).unwrap();
+
+    let walked = ensure_fresh(&mut conn, root.path(), Some(root.path()), 3, &[], 3600).unwrap();
+    assert!(
+        walked,
+        "a row older than staleness_secs must trigger a walk"
+    );
+
+    // The re-walk refreshed last_walk to ~now (well past the backdated 1).
+    let last_walk: i64 = conn
+        .query_row("SELECT last_walk FROM repos", [], |r| r.get(0))
+        .unwrap();
+    assert!(last_walk > 1, "re-walk refreshed the staleness stamp");
+}
+
 /// A subtree walk must NOT prune repos that live OUTSIDE the walked root: prune
 /// is scoped to the canonical `root` prefix (and the trailing `/%` avoids the
 /// sibling-prefix bug).

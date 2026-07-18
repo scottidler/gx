@@ -214,9 +214,21 @@ pub fn doctor() -> Result<crate::doctor::DoctorReport> {
 
 pub fn query(config: &Config, req: QueryRequest) -> Result<catalog::tools::query::QueryResult> {
     debug!("logic::query: root={:?}", req.root);
-    let conn = catalog::db::open_default()?;
+    let mut conn = catalog::db::open_default()?;
     let catalog_root = config.catalog_root();
     let requested = req.root.map(std::path::PathBuf::from);
+    // Auto-walk-on-stale: a LOCAL walk (never a fetch) refreshes the scoped
+    // subtree first when the catalog is empty/unbuilt or older than
+    // `staleness_secs`, so `query` never serves empty-as-success on an unbuilt
+    // catalog. `--fetch` stays the only network path (CLI-only).
+    catalog::walk::ensure_fresh(
+        &mut conn,
+        &catalog_root,
+        requested.as_deref(),
+        max_depth(config),
+        &config.ignore_patterns(),
+        config.catalog_staleness_secs(),
+    )?;
     let filter = catalog::tools::query::QueryFilter {
         dirty: req.dirty,
         branch: req.branch,
@@ -235,9 +247,20 @@ pub fn query(config: &Config, req: QueryRequest) -> Result<catalog::tools::query
 
 pub fn search(config: &Config, req: SearchRequest) -> Result<catalog::tools::search::SearchResult> {
     debug!("logic::search: root={:?} glob={:?}", req.root, req.glob);
-    let conn = catalog::db::open_default()?;
+    let mut conn = catalog::db::open_default()?;
     let catalog_root = config.catalog_root();
     let requested = req.root.map(std::path::PathBuf::from);
+    // Auto-walk-on-stale (LOCAL only, never a fetch): `search` reads live file
+    // content via `rg`, but it enumerates the scoped repo paths from the index,
+    // so an empty/stale catalog is walked first here too.
+    catalog::walk::ensure_fresh(
+        &mut conn,
+        &catalog_root,
+        requested.as_deref(),
+        max_depth(config),
+        &config.ignore_patterns(),
+        config.catalog_staleness_secs(),
+    )?;
     catalog::tools::search::search(
         &conn,
         &catalog_root,
