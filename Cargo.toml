@@ -1,8 +1,9 @@
 [workspace]
-members = ["gx-mcp"]
-# The gx package below is the workspace root package; `cargo run`/`cargo build`/
-# `cargo install --path .` at the repo root must keep building the gx bin, not
-# the whole workspace, so the default working set is just the root package.
+# gx is the sole member (the workspace root package); the MCP server is now the
+# `gx mcp` subcommand (embedded via mcp-io), not a separate `gx-mcp` crate.
+members = []
+# `cargo run`/`cargo build`/`cargo install --path .` at the repo root build the
+# gx bin, which is what the default working set must stay pointed at.
 default-members = ["."]
 
 [workspace.package]

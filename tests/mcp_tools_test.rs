@@ -29,8 +29,8 @@ use gx::state::{ChangeState, RepoChangeStatus};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-fn gx_mcp_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_gx-mcp")
+fn gx_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_gx")
 }
 
 // ---------------------------------------------------------------- JSON-RPC harness
@@ -46,7 +46,8 @@ impl Mcp {
     /// Spawn gx-mcp with isolated XDG dirs + CWD, complete the initialize
     /// handshake, and send `notifications/initialized`.
     fn spawn(config_home: &Path, data_home: &Path, cwd: &Path) -> Mcp {
-        let mut child = Command::new(gx_mcp_binary())
+        let mut child = Command::new(gx_binary())
+            .args(["mcp", "serve"])
             .env("XDG_CONFIG_HOME", config_home)
             .env("XDG_DATA_HOME", data_home)
             .current_dir(cwd)
@@ -640,7 +641,7 @@ fn test_stdout_carries_only_jsonrpc_across_a_tool_call() {
     assert!(refusal(&resp).is_none(), "doctor should succeed: {resp}");
 
     // The log landed in the FILE (not stdout/stderr): file-only logging held.
-    let log_file = data.join("gx").join("logs").join("gx-mcp.log");
+    let log_file = data.join("gx").join("logs").join("gx.log");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !log_file.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

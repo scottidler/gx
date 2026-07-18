@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-fn gx_mcp_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_gx-mcp")
+fn gx_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_gx")
 }
 
 // ---------------------------------------------------------------- JSON-RPC harness
@@ -55,7 +55,8 @@ impl Mcp {
         path_env: &str,
         remotes: &Path,
     ) -> Mcp {
-        let mut child = Command::new(gx_mcp_binary())
+        let mut child = Command::new(gx_binary())
+            .args(["mcp", "serve"])
             .env("XDG_CONFIG_HOME", config_home)
             .env("XDG_DATA_HOME", data_home)
             .env("PATH", path_env)

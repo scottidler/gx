@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn gx_mcp_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_gx-mcp")
+fn gx_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_gx")
 }
 
 /// Send one JSON-RPC message as a single newline-terminated line (rmcp's
@@ -75,7 +75,8 @@ fn test_initialize_handshake_and_default_readonly_tool_list() {
     let data_dir = tempfile::tempdir().expect("tempdir for XDG_DATA_HOME");
     let config_dir = tempfile::tempdir().expect("tempdir for XDG_CONFIG_HOME");
 
-    let mut child = Command::new(gx_mcp_binary())
+    let mut child = Command::new(gx_binary())
+        .args(["mcp", "serve"])
         .env("XDG_DATA_HOME", data_dir.path())
         .env("XDG_CONFIG_HOME", config_dir.path())
         .stdin(Stdio::piped())
@@ -176,7 +177,8 @@ fn test_stdout_carries_only_json_rpc_no_stray_bytes() {
     // stderr (the file-only-logging violation channel) stays empty.
     let data_dir = tempfile::tempdir().expect("tempdir for XDG_DATA_HOME");
 
-    let mut child = Command::new(gx_mcp_binary())
+    let mut child = Command::new(gx_binary())
+        .args(["mcp", "serve"])
         .env("XDG_DATA_HOME", data_dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -209,18 +211,21 @@ fn test_stdout_carries_only_json_rpc_no_stray_bytes() {
     // The log file must exist and hold the entry logging.md requires
     // (function-level entry log), proving logging landed in the FILE, not
     // on stdout/stderr.
-    let log_file = data_dir.path().join("gx").join("logs").join("gx-mcp.log");
+    let log_file = data_dir.path().join("gx").join("logs").join("gx.log");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !log_file.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
         log_file.exists(),
-        "gx-mcp must log to a file, found none at {log_file:?}"
+        "gx mcp serve must log to a file, found none at {log_file:?}"
     );
-    let log_contents = std::fs::read_to_string(&log_file).expect("read gx-mcp log file");
+    let log_contents = std::fs::read_to_string(&log_file).expect("read gx mcp log file");
+    // Post-migration the log is mcp-io's file (DEBUG), so the gx handler's own
+    // entry log (`GxMcpServer::new` / `get_info`) proves logging landed in the
+    // FILE, not on stdout/stderr. (The old `gx-mcp starting` line is gone.)
     assert!(
-        log_contents.contains("gx-mcp starting") || log_contents.contains("GxMcpServer"),
+        log_contents.contains("GxMcpServer"),
         "log file exists but is missing the expected entry-log lines: {log_contents}"
     );
 
