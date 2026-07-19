@@ -35,16 +35,28 @@ if [ -n "$creds" ]; then
   report "credential module or gh shell-out in local/src" "$creds"
 fi
 
-# 2. Remote/network git verbs passed as quoted args. The ONLY legitimate quoted
-#    "push" in production local is `git stash push` (excluded by the `stash`
-#    match). test_utils.rs is test-only scaffolding that performs a LOCAL
-#    `git clone --bare` from a temp path (no network) and is excluded here.
-verbs=$(grep -rnE '"(fetch|pull|ls-remote|clone|push)"' "$SRC" --include='*.rs' \
-  | grep -v 'stash' \
+# 2a. fetch/pull/ls-remote/clone have NO local-only homonym, so any quoted
+#     occurrence is a violation -- check unconditionally. test_utils.rs is
+#     test-only scaffolding that performs a LOCAL `git clone --bare` from a temp
+#     path (no network) and is the one excluded file.
+netverbs=$(grep -rnE '"(fetch|pull|ls-remote|clone)"' "$SRC" --include='*.rs' \
   | grep -v '/test_utils.rs:' \
   || true)
-if [ -n "$verbs" ]; then
-  report "remote git network verb in local/src" "$verbs"
+if [ -n "$netverbs" ]; then
+  report "remote git network verb in local/src" "$netverbs"
+fi
+
+# 2b. "push": the ONLY legitimate local push is `git stash push`, where the args
+#     are the adjacent tokens "stash", "push". Flag any quoted "push" NOT in that
+#     adjacency. This is tighter than a whole-line `grep -v stash`, which a real
+#     network verb sharing a line with the word "stash" would evade (audit finding,
+#     Track B0 implementation audit 2026-07-18).
+pushes=$(grep -rnE '"push"' "$SRC" --include='*.rs' \
+  | grep -vE '"stash"[[:space:]]*,[[:space:]]*"push"' \
+  | grep -v '/test_utils.rs:' \
+  || true)
+if [ -n "$pushes" ]; then
+  report "remote git push in local/src" "$pushes"
 fi
 
 if [ "$status" -ne 0 ]; then
