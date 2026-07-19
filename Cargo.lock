@@ -125,7 +125,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "catalog"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "eyre",
  "local",
@@ -569,7 +569,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gx"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -751,7 +751,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "local"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "colored",
@@ -988,7 +988,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "catalog",
  "chrono",
