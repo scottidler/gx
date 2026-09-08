@@ -345,29 +345,6 @@ fn test_catalog_unknown_field_fails_loudly() {
     );
 }
 
-/// `~` expansion: a bare `~` and a `~/...` path both resolve against `$HOME`;
-/// a path with no leading `~` passes through unchanged.
-#[test]
-fn test_expand_tilde() {
-    let guard = env_lock();
-    let prior = std::env::var("HOME").ok();
-
-    let home = TempDir::new().unwrap();
-    unsafe { std::env::set_var("HOME", home.path()) };
-
-    assert_eq!(
-        expand_tilde(Path::new("~/repos")),
-        home.path().join("repos")
-    );
-    assert_eq!(expand_tilde(Path::new("~")), home.path());
-    assert_eq!(
-        expand_tilde(Path::new("/srv/repos")),
-        PathBuf::from("/srv/repos")
-    );
-
-    match prior {
-        Some(v) => unsafe { std::env::set_var("HOME", v) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
-    drop(guard);
-}
+// expand_tilde is now the `expand-tilde` crate's fn (re-exported in
+// config.rs), which carries its own equivalent bare/prefixed/passthrough
+// coverage.

@@ -59,23 +59,10 @@ pub fn xdg_cache_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".cache"))
 }
 
-/// Expand a leading `~` (bare, or `~/...`) to `$HOME`. A path with no leading
-/// `~` passes through unchanged. When `$HOME` cannot be resolved, the literal
-/// path is returned unchanged rather than fabricating a `~`-prefixed path --
-/// the OS does not expand a literal `~`, so silently "falling back" would
-/// create a directory named `~` under the CWD instead (rust.md unwrap policy).
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    path.to_path_buf()
-}
+// Expand a leading `~` (bare, or `~/...`) to `$HOME`; anything else passes
+// through unchanged. Was a local fn here; now shared via the `expand-tilde`
+// crate, behaviorally identical for these two cases.
+use expand_tilde::expand_tilde;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

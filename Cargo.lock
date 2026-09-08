@@ -401,6 +401,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "expand-tilde"
+version = "0.1.0"
+source = "git+ssh://git@github.com/scottidler/expand-tilde?tag=v0.1.0#cb0f99589e233bccf7c71c4f88cd776a46830562"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -756,6 +764,7 @@ dependencies = [
  "chrono",
  "colored",
  "dirs",
+ "expand-tilde",
  "eyre",
  "glob",
  "log",
