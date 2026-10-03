@@ -46,7 +46,14 @@ jobs:
       run: sudo apt-get install -y ripgrep
 
     - name: Run tests
-      run: cargo test --workspace --verbose
+      run: |
+        rc=0
+        timeout -k 10 480 cargo test --workspace --verbose || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "cargo test exited rc=$rc; process table follows"
+          ps -efH
+        fi
+        exit "$rc"
 
     - name: Check formatting
       run: cargo fmt --all --check
