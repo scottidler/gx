@@ -8,27 +8,24 @@ jobs:
     timeout-minutes: 5
     steps:
     - run: |
-        which -a kill; ls -l "$(which kill)"; kill --version 2>&1 | head -2; cat /etc/os-release | head -2
-        echo "--- plain form"
-        setsid sleep 100 >/dev/null 2>&1 < /dev/null &
-        sleep 1; P=$(pgrep -n -x sleep); echo "sleep pid=$P pgid=$(ps -o pgid= -p $P)"
-        /usr/bin/kill -KILL -$P; echo "rc=$?"
-        sleep 1; ps -eo pid,pgid,stat,args | grep -v grep | grep "sleep 100" || echo "sleeper gone"
+        which -a kill; ls -l "$(which kill)"; dpkg -S "$(readlink -f "$(which kill)")" 2>&1; kill --version 2>&1 | head -2; head -2 /etc/os-release
+        cat > "$RUNNER_TEMP/exp.sh" <<'X'
+        #!/bin/bash
+        for form in 'plain' 'dashdash' 'sflag'; do
+          setsid sleep 100 >/dev/null 2>&1 < /dev/null &
+          sleep 1
+          P=$(pgrep -n -x sleep)
+          echo "form=$form pid=$P pgid=$(ps -o pgid= -p $P | tr -d ' ')"
+          case $form in
+            plain) /usr/bin/kill -KILL -$P; echo "rc=$?";;
+            dashdash) /usr/bin/kill -KILL -- -$P; echo "rc=$?";;
+            sflag) /usr/bin/kill -s KILL -- -$P; echo "rc=$?";;
+          esac
+          sleep 1
+          ps -eo pid,pgid,stat,args | grep -v grep | grep "sleep 100" && echo "SLEEPER SURVIVED" || echo "sleeper gone"
+          pkill -x sleep || true
+        done
+        X
+        sed -i 's/^        //' "$RUNNER_TEMP/exp.sh"
+        sudo unshare --pid --fork --mount-proc bash "$RUNNER_TEMP/exp.sh" 2>&1
         echo "--- done; runner still alive"
-  matrix_each:
-    runs-on: ubuntu-latest
-    timeout-minutes: 6
-    strategy:
-      fail-fast: false
-      matrix:
-        t: [test_agent_timeout, test_agent_nonzero, test_garbage_patch, test_empty_diff, test_apply_refuses, test_happy_path]
-    steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.96.0
-    - run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
-        git config --global init.defaultBranch main
-    - name: ${{ matrix.t }}
-      timeout-minutes: 4
-      run: cargo test -p gx --test e2e_llm_matrix ${{ matrix.t }} -- --nocapture
