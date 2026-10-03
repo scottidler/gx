@@ -396,6 +396,8 @@ fn test_undo_reverses_applied_llm_campaign_and_removes_proposal() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("PATH", &path_env)
         .env("GX_TEST_REMOTES", remotes.path())
+        .env("GITHUB_PAT_HOME", "shim-token")
+        .env("GITHUB_PAT_WORK", "shim-token")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("gx undo failed to spawn");

@@ -239,6 +239,8 @@ fn test_undo_open_pr_campaign_end_to_end() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("PATH", &path_env)
         .env("GX_TEST_REMOTES", remotes.path())
+        .env("GITHUB_PAT_HOME", "shim-token")
+        .env("GITHUB_PAT_WORK", "shim-token")
         .output()
         .expect("gx undo failed to spawn");
     assert!(
@@ -295,6 +297,8 @@ fn test_undo_open_pr_campaign_end_to_end() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("PATH", &path_env)
         .env("GX_TEST_REMOTES", remotes.path())
+        .env("GITHUB_PAT_HOME", "shim-token")
+        .env("GITHUB_PAT_WORK", "shim-token")
         .output()
         .expect("second gx undo failed to spawn");
     assert!(
@@ -385,6 +389,8 @@ fn test_undo_recovery_only_pushed_deletes_remote_branch() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("PATH", &path_env)
         .env("GX_TEST_REMOTES", remotes.path())
+        .env("GITHUB_PAT_HOME", "shim-token")
+        .env("GITHUB_PAT_WORK", "shim-token")
         .output()
         .expect("gx undo failed to spawn");
     assert!(
@@ -427,6 +433,8 @@ fn test_undo_recovery_only_pushed_deletes_remote_branch() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("PATH", &path_env)
         .env("GX_TEST_REMOTES", remotes.path())
+        .env("GITHUB_PAT_HOME", "shim-token")
+        .env("GITHUB_PAT_WORK", "shim-token")
         .output()
         .expect("second gx undo failed to spawn");
     assert!(
