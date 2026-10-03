@@ -61,6 +61,10 @@ impl Mcp {
             .env("XDG_DATA_HOME", data_home)
             .env("PATH", path_env)
             .env("GX_TEST_REMOTES", remotes)
+            // The gh shim ignores auth, but gx fails loud on an unset persona
+            // token (CI has none), which fails the org fetch closed.
+            .env("GITHUB_PAT_HOME", "shim-token")
+            .env("GITHUB_PAT_WORK", "shim-token")
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
