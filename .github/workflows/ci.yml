@@ -46,14 +46,22 @@ jobs:
       run: sudo apt-get install -y ripgrep
 
     - name: Run tests
+      timeout-minutes: 8
       run: |
-        rc=0
-        timeout -k 10 480 cargo test --workspace --verbose || rc=$?
-        if [ "$rc" -ne 0 ]; then
-          echo "cargo test exited rc=$rc; process table follows"
-          ps -efH
-        fi
+        setsid nohup sh -c 'while true; do date -u; free -m | sed -n 2p; df -h / /tmp | tail -2; uptime; ps -eo pid,ppid,stat,etime,rss,args --sort=-rss | head -8; sleep 20; done' > "$RUNNER_TEMP/sys.log" 2>&1 < /dev/null &
+        cargo test --workspace --verbose > "$RUNNER_TEMP/test.log" 2>&1
+        rc=$?
+        tail -n 200 "$RUNNER_TEMP/test.log"
         exit "$rc"
+
+    - name: Diagnose a failed or hung test step
+      if: always()
+      run: |
+        echo "=== running-over-60s markers"; grep -a "has been running" "$RUNNER_TEMP/test.log" || true
+        echo "=== last test lines"; grep -aE "^test |Running " "$RUNNER_TEMP/test.log" | tail -15 || true
+        echo "=== tail of test.log"; tail -n 40 "$RUNNER_TEMP/test.log" || true
+        echo "=== sys.log tail"; tail -n 60 "$RUNNER_TEMP/sys.log" || true
+        echo "=== process table"; ps -efH | tail -40
 
     - name: Check formatting
       run: cargo fmt --all --check
