@@ -68,16 +68,20 @@ fn describe(cmd: &Command) -> String {
     }
 }
 
-/// SIGKILL an entire process group by pgid, via `/bin/kill -KILL -<pgid>`. std
-/// exposes no group-kill and `libc` is not a dependency; the `kill` binary is
-/// always present on the Unix targets gx runs on (harvested from `propose.rs`).
+/// SIGKILL an entire process group by pgid via `kill -KILL -- -<pgid>`. std
+/// exposes no group-kill and `libc` is not a dependency. The `--` is
+/// load-bearing: procps-ng `kill` (Ubuntu 24.04, the CI runner) exits 1 on
+/// `kill -KILL -<pgid>` without it, leaving the group alive and the caller
+/// blocked until the agent exits on its own. A non-zero exit is logged loudly.
 fn kill_process_group(pgid: u32) {
-    let status = Command::new("kill")
-        .arg("-KILL")
+    match Command::new("kill")
+        .args(["-KILL", "--"])
         .arg(format!("-{pgid}"))
-        .status();
-    if let Err(e) = status {
-        warn!("kill_process_group: failed to signal group {pgid}: {e}");
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => warn!("kill_process_group: `kill -KILL -- -{pgid}` exited {status}"),
+        Err(e) => warn!("kill_process_group: failed to signal group {pgid}: {e}"),
     }
 }
 
