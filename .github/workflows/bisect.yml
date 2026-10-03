@@ -3,35 +3,32 @@ on:
   push:
     branches: [ main ]
 jobs:
-  t:
+  killsem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - run: |
+        which -a kill; ls -l "$(which kill)"; kill --version 2>&1 | head -2; cat /etc/os-release | head -2
+        echo "--- plain form"
+        setsid sleep 100 >/dev/null 2>&1 < /dev/null &
+        sleep 1; P=$(pgrep -n -x sleep); echo "sleep pid=$P pgid=$(ps -o pgid= -p $P)"
+        /usr/bin/kill -KILL -$P; echo "rc=$?"
+        sleep 1; ps -eo pid,pgid,stat,args | grep -v grep | grep "sleep 100" || echo "sleeper gone"
+        echo "--- done; runner still alive"
+  matrix_each:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     strategy:
       fail-fast: false
       matrix:
-        t: [e2e_llm_cli, e2e_llm_matrix, e2e_reporting, e2e_undo_lifecycle, integration_tests, lock_contention_test, mcp_handshake_test, mcp_tools_test, remote_status_tests, ssh_integration_tests, status_tests, unified_formatting_tests]
+        t: [test_agent_timeout, test_agent_nonzero, test_garbage_patch, test_empty_diff, test_apply_refuses, test_happy_path]
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@1.96.0
-    - run: sudo apt-get install -y ripgrep
     - run: |
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
         git config --global init.defaultBranch main
-    - name: test ${{ matrix.t }}
+    - name: ${{ matrix.t }}
       timeout-minutes: 4
-      run: cargo test -p gx --test ${{ matrix.t }} -- --nocapture
-  rest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.96.0
-    - run: sudo apt-get install -y ripgrep
-    - run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
-        git config --global init.defaultBranch main
-    - name: libs and doctests
-      timeout-minutes: 5
-      run: cargo test --workspace --lib --doc
+      run: cargo test -p gx --test e2e_llm_matrix ${{ matrix.t }} -- --nocapture
