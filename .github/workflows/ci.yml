@@ -46,6 +46,11 @@ jobs:
       run: sudo apt-get install -y ripgrep
 
     - name: Run tests
+      # Unit and e2e tests drive a PATH-shimmed gh; gx still resolves a persona
+      # token first and fails loud when the env var is unset. Dummy values.
+      env:
+        GITHUB_PAT_HOME: ci-dummy-token
+        GITHUB_PAT_WORK: ci-dummy-token
       run: cargo test --workspace --verbose
 
     - name: Check formatting
