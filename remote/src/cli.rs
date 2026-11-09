@@ -70,7 +70,7 @@ fn get_effective_max_depth_default() -> usize {
 #[command(
     name = "gx",
     about = "git operations across multiple repositories",
-    version = env!("GIT_DESCRIBE")
+    version = env!("BUILD_VERSION")
 )]
 pub struct Cli {
     /// Working directory (only changes from current directory if specified)

@@ -41,3 +41,6 @@ remote = { path = "remote" }
 serde_json = "1.0"
 serde_yaml = "0.9.34"
 tempfile = "3.22"
+
+[build-dependencies]
+build-version = { git = "https://github.com/tatari-tv/build-version-rs", tag = "v0.1.0", version = "0.1.0" }
